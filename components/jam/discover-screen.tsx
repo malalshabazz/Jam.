@@ -18,6 +18,7 @@ import { creatorRoles, locationSuggestions } from "@/lib/options";
 import {
   fetchFeedVideos,
   likeCreator as likeCreatorInDatabase,
+  saveVideo as saveVideoInDatabase,
   sendMessage,
   type FeedVideo,
 } from "@/lib/social-data";
@@ -329,11 +330,11 @@ export function DiscoverScreen() {
 
   function likeVideo(item: FeedVideo) {
     if (item.likedByMe) {
-      showToast("Already liked.");
+      showToast("Already saved.");
       return;
     }
 
-    likeCreator(item);
+    saveFeedVideo(item);
   }
 
   function openDm(videoId: string) {
@@ -396,6 +397,28 @@ export function DiscoverScreen() {
       .catch((error: unknown) => {
         showToast(error instanceof Error ? error.message : "Could not like creator.");
       });
+    return true;
+  }
+
+  function saveFeedVideo(item: FeedVideo) {
+    if (!userId) return false;
+    if (item.likedByMe) return true;
+
+    setItems((current) =>
+      current.map((entry) =>
+        entry.id === item.id ? { ...entry, likedByMe: true } : entry,
+      ),
+    );
+
+    saveVideoInDatabase(userId, item.id).catch((error: unknown) => {
+      setItems((current) =>
+        current.map((entry) =>
+          entry.id === item.id ? { ...entry, likedByMe: false } : entry,
+        ),
+      );
+      showToast(error instanceof Error ? error.message : "Could not save video.");
+    });
+
     return true;
   }
 

@@ -12,6 +12,9 @@ export type FeedVideo = {
   bio: string | null;
   caption: string;
   hashtags: string[];
+  categories: string[];
+  roles: string[];
+  genres: string[];
   mediaUrl: string | null;
   cloudflareStreamId: string | null;
   earlyAdopter: boolean;
@@ -39,14 +42,28 @@ export type Profile = {
 
 export type ProfileVideo = {
   id: string;
+  userId?: string;
   caption: string | null;
   hashtags?: string[] | null;
+  categories?: string[] | null;
+  roles?: string[] | null;
+  genres?: string[] | null;
   media_url?: string | null;
   mediaUrl?: string | null;
   cloudflare_stream_id?: string | null;
   cloudflareStreamId?: string | null;
   created_at?: string;
   creatorName?: string;
+  role?: string;
+  location?: string;
+  avatarUrl?: string | null;
+  avatarFallback?: string;
+  earlyAdopter?: boolean;
+  likedByMe?: boolean;
+  likedMe?: boolean;
+  mutual?: boolean;
+  jammedByMe?: boolean;
+  jammedMe?: boolean;
 };
 
 export type InboxRequest = {
@@ -59,11 +76,13 @@ export type InboxRequest = {
   avatarFallback: string;
   preview: string;
   sentAt: string;
+  unreadCount: number;
   earlyAdopter: boolean;
 };
 
 export type ChatMessage = {
   id: string;
+  serverId?: string;
   body: string;
   incoming: boolean;
   createdAt: string;
@@ -80,6 +99,7 @@ export type Conversation = {
   lastMessage: string;
   timestamp: string;
   unread: boolean;
+  unreadCount: number;
   earlyAdopter: boolean;
   unlocked: boolean;
   messages: ChatMessage[];
@@ -111,6 +131,9 @@ type VideoRow = {
   user_id: string;
   caption: string | null;
   hashtags: string[] | null;
+  categories: string[] | null;
+  roles: string[] | null;
+  genres: string[] | null;
   media_url: string | null;
   cloudflare_stream_id: string | null;
   created_at: string;
@@ -144,6 +167,19 @@ type MessageRow = {
   created_at: string;
 };
 
+const VIDEO_COLUMNS_WITH_TAGS =
+  "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, created_at";
+const OWN_VIDEO_COLUMNS_WITH_TAGS =
+  "id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, created_at";
+const VIDEO_COLUMNS_WITH_CATEGORIES =
+  "id, user_id, caption, hashtags, categories, media_url, cloudflare_stream_id, created_at";
+const OWN_VIDEO_COLUMNS_WITH_CATEGORIES =
+  "id, caption, hashtags, categories, media_url, cloudflare_stream_id, created_at";
+const VIDEO_COLUMNS_LEGACY =
+  "id, user_id, caption, hashtags, media_url, cloudflare_stream_id, created_at";
+const OWN_VIDEO_COLUMNS_LEGACY =
+  "id, caption, hashtags, media_url, cloudflare_stream_id, created_at";
+
 export async function fetchProfile(userId: string) {
   const { data, error } = await supabase
     .from("profiles")
@@ -171,11 +207,33 @@ export async function fetchCreatorProfile(userId: string) {
 }
 
 export async function fetchCreatorVideos(userId: string) {
-  const { data, error } = await supabase
+  const result = await supabase
     .from("videos")
-    .select("id, caption, hashtags, media_url, cloudflare_stream_id, created_at")
+    .select(OWN_VIDEO_COLUMNS_WITH_TAGS)
     .eq("user_id", userId)
     .order("created_at", { ascending: false });
+  let data = result.data as ProfileVideo[] | null;
+  let error = result.error;
+
+  if (error && isMissingSchemaError(error)) {
+    const categoryRetry = await supabase
+      .from("videos")
+      .select(OWN_VIDEO_COLUMNS_WITH_CATEGORIES)
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+    if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
+      const legacyRetry = await supabase
+        .from("videos")
+        .select(OWN_VIDEO_COLUMNS_LEGACY)
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false });
+      data = legacyRetry.data as ProfileVideo[] | null;
+      error = legacyRetry.error;
+    } else {
+      data = categoryRetry.data as ProfileVideo[] | null;
+      error = categoryRetry.error;
+    }
+  }
 
   if (error) throw error;
   return (data ?? []) as ProfileVideo[];
@@ -221,15 +279,37 @@ export async function createEarlyAdopterWelcome() {
 }
 
 export async function fetchFeedVideos(currentUserId: string) {
-  const [{ data: videos, error: videosError }, savedVideos, jams] = await Promise.all([
+  const [videoResult, savedVideos, jams] = await Promise.all([
     supabase
       .from("videos")
-      .select("id, user_id, caption, hashtags, media_url, cloudflare_stream_id, created_at")
+      .select(VIDEO_COLUMNS_WITH_TAGS)
       .neq("user_id", currentUserId)
       .order("created_at", { ascending: false }),
-    fetchSavedVideos(currentUserId),
+    fetchSavedVideoRows(currentUserId),
     fetchRelevantJams(currentUserId),
   ]);
+  let videos = videoResult.data as VideoRow[] | null;
+  let videosError = videoResult.error;
+
+  if (videosError && isMissingSchemaError(videosError)) {
+    const categoryRetry = await supabase
+      .from("videos")
+      .select(VIDEO_COLUMNS_WITH_CATEGORIES)
+      .neq("user_id", currentUserId)
+      .order("created_at", { ascending: false });
+    if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
+      const legacyRetry = await supabase
+        .from("videos")
+        .select(VIDEO_COLUMNS_LEGACY)
+        .neq("user_id", currentUserId)
+        .order("created_at", { ascending: false });
+      videos = legacyRetry.data as VideoRow[] | null;
+      videosError = legacyRetry.error;
+    } else {
+      videos = categoryRetry.data as VideoRow[] | null;
+      videosError = categoryRetry.error;
+    }
+  }
 
   if (videosError) throw videosError;
 
@@ -259,26 +339,51 @@ export async function fetchFeedVideos(currentUserId: string) {
 }
 
 export async function fetchMyVideos(currentUserId: string) {
-  const { data, error } = await supabase
+  const result = await supabase
     .from("videos")
-    .select("id, caption, hashtags, media_url, cloudflare_stream_id, created_at")
+    .select(OWN_VIDEO_COLUMNS_WITH_TAGS)
     .eq("user_id", currentUserId)
     .order("created_at", { ascending: false });
+  let data = result.data as ProfileVideo[] | null;
+  let error = result.error;
+
+  if (error && isMissingSchemaError(error)) {
+    const categoryRetry = await supabase
+      .from("videos")
+      .select(OWN_VIDEO_COLUMNS_WITH_CATEGORIES)
+      .eq("user_id", currentUserId)
+      .order("created_at", { ascending: false });
+    if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
+      const legacyRetry = await supabase
+        .from("videos")
+        .select(OWN_VIDEO_COLUMNS_LEGACY)
+        .eq("user_id", currentUserId)
+        .order("created_at", { ascending: false });
+      data = legacyRetry.data as ProfileVideo[] | null;
+      error = legacyRetry.error;
+    } else {
+      data = categoryRetry.data as ProfileVideo[] | null;
+      error = categoryRetry.error;
+    }
+  }
 
   if (error) throw error;
   return (data ?? []) as ProfileVideo[];
 }
 
-export async function fetchLikedVideos(currentUserId: string) {
-  const { data: savedVideos, error: savedVideosError } = await supabase
-    .from("saved_videos")
-    .select("video_id, created_at")
-    .eq("user_id", currentUserId)
-    .order("created_at", { ascending: false });
+export async function fetchSavedVideos(currentUserId: string) {
+  const [{ data: savedVideos, error: savedVideosError }, jams] = await Promise.all([
+    supabase
+      .from("saved_videos")
+      .select("video_id, created_at")
+      .eq("user_id", currentUserId)
+      .order("created_at", { ascending: false }),
+    fetchRelevantJams(currentUserId),
+  ]);
 
   if (savedVideosError) {
     if (isMissingSchemaError(savedVideosError)) {
-      return fetchLegacyLikedVideos(currentUserId);
+      return fetchLocalSavedVideos(currentUserId);
     }
     throw savedVideosError;
   }
@@ -286,43 +391,69 @@ export async function fetchLikedVideos(currentUserId: string) {
   const savedIds = (savedVideos ?? []).map((savedVideo) => savedVideo.video_id);
   if (savedIds.length === 0) return [];
 
-  const { data: videos, error: videosError } = await supabase
+  const videoResult = await supabase
     .from("videos")
-    .select("id, user_id, caption, hashtags, media_url, cloudflare_stream_id, created_at")
+    .select(VIDEO_COLUMNS_WITH_TAGS)
     .in("id", savedIds)
     .order("created_at", { ascending: false });
+  let videos = videoResult.data as VideoRow[] | null;
+  let videosError = videoResult.error;
+
+  if (videosError && isMissingSchemaError(videosError)) {
+    const categoryRetry = await supabase
+      .from("videos")
+      .select(VIDEO_COLUMNS_WITH_CATEGORIES)
+      .in("id", savedIds)
+      .order("created_at", { ascending: false });
+    if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
+      const legacyRetry = await supabase
+        .from("videos")
+        .select(VIDEO_COLUMNS_LEGACY)
+        .in("id", savedIds)
+        .order("created_at", { ascending: false });
+      videos = legacyRetry.data as VideoRow[] | null;
+      videosError = legacyRetry.error;
+    } else {
+      videos = categoryRetry.data as VideoRow[] | null;
+      videosError = categoryRetry.error;
+    }
+  }
 
   if (videosError) throw videosError;
 
   const videoRows = (videos ?? []) as VideoRow[];
   const profiles = await fetchProfilesByIds(videoRows.map((video) => video.user_id));
+  const jammedByMe = new Set(
+    jams.filter((jam) => jam.requester_id === currentUserId).map((jam) => jam.recipient_id),
+  );
+  const jammedMe = new Set(
+    jams.filter((jam) => jam.recipient_id === currentUserId).map((jam) => jam.requester_id),
+  );
+  const connected = new Set(
+    jams
+      .filter((jam) => jam.connected_at)
+      .map((jam) =>
+        jam.requester_id === currentUserId ? jam.recipient_id : jam.requester_id,
+      ),
+  );
 
-  return videoRows
-    .map((video) => {
-      const profile = profiles.get(video.user_id);
-      if (!profile) return null;
-
-      return {
-        id: video.id,
-        creatorName: getDisplayName(profile),
-        caption: video.caption ?? "",
-        hashtags: video.hashtags ?? [],
-        mediaUrl: video.media_url,
-        cloudflareStreamId: video.cloudflare_stream_id,
-      };
-    })
-    .filter((video): video is NonNullable<typeof video> => Boolean(video));
+  return videoRows.map((video) =>
+    toSavedProfileVideo(video, profiles.get(video.user_id), true, jammedByMe, jammedMe, connected),
+  );
 }
 
 export async function saveVideo(currentUserId: string, videoId: string) {
-  const { error } = await supabase.from("saved_videos").insert({
-    user_id: currentUserId,
-    video_id: videoId,
-  });
+  const { error } = await supabase.from("saved_videos").upsert(
+    {
+      user_id: currentUserId,
+      video_id: videoId,
+    },
+    { onConflict: "user_id,video_id" },
+  );
 
   if (error && error.code !== "23505") {
     if (isMissingSchemaError(error)) {
-      await saveLegacyVideoLike(currentUserId, videoId);
+      await addLocalSavedVideoId(currentUserId, videoId);
       return;
     }
     throw error;
@@ -338,19 +469,32 @@ export async function unsaveVideo(currentUserId: string, videoId: string) {
 
   if (error) {
     if (isMissingSchemaError(error)) {
-      await deleteLegacyVideoLike(currentUserId, videoId);
+      await removeLocalSavedVideoId(currentUserId, videoId);
       return;
     }
     throw error;
   }
 }
 
-export async function likeCreator(currentUserId: string, likedUserId: string) {
+export async function sendCreatorJamRequest(currentUserId: string, likedUserId: string) {
   try {
     await sendJamRequest(likedUserId, "");
   } catch (error) {
     if (!isMissingFunctionError(error)) throw error;
     await insertLegacyCreatorLike(currentUserId, likedUserId);
+  }
+}
+
+export async function removeJamConnection(otherUserId: string) {
+  const { error } = await supabase.rpc("remove_jam_connection", {
+    other_user_id: otherUserId,
+  });
+
+  if (error) {
+    if (isMissingFunctionError(error)) {
+      throw new Error("Unjam is not available yet. Apply migration 011_remove_jam_connection.sql to Supabase.");
+    }
+    throw error;
   }
 }
 
@@ -406,6 +550,44 @@ export async function sendMessage(recipientUserId: string, body: string) {
 
   if (error) throw error;
   return data as MessageRow;
+}
+
+export async function editMessage(messageId: string, body: string) {
+  const { data, error } = await supabase.rpc("edit_direct_message", {
+    message_id: messageId,
+    message_body: body,
+  });
+
+  if (error) throw error;
+  return data as MessageRow;
+}
+
+export async function deleteMessage(messageId: string) {
+  const { error } = await supabase.rpc("delete_direct_message", {
+    message_id: messageId,
+  });
+
+  if (error) throw error;
+}
+
+export async function markConversationRead(currentUserId: string, otherUserId: string) {
+  const { error } = await supabase
+    .from("direct_messages")
+    .update({ read_at: new Date().toISOString() })
+    .eq("recipient_id", currentUserId)
+    .eq("sender_id", otherUserId)
+    .is("read_at", null);
+
+  if (error) throw error;
+}
+
+export async function markInboxMessageRead(messageId: string) {
+  const { error } = await supabase
+    .from("inbox_messages")
+    .update({ read: true })
+    .eq("id", messageId);
+
+  if (error) throw error;
 }
 
 export async function fetchInbox(currentUserId: string): Promise<InboxData> {
@@ -467,6 +649,7 @@ export async function fetchInbox(currentUserId: string): Promise<InboxData> {
         .filter((message) => message.recipient_id === currentUserId)
         .sort((a, b) => a.created_at.localeCompare(b.created_at));
       const latestIncomingMessage = incomingThread.at(-1);
+      const unreadCount = incomingThread.filter((message) => message.read_at === null).length;
       const incomingJam = jams
         .filter((jam) => jam.requester_id === requestUserId && jam.recipient_id === currentUserId)
         .sort((a, b) => a.created_at.localeCompare(b.created_at))
@@ -489,6 +672,7 @@ export async function fetchInbox(currentUserId: string): Promise<InboxData> {
         avatarFallback: getAvatarFallback(profile),
         preview: latestIncomingMessage?.body ?? "wants to jam with you",
         sentAt: formatRelativeTime(latestActivityAt),
+        unreadCount,
         earlyAdopter: Boolean(profile.early_adopter),
         sortAt: latestActivityAt,
       };
@@ -505,6 +689,7 @@ export async function fetchInbox(currentUserId: string): Promise<InboxData> {
       avatarFallback: request.avatarFallback,
       preview: request.preview,
       sentAt: request.sentAt,
+      unreadCount: request.unreadCount,
       earlyAdopter: request.earlyAdopter,
     }));
   const sentUserIds = new Set([
@@ -540,29 +725,117 @@ export async function fetchInbox(currentUserId: string): Promise<InboxData> {
 export async function createVideo(input: {
   userId: string;
   caption: string;
-  hashtags: string[];
+  roles: string[];
+  genres: string[];
   mediaUrl?: string | null;
   cloudflareStreamId?: string | null;
 }) {
-  const { error } = await supabase.from("videos").insert({
-    user_id: input.userId,
-    caption: input.caption,
-    hashtags: input.hashtags,
-    media_url: input.mediaUrl ?? null,
-    cloudflare_stream_id: input.cloudflareStreamId ?? null,
+  const categories = [...input.roles, ...input.genres];
+  const mediaUrl = input.mediaUrl ?? getCloudflarePlaybackUrl(input.cloudflareStreamId);
+  logVideoDatabaseStep("createVideo start", {
+    hasCloudflareStreamId: Boolean(input.cloudflareStreamId),
+    hasMediaUrl: Boolean(mediaUrl),
+    captionLength: input.caption.length,
+    roleCount: input.roles.length,
+    genreCount: input.genres.length,
   });
+  const insertAttempts: Array<Record<string, unknown>> = [
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      roles: input.roles,
+      genres: input.genres,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+    },
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+    },
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      roles: input.roles,
+      genres: input.genres,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+    },
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+    },
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      hashtags: categories,
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+    },
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      hashtags: categories,
+      media_url: mediaUrl,
+    },
+  ];
 
+  let lastSchemaError: unknown = null;
+  for (const [index, payload] of insertAttempts.entries()) {
+    const attempt = index + 1;
+    logVideoDatabaseStep("createVideo insert attempt start", {
+      attempt,
+      columns: Object.keys(payload),
+      hasCloudflareStreamIdColumn: "cloudflare_stream_id" in payload,
+      hasRolesColumns: "roles" in payload || "genres" in payload,
+      hasCategoriesColumn: "categories" in payload,
+    });
+    const { error } = await supabase.from("videos").insert(payload);
+    if (!error) {
+      logVideoDatabaseStep("createVideo insert attempt success", { attempt });
+      return;
+    }
+    logVideoDatabaseStep("createVideo insert attempt failed", {
+      attempt,
+      schemaFallback: isMissingSchemaError(error),
+      ...getErrorDetails(error),
+    });
+    if (!isMissingSchemaError(error)) {
+      logVideoDatabaseStep("createVideo failed", {
+        attempt,
+        ...getErrorDetails(error),
+      });
+      throw error;
+    }
+    lastSchemaError = error;
+  }
+
+  logVideoDatabaseStep("createVideo failed all schema attempts", getErrorDetails(lastSchemaError));
+  throw lastSchemaError;
+}
+
+export async function deleteVideo(videoId: string) {
+  const { error } = await supabase.from("videos").delete().eq("id", videoId);
   if (error) throw error;
 }
 
-async function fetchSavedVideos(currentUserId: string) {
+async function fetchSavedVideoRows(currentUserId: string) {
   const { data, error } = await supabase
     .from("saved_videos")
     .select("user_id, video_id, created_at")
     .eq("user_id", currentUserId);
 
   if (error) {
-    if (isMissingSchemaError(error)) return fetchLegacySavedVideos(currentUserId);
+    if (isMissingSchemaError(error)) return fetchLocalSavedVideoRows(currentUserId);
     throw error;
   }
   return (data ?? []) as SavedVideoRow[];
@@ -614,106 +887,82 @@ async function fetchProfilesByIds(userIds: string[]) {
   return new Map(((data ?? []) as ProfileRow[]).map((profile) => [profile.id, profile]));
 }
 
-async function fetchLegacySavedVideos(currentUserId: string) {
-  const likes = await fetchRelevantLegacyLikes(currentUserId);
-  const locallyUnsavedVideoIds = await getLegacyUnsavedVideoIds(currentUserId);
-  const likedCreatorIds = likes
-    .filter((like) => like.liker_id === currentUserId)
-    .map((like) => like.liked_id);
-
-  if (likedCreatorIds.length === 0) return [];
+async function fetchLocalSavedVideoRows(currentUserId: string) {
+  const savedVideoIds = await getLocalSavedVideoIds(currentUserId);
+  if (savedVideoIds.size === 0) return [];
 
   const { data: videos, error } = await supabase
     .from("videos")
     .select("id, user_id, created_at")
-    .in("user_id", likedCreatorIds);
+    .in("id", [...savedVideoIds]);
 
   if (error) throw error;
 
-  return ((videos ?? []) as Array<Pick<VideoRow, "id" | "user_id" | "created_at">>)
-    .filter((video) => !locallyUnsavedVideoIds.has(video.id))
-    .map((video) => ({
+  return ((videos ?? []) as Array<Pick<VideoRow, "id" | "user_id" | "created_at">>).map(
+    (video) => ({
       user_id: currentUserId,
       video_id: video.id,
       created_at: video.created_at,
-    }));
+    }),
+  );
 }
 
-async function fetchLegacyLikedVideos(currentUserId: string) {
-  const likes = await fetchRelevantLegacyLikes(currentUserId);
-  const locallyUnsavedVideoIds = await getLegacyUnsavedVideoIds(currentUserId);
-  const likedCreatorIds = likes
-    .filter((like) => like.liker_id === currentUserId)
-    .map((like) => like.liked_id);
+async function fetchLocalSavedVideos(currentUserId: string) {
+  const savedVideoIds = await getLocalSavedVideoIds(currentUserId);
+  if (savedVideoIds.size === 0) return [];
 
-  if (likedCreatorIds.length === 0) return [];
+  const [videoResult, jams] = await Promise.all([
+    supabase
+      .from("videos")
+      .select(VIDEO_COLUMNS_WITH_TAGS)
+      .in("id", [...savedVideoIds])
+      .order("created_at", { ascending: false }),
+    fetchRelevantJams(currentUserId),
+  ]);
+  let videos = videoResult.data as VideoRow[] | null;
+  let videosError = videoResult.error;
 
-  const { data: videos, error: videosError } = await supabase
-    .from("videos")
-    .select("id, user_id, caption, hashtags, media_url, cloudflare_stream_id, created_at")
-    .in("user_id", likedCreatorIds)
-    .order("created_at", { ascending: false });
+  if (videosError && isMissingSchemaError(videosError)) {
+    const categoryRetry = await supabase
+      .from("videos")
+      .select(VIDEO_COLUMNS_WITH_CATEGORIES)
+      .in("id", [...savedVideoIds])
+      .order("created_at", { ascending: false });
+    if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
+      const legacyRetry = await supabase
+        .from("videos")
+        .select(VIDEO_COLUMNS_LEGACY)
+        .in("id", [...savedVideoIds])
+        .order("created_at", { ascending: false });
+      videos = legacyRetry.data as VideoRow[] | null;
+      videosError = legacyRetry.error;
+    } else {
+      videos = categoryRetry.data as VideoRow[] | null;
+      videosError = categoryRetry.error;
+    }
+  }
 
   if (videosError) throw videosError;
 
-  const videoRows = ((videos ?? []) as VideoRow[]).filter(
-    (video) => !locallyUnsavedVideoIds.has(video.id),
-  );
+  const videoRows = (videos ?? []) as VideoRow[];
   const profiles = await fetchProfilesByIds(videoRows.map((video) => video.user_id));
+  const jammedByMe = new Set(
+    jams.filter((jam) => jam.requester_id === currentUserId).map((jam) => jam.recipient_id),
+  );
+  const jammedMe = new Set(
+    jams.filter((jam) => jam.recipient_id === currentUserId).map((jam) => jam.requester_id),
+  );
+  const connected = new Set(
+    jams
+      .filter((jam) => jam.connected_at)
+      .map((jam) =>
+        jam.requester_id === currentUserId ? jam.recipient_id : jam.requester_id,
+      ),
+  );
 
-  return videoRows
-    .map((video) => {
-      const profile = profiles.get(video.user_id);
-      if (!profile) return null;
-
-      return {
-        id: video.id,
-        creatorName: getDisplayName(profile),
-        caption: video.caption ?? "",
-        hashtags: video.hashtags ?? [],
-        mediaUrl: video.media_url,
-        cloudflareStreamId: video.cloudflare_stream_id,
-      };
-    })
-    .filter((video): video is NonNullable<typeof video> => Boolean(video));
-}
-
-async function saveLegacyVideoLike(currentUserId: string, videoId: string) {
-  await removeLegacyUnsavedVideoId(currentUserId, videoId);
-
-  const { data: video, error } = await supabase
-    .from("videos")
-    .select("user_id")
-    .eq("id", videoId)
-    .maybeSingle();
-
-  if (error) throw error;
-  const ownerId = (video as Pick<VideoRow, "user_id"> | null)?.user_id;
-  if (!ownerId || ownerId === currentUserId) return;
-
-  await insertLegacyCreatorLike(currentUserId, ownerId);
-}
-
-async function deleteLegacyVideoLike(currentUserId: string, videoId: string) {
-  await addLegacyUnsavedVideoId(currentUserId, videoId);
-
-  const { data: video, error } = await supabase
-    .from("videos")
-    .select("user_id")
-    .eq("id", videoId)
-    .maybeSingle();
-
-  if (error) throw error;
-  const ownerId = (video as Pick<VideoRow, "user_id"> | null)?.user_id;
-  if (!ownerId || ownerId === currentUserId) return;
-
-  const { error: deleteError } = await supabase
-    .from("creator_likes")
-    .delete()
-    .eq("liker_id", currentUserId)
-    .eq("liked_id", ownerId);
-
-  if (deleteError && deleteError.code !== "42501") throw deleteError;
+  return videoRows.map((video) =>
+    toSavedProfileVideo(video, profiles.get(video.user_id), true, jammedByMe, jammedMe, connected),
+  );
 }
 
 async function fetchLegacyRelationshipState(currentUserId: string, otherUserId: string) {
@@ -764,8 +1013,8 @@ async function insertLegacyCreatorLike(currentUserId: string | null, likedUserId
   if (error && error.code !== "23505") throw error;
 }
 
-async function getLegacyUnsavedVideoIds(currentUserId: string) {
-  const stored = await AsyncStorage.getItem(getLegacyUnsavedKey(currentUserId));
+async function getLocalSavedVideoIds(currentUserId: string) {
+  const stored = await AsyncStorage.getItem(getLocalSavedKey(currentUserId));
   if (!stored) return new Set<string>();
 
   try {
@@ -776,20 +1025,20 @@ async function getLegacyUnsavedVideoIds(currentUserId: string) {
   }
 }
 
-async function addLegacyUnsavedVideoId(currentUserId: string, videoId: string) {
-  const current = await getLegacyUnsavedVideoIds(currentUserId);
+async function addLocalSavedVideoId(currentUserId: string, videoId: string) {
+  const current = await getLocalSavedVideoIds(currentUserId);
   current.add(videoId);
-  await AsyncStorage.setItem(getLegacyUnsavedKey(currentUserId), JSON.stringify([...current]));
+  await AsyncStorage.setItem(getLocalSavedKey(currentUserId), JSON.stringify([...current]));
 }
 
-async function removeLegacyUnsavedVideoId(currentUserId: string, videoId: string) {
-  const current = await getLegacyUnsavedVideoIds(currentUserId);
+async function removeLocalSavedVideoId(currentUserId: string, videoId: string) {
+  const current = await getLocalSavedVideoIds(currentUserId);
   if (!current.delete(videoId)) return;
-  await AsyncStorage.setItem(getLegacyUnsavedKey(currentUserId), JSON.stringify([...current]));
+  await AsyncStorage.setItem(getLocalSavedKey(currentUserId), JSON.stringify([...current]));
 }
 
-function getLegacyUnsavedKey(currentUserId: string) {
-  return `jam.legacyUnsavedVideos.${currentUserId}`;
+function getLocalSavedKey(currentUserId: string) {
+  return `jam.localSavedVideos.${currentUserId}`;
 }
 
 async function getCurrentUserId() {
@@ -805,6 +1054,35 @@ async function getCurrentUserId() {
 
 function normalizeJamMessage(body: string) {
   return body.trim() || "Hey, let's jam.";
+}
+
+function getCloudflarePlaybackUrl(streamId: string | null | undefined) {
+  return streamId ? `https://videodelivery.net/${streamId}/manifest/video.m3u8` : null;
+}
+
+function logVideoDatabaseStep(step: string, details?: Record<string, unknown>) {
+  console.log(`[video upload] database ${step}`, details ?? {});
+}
+
+function getErrorDetails(error: unknown) {
+  if (isSupabaseError(error)) {
+    return {
+      code: error.code,
+      message: error.message,
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    };
+  }
+
+  return {
+    message: String(error),
+  };
 }
 
 function isMissingSchemaError(error: unknown) {
@@ -849,6 +1127,9 @@ function toConversation(
     a.created_at.localeCompare(b.created_at),
   );
   const lastMessage = thread.at(-1);
+  const unreadCount = thread.filter(
+    (message) => message.recipient_id === currentUserId && message.read_at === null,
+  ).length;
 
   return {
     id: otherUserId,
@@ -862,9 +1143,8 @@ function toConversation(
       lastMessage?.body ??
       (unlocked ? "you are jamming. chat is open." : "jam sent. waiting for a reply."),
     timestamp: formatRelativeTime(lastMessage?.created_at ?? new Date().toISOString()),
-    unread: thread.some(
-      (message) => message.recipient_id === currentUserId && message.read_at === null,
-    ),
+    unread: unreadCount > 0,
+    unreadCount,
     earlyAdopter: Boolean(profile.early_adopter),
     unlocked,
     messages: thread.map((message) => ({
@@ -900,11 +1180,49 @@ function toFeedVideo(
     bio: profile.bio,
     caption: video.caption ?? "",
     hashtags: video.hashtags ?? [],
+    categories: video.categories ?? video.hashtags ?? [],
+    roles: video.roles ?? video.categories ?? video.hashtags ?? [],
+    genres: video.genres ?? [],
     mediaUrl: video.media_url,
     cloudflareStreamId: video.cloudflare_stream_id,
     earlyAdopter: Boolean(profile.early_adopter),
     createdAt: video.created_at,
     likedByMe: savedByCurrentUser,
+    likedMe: jammedMe.has(video.user_id),
+    mutual: connectedWithCurrentUser || (jammedByMe.has(video.user_id) && jammedMe.has(video.user_id)),
+    jammedByMe: jammedByMe.has(video.user_id),
+    jammedMe: jammedMe.has(video.user_id),
+  };
+}
+
+function toSavedProfileVideo(
+  video: VideoRow,
+  profile: ProfileRow | undefined,
+  likedByMe: boolean,
+  jammedByMe = new Set<string>(),
+  jammedMe = new Set<string>(),
+  connected = new Set<string>(),
+): ProfileVideo {
+  const creatorName = profile ? getDisplayName(profile) : "creator";
+  const connectedWithCurrentUser = connected.has(video.user_id);
+  return {
+    id: video.id,
+    userId: video.user_id,
+    creatorName,
+    role: profile ? getRole(profile) : "creator",
+    location: profile?.location ?? "unknown",
+    avatarUrl: profile?.avatar_url ?? null,
+    avatarFallback: profile ? getAvatarFallback(profile) : getAvatarFallback({ display_name: creatorName }),
+    earlyAdopter: Boolean(profile?.early_adopter),
+    caption: video.caption ?? "",
+    hashtags: video.hashtags ?? [],
+    categories: video.categories ?? video.hashtags ?? [],
+    roles: video.roles ?? video.categories ?? video.hashtags ?? [],
+    genres: video.genres ?? [],
+    mediaUrl: video.media_url,
+    cloudflareStreamId: video.cloudflare_stream_id,
+    created_at: video.created_at,
+    likedByMe,
     likedMe: jammedMe.has(video.user_id),
     mutual: connectedWithCurrentUser || (jammedByMe.has(video.user_id) && jammedMe.has(video.user_id)),
     jammedByMe: jammedByMe.has(video.user_id),

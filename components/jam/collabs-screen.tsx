@@ -515,7 +515,7 @@ export function CollabsScreen() {
             ))}
             {sentConversations.length === 0 && (
               <p className="rounded-2xl border border-white/10 bg-zinc-950 p-4 text-sm text-zinc-500">
-                No sent likes or openers waiting right now.
+                No sent jams waiting right now.
               </p>
             )}
           </section>

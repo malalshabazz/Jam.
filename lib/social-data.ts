@@ -88,6 +88,11 @@ type LikeRow = {
   created_at: string;
 };
 
+type SavedVideoRow = {
+  video_id: string;
+  created_at: string;
+};
+
 type MessageRow = {
   id: string;
   sender_id: string;
@@ -98,22 +103,19 @@ type MessageRow = {
 };
 
 export async function fetchFeedVideos(currentUserId: string) {
-  const [{ data: videos, error: videosError }, likes] = await Promise.all([
+  const [{ data: videos, error: videosError }, savedVideos, likes] = await Promise.all([
     supabase
       .from("videos")
       .select("id, user_id, caption, hashtags, media_url, cloudflare_stream_id, created_at")
       .neq("user_id", currentUserId)
       .order("created_at", { ascending: false }),
+    fetchSavedVideoRows(currentUserId),
     fetchRelevantLikes(currentUserId),
   ]);
 
   if (videosError) throw videosError;
 
-  const likedByMe = new Set(
-    likes
-      .filter((like) => like.liker_id === currentUserId)
-      .map((like) => like.liked_id),
-  );
+  const savedByMe = new Set(savedVideos.map((savedVideo) => savedVideo.video_id));
   const likedMe = new Set(
     likes
       .filter((like) => like.liked_id === currentUserId)
@@ -124,7 +126,7 @@ export async function fetchFeedVideos(currentUserId: string) {
   const profiles = await fetchProfilesByIds(videoRows.map((video) => video.user_id));
 
   return videoRows
-    .map((video) => toFeedVideo(video, profiles.get(video.user_id), likedByMe, likedMe))
+    .map((video) => toFeedVideo(video, profiles.get(video.user_id), savedByMe, likedMe))
     .filter((video): video is FeedVideo => Boolean(video));
 }
 
@@ -140,21 +142,21 @@ export async function fetchMyVideos(currentUserId: string) {
 }
 
 export async function fetchLikedVideos(currentUserId: string) {
-  const { data: likes, error: likesError } = await supabase
-    .from("creator_likes")
-    .select("liked_id, created_at")
-    .eq("liker_id", currentUserId)
+  const { data: savedVideos, error: savedVideosError } = await supabase
+    .from("saved_videos")
+    .select("video_id, created_at")
+    .eq("user_id", currentUserId)
     .order("created_at", { ascending: false });
 
-  if (likesError) throw likesError;
+  if (savedVideosError) throw savedVideosError;
 
-  const likedIds = (likes ?? []).map((like) => like.liked_id);
-  if (likedIds.length === 0) return [];
+  const savedIds = (savedVideos ?? []).map((savedVideo) => savedVideo.video_id);
+  if (savedIds.length === 0) return [];
 
   const { data: videos, error: videosError } = await supabase
     .from("videos")
     .select("id, user_id, caption, hashtags, media_url, cloudflare_stream_id, created_at")
-    .in("user_id", likedIds)
+    .in("id", savedIds)
     .order("created_at", { ascending: false });
 
   if (videosError) throw videosError;
@@ -177,6 +179,18 @@ export async function fetchLikedVideos(currentUserId: string) {
       };
     })
     .filter((video): video is NonNullable<typeof video> => Boolean(video));
+}
+
+export async function saveVideo(currentUserId: string, videoId: string) {
+  const { error } = await supabase.from("saved_videos").upsert(
+    {
+      user_id: currentUserId,
+      video_id: videoId,
+    },
+    { onConflict: "user_id,video_id" },
+  );
+
+  if (error) throw error;
 }
 
 export async function likeCreator(currentUserId: string, likedUserId: string) {
@@ -390,6 +404,16 @@ async function fetchRelevantLikes(currentUserId: string) {
   return (data ?? []) as LikeRow[];
 }
 
+async function fetchSavedVideoRows(currentUserId: string) {
+  const { data, error } = await supabase
+    .from("saved_videos")
+    .select("video_id, created_at")
+    .eq("user_id", currentUserId);
+
+  if (error) throw error;
+  return (data ?? []) as SavedVideoRow[];
+}
+
 async function fetchMessages() {
   const { data, error } = await supabase
     .from("direct_messages")
@@ -418,12 +442,12 @@ async function fetchProfilesByIds(userIds: string[]) {
 function toFeedVideo(
   video: VideoRow,
   profile: ProfileRow | undefined,
-  likedByMe: Set<string>,
+  savedByMe: Set<string>,
   likedMe: Set<string>,
 ) {
   if (!profile) return null;
 
-  const likedByCurrentUser = likedByMe.has(video.user_id);
+  const savedByCurrentUser = savedByMe.has(video.id);
   const likedCurrentUser = likedMe.has(video.user_id);
 
   return {
@@ -441,9 +465,9 @@ function toFeedVideo(
     cloudflareStreamId: video.cloudflare_stream_id,
     earlyAdopter: Boolean(profile.early_adopter),
     createdAt: video.created_at,
-    likedByMe: likedByCurrentUser,
+    likedByMe: savedByCurrentUser,
     likedMe: likedCurrentUser,
-    mutual: likedByCurrentUser && likedCurrentUser,
+    mutual: false,
   };
 }
 

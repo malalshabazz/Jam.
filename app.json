@@ -6,19 +6,48 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.jam.creators",
       "infoPlist": {
         "NSCameraUsageDescription": "Jam uses your camera so you can record videos for your profile and feed.",
         "NSMicrophoneUsageDescription": "Jam uses your microphone so your videos can include sound.",
-        "NSPhotoLibraryUsageDescription": "Jam lets you choose videos and profile photos from your library."
+        "NSPhotoLibraryUsageDescription": "Jam lets you choose videos and profile photos from your library.",
+        "NSAppTransportSecurity": {
+          "NSExceptionDomains": {
+            "upload.cloudflarestream.com": {
+              "NSIncludesSubdomains": true,
+              "NSExceptionAllowsInsecureHTTPLoads": false,
+              "NSExceptionMinimumTLSVersion": "TLSv1.2",
+              "NSExceptionRequiresForwardSecrecy": false
+            },
+            "upload.videodelivery.net": {
+              "NSIncludesSubdomains": true,
+              "NSExceptionAllowsInsecureHTTPLoads": false,
+              "NSExceptionMinimumTLSVersion": "TLSv1.2",
+              "NSExceptionRequiresForwardSecrecy": false
+            },
+            "videodelivery.net": {
+              "NSIncludesSubdomains": true,
+              "NSExceptionAllowsInsecureHTTPLoads": false,
+              "NSExceptionMinimumTLSVersion": "TLSv1.2",
+              "NSExceptionRequiresForwardSecrecy": false
+            }
+          }
+        }
       }
     },
     "android": {
       "package": "com.jam.creators",
-      "permissions": ["CAMERA", "RECORD_AUDIO", "READ_MEDIA_VIDEO", "READ_MEDIA_IMAGES"]
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "READ_MEDIA_VIDEO",
+        "READ_MEDIA_IMAGES"
+      ]
     },
     "plugins": [
       "expo-secure-store",
@@ -36,12 +65,14 @@
           "photosPermission": "Jam lets you choose videos and profile photos from your library.",
           "cameraPermission": "Jam uses your camera so you can record videos."
         }
-      ]
+      ],
+      "expo-video",
+      "expo-audio"
     ],
     "extra": {
       "supabaseUrl": "https://bwwcpgtjamlbdcrmxrju.supabase.co",
       "supabaseAnonKey": "sb_publishable_jupklHTP9nLOMWa7-tJRsw_lSFxtCvb",
-      "cloudflareUploadEndpoint": ""
+      "cloudflareUploadEndpoint": "https://jam-qvdx.vercel.app/api/cloudflare-stream/uploads"
     }
   }
 }
