@@ -39,6 +39,9 @@ type ProfileVideo = {
 };
 
 const MAX_BIO_LENGTH = 150;
+const NAV_BAR_HEIGHT_CLASS = "h-[calc(96px+env(safe-area-inset-bottom))]";
+const FEED_VIDEO_HEIGHT_CLASS =
+  "h-[calc(100svh-(96px+env(safe-area-inset-bottom)))]";
 
 export function ProfileScreen() {
   const router = useRouter();
@@ -729,8 +732,8 @@ function VideoFullscreenViewer({
       >
         close
       </button>
-      <div className="flex h-[100svh] items-center justify-center">
-        <div className="h-full w-full max-w-[390px] bg-black">
+      <div className="mx-auto flex h-[100svh] w-full max-w-[390px] flex-col bg-black">
+        <div className={`relative w-full bg-black ${FEED_VIDEO_HEIGHT_CLASS}`}>
           {streamId ? (
             <iframe
               src={`https://iframe.videodelivery.net/${streamId}?autoplay=true&controls=true&loop=true&muted=false&preload=true`}
@@ -745,7 +748,7 @@ function VideoFullscreenViewer({
               controls
               autoPlay
               playsInline
-              className="h-full w-full object-contain"
+              className="h-full w-full bg-black object-contain"
             />
           ) : (
             <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
@@ -753,6 +756,10 @@ function VideoFullscreenViewer({
             </div>
           )}
         </div>
+        <div
+          className={`w-full shrink-0 bg-black ${NAV_BAR_HEIGHT_CLASS}`}
+          aria-hidden
+        />
       </div>
     </div>
   );
