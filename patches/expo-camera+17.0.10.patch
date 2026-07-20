@@ -1,0 +1,282 @@
+diff --git a/node_modules/expo-camera/android/src/main/java/expo/modules/camera/CameraViewModule.kt b/node_modules/expo-camera/android/src/main/java/expo/modules/camera/CameraViewModule.kt
+index fffd251..9574b43 100644
+--- a/node_modules/expo-camera/android/src/main/java/expo/modules/camera/CameraViewModule.kt
++++ b/node_modules/expo-camera/android/src/main/java/expo/modules/camera/CameraViewModule.kt
+@@ -449,6 +449,22 @@ class CameraViewModule : Module() {
+       AsyncFunction("pausePreview") { view: ExpoCameraView ->
+         view.pausePreview()
+       }
++
++      AsyncFunction("focusAtPoint") { view: ExpoCameraView, x: Double, y: Double ->
++        view.focusAtPoint(x.toFloat(), y.toFloat())
++      }.runOnQueue(Queues.MAIN)
++
++      AsyncFunction("setExposureBias") { view: ExpoCameraView, bias: Double ->
++        view.setExposureBias(bias.toFloat())
++      }.runOnQueue(Queues.MAIN)
++
++      AsyncFunction("getZoomRange") { view: ExpoCameraView ->
++        val range = view.getZoomRange()
++        mapOf(
++          "min" to range.getDouble("min"),
++          "max" to range.getDouble("max")
++        )
++      }
+     }
+   }
+ 
+diff --git a/node_modules/expo-camera/android/src/main/java/expo/modules/camera/ExpoCameraView.kt b/node_modules/expo-camera/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
+index fc56526..2564d21 100644
+--- a/node_modules/expo-camera/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
++++ b/node_modules/expo-camera/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
+@@ -84,6 +84,8 @@ import kotlinx.coroutines.launch
+ import java.io.File
+ import java.lang.Float.max
+ import java.lang.Float.min
++import java.util.concurrent.TimeUnit
++import kotlin.math.pow
+ import kotlin.math.roundToInt
+ import kotlin.properties.Delegates
+ 
+@@ -588,11 +590,53 @@ class ExpoCameraView(
+   }
+ 
+   private fun setCameraZoom(value: Float) {
+-    val maxZoomRatio = camera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1f
+-    val targetZoomRatio = max(1f, min(maxZoomRatio, value.coerceIn(0f, 1f) * maxZoomRatio))
++    val zoomState = camera?.cameraInfo?.zoomState?.value ?: return
++    val minZoomRatio = zoomState.minZoomRatio
++    val maxZoomRatio = zoomState.maxZoomRatio
++    val clamped = value.coerceIn(0f, 1f)
++    val targetZoomRatio =
++      minZoomRatio * (maxZoomRatio / minZoomRatio).toDouble().pow(clamped.toDouble()).toFloat()
+     camera?.cameraControl?.setZoomRatio(targetZoomRatio)
+   }
+ 
++  fun focusAtPoint(normalizedX: Float, normalizedY: Float) {
++    val cam = camera ?: return
++    if (previewView.width == 0 || previewView.height == 0) {
++      return
++    }
++    val meteringPointFactory = DisplayOrientedMeteringPointFactory(
++      previewView.display,
++      cam.cameraInfo,
++      previewView.width.toFloat(),
++      previewView.height.toFloat()
++    )
++    val x = normalizedX.coerceIn(0f, 1f) * previewView.width
++    val y = normalizedY.coerceIn(0f, 1f) * previewView.height
++    val action = FocusMeteringAction.Builder(
++      meteringPointFactory.createPoint(x, y),
++      FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
++    )
++      .setAutoCancelDuration(8, TimeUnit.SECONDS)
++      .build()
++    cam.cameraControl.startFocusAndMetering(action)
++  }
++
++  fun setExposureBias(bias: Float) {
++    val exposureState = camera?.cameraInfo?.exposureState ?: return
++    val range = exposureState.exposureCompensationRange
++    val normalized = bias.coerceIn(-1f, 1f)
++    val targetIndex = (range.lower + ((range.upper - range.lower) * ((normalized + 1f) / 2f))).toInt()
++    camera?.cameraControl?.setExposureCompensationIndex(targetIndex)
++  }
++
++  fun getZoomRange(): Bundle {
++    val zoomState = camera?.cameraInfo?.zoomState?.value
++    return Bundle().apply {
++      putDouble("min", (zoomState?.minZoomRatio ?: 1f).toDouble())
++      putDouble("max", (zoomState?.maxZoomRatio ?: 1f).toDouble())
++    }
++  }
++
+   private fun observeCameraState(cameraInfo: CameraInfo) {
+     cameraInfo.cameraState.observe(currentActivity) {
+       when (it.type) {
+diff --git a/node_modules/expo-camera/build/Camera.types.d.ts b/node_modules/expo-camera/build/Camera.types.d.ts
+index 639cebd..2aaf882 100644
+--- a/node_modules/expo-camera/build/Camera.types.d.ts
++++ b/node_modules/expo-camera/build/Camera.types.d.ts
+@@ -455,6 +455,12 @@ export interface CameraViewRef {
+     readonly launchModernScanner: () => Promise<void>;
+     readonly resumePreview: () => Promise<void>;
+     readonly pausePreview: () => Promise<void>;
++    readonly focusAtPoint: (x: number, y: number) => Promise<void>;
++    readonly setExposureBias: (bias: number) => Promise<void>;
++    readonly getZoomRange: () => Promise<{
++        min: number;
++        max: number;
++    }>;
+ }
+ /**
+  * @hidden
+diff --git a/node_modules/expo-camera/ios/CameraViewModule.swift b/node_modules/expo-camera/ios/CameraViewModule.swift
+index 6410204..8310edc 100644
+--- a/node_modules/expo-camera/ios/CameraViewModule.swift
++++ b/node_modules/expo-camera/ios/CameraViewModule.swift
+@@ -297,6 +297,30 @@ public final class CameraViewModule: Module, ScannerResultHandler {
+         view.stopRecording()
+         #endif
+       }
++
++      AsyncFunction("focusAtPoint") { (view: CameraView, x: Double, y: Double) in
++        #if targetEnvironment(simulator)
++        return
++        #else
++        view.focusAtPoint(normalizedX: x, normalizedY: y)
++        #endif
++      }
++
++      AsyncFunction("setExposureBias") { (view: CameraView, bias: Double) in
++        #if targetEnvironment(simulator)
++        return
++        #else
++        view.setExposureBias(Float(bias))
++        #endif
++      }
++
++      AsyncFunction("getZoomRange") { (view: CameraView) -> [String: Double] in
++        #if targetEnvironment(simulator)
++        return ["min": 1, "max": 1]
++        #else
++        return view.getZoomRange()
++        #endif
++      }
+     }
+ 
+     Class("Picture", PictureRef.self) {
+diff --git a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
+index dc2a548..30864d6 100644
+--- a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
++++ b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
+@@ -197,8 +197,14 @@ class CameraSessionManager: NSObject {
+ 
+     do {
+       try device.lockForConfiguration()
+-      let minZoom = 1.0
+-      device.videoZoomFactor = minZoom * pow(device.activeFormat.videoMaxZoomFactor / minZoom, delegate.zoom)
++      let minZoom = CGFloat(device.minAvailableVideoZoomFactor)
++      let maxZoom = CGFloat(min(device.activeFormat.videoMaxZoomFactor, device.maxAvailableVideoZoomFactor))
++      let clamped = min(max(delegate.zoom, 0), 1)
++      if maxZoom > minZoom {
++        device.videoZoomFactor = minZoom * pow(maxZoom / minZoom, clamped)
++      } else {
++        device.videoZoomFactor = minZoom
++      }
+     } catch {
+       log.info("\(#function): \(error.localizedDescription)")
+     }
+@@ -206,6 +212,70 @@ class CameraSessionManager: NSObject {
+     device.unlockForConfiguration()
+   }
+ 
++  func focusAtPoint(normalizedX: CGFloat, normalizedY: CGFloat, previewLayer: AVCaptureVideoPreviewLayer) {
++    guard let device = captureDeviceInput?.device else {
++      return
++    }
++
++    let layerPoint = CGPoint(
++      x: normalizedX * previewLayer.bounds.width,
++      y: normalizedY * previewLayer.bounds.height
++    )
++    let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: layerPoint)
++
++    sessionQueue.async {
++      do {
++        try device.lockForConfiguration()
++        if device.isFocusPointOfInterestSupported {
++          device.focusPointOfInterest = devicePoint
++          if device.isFocusModeSupported(.autoFocus) {
++            device.focusMode = .autoFocus
++          }
++        }
++        if device.isExposurePointOfInterestSupported {
++          device.exposurePointOfInterest = devicePoint
++          if device.isExposureModeSupported(.continuousAutoExposure) {
++            device.exposureMode = .continuousAutoExposure
++          } else if device.isExposureModeSupported(.autoExpose) {
++            device.exposureMode = .autoExpose
++          }
++        }
++        device.unlockForConfiguration()
++      } catch {
++        log.info("\(#function): \(error.localizedDescription)")
++      }
++    }
++  }
++
++  func setExposureBias(_ bias: Float) {
++    guard let device = captureDeviceInput?.device else {
++      return
++    }
++
++    sessionQueue.async {
++      do {
++        try device.lockForConfiguration()
++        let span = max(abs(device.minExposureTargetBias), abs(device.maxExposureTargetBias))
++        let normalized = min(max(bias, -1), 1)
++        let target = normalized * span
++        let clamped = min(max(target, device.minExposureTargetBias), device.maxExposureTargetBias)
++        device.setExposureTargetBias(clamped, completionHandler: nil)
++        device.unlockForConfiguration()
++      } catch {
++        log.info("\(#function): \(error.localizedDescription)")
++      }
++    }
++  }
++
++  func getZoomRange() -> (min: Double, max: Double) {
++    guard let device = captureDeviceInput?.device else {
++      return (1, 1)
++    }
++    let minZoom = Double(device.minAvailableVideoZoomFactor)
++    let maxZoom = Double(min(device.activeFormat.videoMaxZoomFactor, device.maxAvailableVideoZoomFactor))
++    return (minZoom, max(maxZoom, minZoom))
++  }
++
+   func getAvailableLenses() -> [String] {
+     guard let delegate else {
+       return []
+diff --git a/node_modules/expo-camera/ios/Current/CameraView.swift b/node_modules/expo-camera/ios/Current/CameraView.swift
+index b2e7f9e..84fd55f 100644
+--- a/node_modules/expo-camera/ios/Current/CameraView.swift
++++ b/node_modules/expo-camera/ios/Current/CameraView.swift
+@@ -316,6 +316,23 @@ public class CameraView: ExpoView, EXAppLifecycleListener, EXCameraInterface, Ca
+     previewLayer.connection?.isEnabled = false
+   }
+ 
++  func focusAtPoint(normalizedX: Double, normalizedY: Double) {
++    sessionManager.focusAtPoint(
++      normalizedX: CGFloat(normalizedX),
++      normalizedY: CGFloat(normalizedY),
++      previewLayer: previewLayer
++    )
++  }
++
++  func setExposureBias(_ bias: Float) {
++    sessionManager.setExposureBias(bias)
++  }
++
++  func getZoomRange() -> [String: Double] {
++    let range = sessionManager.getZoomRange()
++    return ["min": range.min, "max": range.max]
++  }
++
+   @objc func orientationChanged() {
+     changePreviewOrientation()
+   }
+diff --git a/node_modules/expo-camera/src/Camera.types.ts b/node_modules/expo-camera/src/Camera.types.ts
+index c9ea132..21fc9b2 100644
+--- a/node_modules/expo-camera/src/Camera.types.ts
++++ b/node_modules/expo-camera/src/Camera.types.ts
+@@ -496,6 +496,9 @@ export interface CameraViewRef {
+   readonly launchModernScanner: () => Promise<void>;
+   readonly resumePreview: () => Promise<void>;
+   readonly pausePreview: () => Promise<void>;
++  readonly focusAtPoint: (x: number, y: number) => Promise<void>;
++  readonly setExposureBias: (bias: number) => Promise<void>;
++  readonly getZoomRange: () => Promise<{ min: number; max: number }>;
+ }
+ 
+ /**

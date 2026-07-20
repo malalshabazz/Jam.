@@ -7,7 +7,7 @@
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "assetBundlePatterns": [
-      "**/*"
+      "assets/**/*"
     ],
     "ios": {
       "supportsTablet": false,
@@ -16,12 +16,21 @@
         "NSCameraUsageDescription": "Jam uses your camera so you can record videos for your profile and feed.",
         "NSMicrophoneUsageDescription": "Jam uses your microphone so your videos can include sound.",
         "NSPhotoLibraryUsageDescription": "Jam lets you choose videos and profile photos from your library.",
+        "NSLocationWhenInUseUsageDescription": "Jam uses your location to show creators near you and share your live location when enabled in settings.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Jam updates your live location for nearby creators while share live location is enabled in settings.",
+        "NSLocationAlwaysUsageDescription": "Jam updates your live location for nearby creators while share live location is enabled in settings.",
         "NSAppTransportSecurity": {
           "NSExceptionDomains": {
             "upload.cloudflarestream.com": {
               "NSIncludesSubdomains": true,
               "NSExceptionAllowsInsecureHTTPLoads": false,
-              "NSExceptionMinimumTLSVersion": "TLSv1.2",
+              "NSExceptionMinimumTLSVersion": "TLSv1.0",
+              "NSExceptionRequiresForwardSecrecy": false
+            },
+            "cloudflarestream.com": {
+              "NSIncludesSubdomains": true,
+              "NSExceptionAllowsInsecureHTTPLoads": false,
+              "NSExceptionMinimumTLSVersion": "TLSv1.0",
               "NSExceptionRequiresForwardSecrecy": false
             },
             "upload.videodelivery.net": {
@@ -46,7 +55,10 @@
         "CAMERA",
         "RECORD_AUDIO",
         "READ_MEDIA_VIDEO",
-        "READ_MEDIA_IMAGES"
+        "READ_MEDIA_IMAGES",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION"
       ]
     },
     "plugins": [
@@ -66,13 +78,35 @@
           "cameraPermission": "Jam uses your camera so you can record videos."
         }
       ],
-      "expo-video",
-      "expo-audio"
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Jam shows your latest video so you can choose from your camera roll."
+        }
+      ],
+      [
+        "expo-video",
+        {
+          "supportsBackgroundPlayback": true,
+          "supportsPictureInPicture": false
+        }
+      ],
+      "expo-audio",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Jam uses your location to show creators near you and share your live location when enabled in settings.",
+          "locationAlwaysAndWhenInUsePermission": "Jam updates your live location for nearby creators while share live location is enabled in settings.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true
+        }
+      ]
     ],
     "extra": {
       "supabaseUrl": "https://bwwcpgtjamlbdcrmxrju.supabase.co",
       "supabaseAnonKey": "sb_publishable_jupklHTP9nLOMWa7-tJRsw_lSFxtCvb",
-      "cloudflareUploadEndpoint": "https://jam-qvdx.vercel.app/api/cloudflare-stream/uploads"
+      "cloudflareUploadEndpoint": "https://jam-qvdx.vercel.app/api/cloudflare-stream/uploads",
+      "authBridgeUrl": "https://jam-qvdx.vercel.app/auth/native"
     }
   }
 }

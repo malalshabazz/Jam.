@@ -49,7 +49,18 @@
           <key>NSExceptionAllowsInsecureHTTPLoads</key>
           <false/>
           <key>NSExceptionMinimumTLSVersion</key>
-          <string>TLSv1.2</string>
+          <string>TLSv1.0</string>
+          <key>NSExceptionRequiresForwardSecrecy</key>
+          <false/>
+        </dict>
+        <key>cloudflarestream.com</key>
+        <dict>
+          <key>NSIncludesSubdomains</key>
+          <true/>
+          <key>NSExceptionAllowsInsecureHTTPLoads</key>
+          <false/>
+          <key>NSExceptionMinimumTLSVersion</key>
+          <string>TLSv1.0</string>
           <key>NSExceptionRequiresForwardSecrecy</key>
           <false/>
         </dict>
@@ -81,12 +92,25 @@
     <string>Jam uses your camera so you can record videos.</string>
     <key>NSFaceIDUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to access your Face ID biometric data.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>Jam updates your live location for nearby creators while share live location is enabled in settings.</string>
+    <key>NSLocationAlwaysUsageDescription</key>
+    <string>Jam updates your live location for nearby creators while share live location is enabled in settings.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Jam uses your location to show creators near you and share your live location when enabled in settings.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Jam uses your microphone so your videos can include sound.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Allow $(PRODUCT_NAME) to save photos</string>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>Jam lets you choose videos and profile photos from your library.</string>
     <key>RCTNewArchEnabled</key>
     <true/>
+    <key>UIBackgroundModes</key>
+    <array>
+      <string>fetch</string>
+      <string>location</string>
+    </array>
     <key>UILaunchStoryboardName</key>
     <string>SplashScreen</string>
     <key>UIRequiredDeviceCapabilities</key>

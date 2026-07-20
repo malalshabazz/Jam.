@@ -133,34 +133,34 @@ on conflict (provider, provider_id) do nothing;
 insert into public.profiles (
   id,
   display_name,
-  first_name,
-  last_name,
   bio,
   creator_types,
   location,
+  country,
+  city,
   avatar_url,
   onboarding_complete,
   welcome_seen
 )
 values
-  ('11111111-1111-4111-8111-111111111111', 'Aria Stone', 'Aria', 'Stone', 'Vocalist writing textured hooks for electronic and soul-leaning producers.', array['vocalist', 'songwriter'], 'London, UK', null, true, true),
-  ('22222222-2222-4222-8222-222222222222', 'Malik Rhodes', 'Malik', 'Rhodes', 'Producer building warm club edits, dusty keys, and late-night grooves.', array['producer', 'music producer'], 'Lagos, Nigeria', null, true, true),
-  ('33333333-3333-4333-8333-333333333333', 'Maya Cole', 'Maya', 'Cole', 'Painter exploring motion, texture, and visual loops for live music sets.', array['painter', 'visual artist'], 'Paris, France', null, true, true),
-  ('44444444-4444-4444-8444-444444444444', 'Theo Park', 'Theo', 'Park', 'Beatmaker focused on swing, sample chops, and intimate drum pockets.', array['beatmaker', 'producer'], 'Berlin, Germany', null, true, true),
-  ('55555555-5555-4555-8555-555555555555', 'Nia Patel', 'Nia', 'Patel', 'Filmmaker creating moody short-form visuals for artists and dancers.', array['filmmaker', 'director'], 'Toronto, Canada', null, true, true),
-  ('66666666-6666-4666-8666-666666666666', 'Kofi Mensah', 'Kofi', 'Mensah', 'Rapper with melodic verses and sharp one-take freestyle ideas.', array['rapper', 'songwriter'], 'Accra, Ghana', null, true, true),
-  ('77777777-7777-4777-8777-777777777777', 'Lena Ortiz', 'Lena', 'Ortiz', 'Dancer translating basslines into choreography and movement studies.', array['dancer', 'choreographer'], 'Mexico City, Mexico', null, true, true),
-  ('88888888-8888-4888-8888-888888888888', 'Samir Khan', 'Samir', 'Khan', 'Guitarist layering clean riffs, ambient swells, and indie-pop sketches.', array['guitarist', 'songwriter'], 'Mumbai, India', null, true, true),
-  ('99999999-9999-4999-8999-999999999999', 'Zara Moon', 'Zara', 'Moon', 'Photographer shooting intimate portraits and experimental cover art.', array['photographer', 'designer'], 'New York, USA', null, true, true),
-  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Jules Carter', 'Jules', 'Carter', 'Animator making surreal loops and character-driven music visuals.', array['animator', 'graphic designer'], 'Amsterdam, Netherlands', null, true, true)
+  ('11111111-1111-4111-8111-111111111111', 'Aria Stone', 'Vocalist writing textured hooks for electronic and soul-leaning producers.', array['vocalist', 'songwriter'], 'London, United Kingdom', 'United Kingdom', 'London', null, true, true),
+  ('22222222-2222-4222-8222-222222222222', 'Malik Rhodes', 'Producer building warm club edits, dusty keys, and late-night grooves.', array['producer', 'music producer'], 'Lagos, Nigeria', 'Nigeria', 'Lagos', null, true, true),
+  ('33333333-3333-4333-8333-333333333333', 'Maya Cole', 'Painter exploring motion, texture, and visual loops for live music sets.', array['painter', 'visual artist'], 'Paris, France', 'France', 'Paris', null, true, true),
+  ('44444444-4444-4444-8444-444444444444', 'Theo Park', 'Beatmaker focused on swing, sample chops, and intimate drum pockets.', array['beatmaker', 'producer'], 'Berlin, Germany', 'Germany', 'Berlin', null, true, true),
+  ('55555555-5555-4555-8555-555555555555', 'Nia Patel', 'Filmmaker creating moody short-form visuals for artists and dancers.', array['filmmaker', 'director'], 'Toronto, Canada', 'Canada', 'Toronto', null, true, true),
+  ('66666666-6666-4666-8666-666666666666', 'Kofi Mensah', 'Rapper with melodic verses and sharp one-take freestyle ideas.', array['rapper', 'songwriter'], 'Accra, Ghana', 'Ghana', 'Accra', null, true, true),
+  ('77777777-7777-4777-8777-777777777777', 'Lena Ortiz', 'Dancer translating basslines into choreography and movement studies.', array['dancer', 'choreographer'], 'Mexico City, Mexico', 'Mexico', 'Mexico City', null, true, true),
+  ('88888888-8888-4888-8888-888888888888', 'Samir Khan', 'Guitarist layering clean riffs, ambient swells, and indie-pop sketches.', array['guitarist', 'songwriter'], 'Mumbai, India', 'India', 'Mumbai', null, true, true),
+  ('99999999-9999-4999-8999-999999999999', 'Zara Moon', 'Photographer shooting intimate portraits and experimental cover art.', array['photographer', 'designer'], 'New York, United States', 'United States', 'New York', null, true, true),
+  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Jules Carter', 'Animator making surreal loops and character-driven music visuals.', array['animator', 'graphic designer'], 'Amsterdam, Netherlands', 'Netherlands', 'Amsterdam', null, true, true)
 on conflict (id) do update
 set
   display_name = excluded.display_name,
-  first_name = excluded.first_name,
-  last_name = excluded.last_name,
   bio = excluded.bio,
   creator_types = excluded.creator_types,
   location = excluded.location,
+  country = excluded.country,
+  city = excluded.city,
   avatar_url = excluded.avatar_url,
   onboarding_complete = excluded.onboarding_complete,
   welcome_seen = excluded.welcome_seen;

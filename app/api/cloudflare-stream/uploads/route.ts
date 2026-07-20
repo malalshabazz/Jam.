@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { getAllowedMaxVideoSeconds } from "@/lib/pro-entitlements";
 
 type CloudflareDirectUploadResponse = {
   success: boolean;
@@ -11,9 +12,13 @@ type CloudflareDirectUploadResponse = {
 };
 
 const DEFAULT_MAX_DURATION_SECONDS = 45;
-const PRO_MAX_DURATION_SECONDS = 90;
 type ProfileDurationRow = {
   early_adopter: boolean | null;
+  video_count: number | null;
+  pro_subscription_active: boolean | null;
+};
+type AccountVideoRow = {
+  cloudflare_stream_id: string | null;
 };
 
 export async function POST(request: NextRequest) {
@@ -33,10 +38,7 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Not authenticated." }, { status: 401 });
   }
 
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-  );
+  const supabase = createAuthenticatedClient(accessToken);
   const {
     data: { user },
   } = await supabase.auth.getUser(accessToken);
@@ -56,18 +58,22 @@ export async function POST(request: NextRequest) {
 
   const body = (await request.json().catch(() => ({}))) as {
     maxDurationSeconds?: number;
+    allowLongerSource?: boolean;
   };
   const { data: profile } = await supabase
     .from("profiles")
-    .select("early_adopter")
+    .select("early_adopter, video_count, pro_subscription_active")
     .eq("id", user.id)
     .maybeSingle<ProfileDurationRow>();
-  const allowedMaxDurationSeconds = profile?.early_adopter
-    ? PRO_MAX_DURATION_SECONDS
-    : DEFAULT_MAX_DURATION_SECONDS;
+  const allowedMaxDurationSeconds = getAllowedMaxVideoSeconds({
+    earlyAdopter: profile?.early_adopter,
+    videoCount: profile?.video_count,
+    proSubscriptionActive: profile?.pro_subscription_active,
+  });
   const maxDurationSeconds = getMaxDurationSeconds(
     body.maxDurationSeconds,
     allowedMaxDurationSeconds,
+    Boolean(body.allowLongerSource),
   );
   logUploadApiStep("cloudflare direct upload create start", {
     maxDurationSeconds,
@@ -137,14 +143,245 @@ export async function POST(request: NextRequest) {
   });
 }
 
-function getMaxDurationSeconds(requestedDuration: unknown, allowedMaxDurationSeconds: number) {
+export async function DELETE(request: NextRequest) {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const apiToken = process.env.CLOUDFLARE_STREAM_API_TOKEN;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const authHeader = request.headers.get("authorization");
+  const accessToken = authHeader?.match(/^Bearer (.+)$/)?.[1];
+
+  if (!accessToken) {
+    return Response.json({ error: "Not authenticated." }, { status: 401 });
+  }
+
+  const supabase = createAuthenticatedClient(accessToken);
+  const {
+    data: { user },
+  } = await supabase.auth.getUser(accessToken);
+  if (!user) {
+    return Response.json({ error: "Not authenticated." }, { status: 401 });
+  }
+
+  const body = (await request.json().catch(() => ({}))) as {
+    videoId?: string;
+    currentPassword?: string;
+  };
+
+  // Single-video delete from the app (Stream media + DB row).
+  if (typeof body.videoId === "string" && body.videoId.trim()) {
+    return deleteOwnedVideo({
+      supabase,
+      userId: user.id,
+      videoId: body.videoId.trim(),
+      accountId,
+      apiToken,
+    });
+  }
+
+  if (!body.currentPassword || !user.email) {
+    return Response.json({ error: "Your current password is required." }, { status: 400 });
+  }
+
+  const passwordClient = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+  );
+  const { error: passwordError } = await passwordClient.auth.signInWithPassword({
+    email: user.email,
+    password: body.currentPassword,
+  });
+  if (passwordError) {
+    return Response.json({ error: "Your current password is incorrect." }, { status: 401 });
+  }
+
+  if (!serviceRoleKey) {
+    return Response.json(
+      { error: "Account deletion is not configured." },
+      { status: 500 },
+    );
+  }
+
+  const { data: videos, error: videosError } = await supabase
+    .from("videos")
+    .select("cloudflare_stream_id")
+    .eq("user_id", user.id)
+    .returns<AccountVideoRow[]>();
+  if (videosError) {
+    return Response.json({ error: "Could not load account videos." }, { status: 500 });
+  }
+
+  const streamIds = [...new Set(
+    (videos ?? [])
+      .map((video) => video.cloudflare_stream_id)
+      .filter((streamId): streamId is string => Boolean(streamId)),
+  )];
+
+  if (streamIds.length > 0 && (!accountId || !apiToken)) {
+    return Response.json(
+      { error: "Video deletion is not configured. Your account was not deleted." },
+      { status: 500 },
+    );
+  }
+
+  for (const streamId of streamIds) {
+    let response: Response;
+    try {
+      response = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${encodeURIComponent(streamId)}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${apiToken}` },
+        },
+      );
+    } catch {
+      return Response.json(
+        { error: "Could not delete your uploaded videos. Your account was not deleted." },
+        { status: 502 },
+      );
+    }
+
+    if (!response.ok && response.status !== 404) {
+      return Response.json(
+        { error: "Could not delete your uploaded videos. Your account was not deleted." },
+        { status: 502 },
+      );
+    }
+  }
+
+  const adminClient = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    serviceRoleKey,
+    {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    },
+  );
+  const { error: deleteError } = await adminClient.auth.admin.deleteUser(user.id);
+  if (deleteError) {
+    return Response.json({ error: deleteError.message }, { status: 500 });
+  }
+
+  return Response.json({ deleted: true });
+}
+
+type VideoDeleteRow = {
+  id: string;
+  user_id: string;
+  cloudflare_stream_id: string | null;
+};
+
+async function deleteOwnedVideo(input: {
+  supabase: ReturnType<typeof createAuthenticatedClient>;
+  userId: string;
+  videoId: string;
+  accountId: string | undefined;
+  apiToken: string | undefined;
+}) {
+  const { data: video, error: videoError } = await input.supabase
+    .from("videos")
+    .select("id, user_id, cloudflare_stream_id")
+    .eq("id", input.videoId)
+    .maybeSingle<VideoDeleteRow>();
+
+  if (videoError) {
+    return Response.json({ error: "Could not load video." }, { status: 500 });
+  }
+  if (!video) {
+    return Response.json({ error: "Video not found." }, { status: 404 });
+  }
+  if (video.user_id !== input.userId) {
+    return Response.json({ error: "You can only delete your own videos." }, { status: 403 });
+  }
+
+  const streamId = video.cloudflare_stream_id?.trim() || null;
+  if (streamId) {
+    if (!input.accountId || !input.apiToken) {
+      // Still remove the app row so delete isn't blocked by missing Stream config.
+      logUploadApiStep("video delete skipping stream cleanup", {
+        reason: "missing-cloudflare-config",
+        videoId: input.videoId,
+      });
+    } else {
+      try {
+        const response = await fetch(
+          `https://api.cloudflare.com/client/v4/accounts/${input.accountId}/stream/${encodeURIComponent(streamId)}`,
+          {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${input.apiToken}` },
+          },
+        );
+        if (!response.ok && response.status !== 404) {
+          const data = (await response.json().catch(() => ({}))) as {
+            errors?: { message?: string }[];
+          };
+          logUploadApiStep("video delete stream failed", {
+            videoId: input.videoId,
+            status: response.status,
+            error: data.errors?.[0]?.message,
+          });
+          // Continue to DB delete — orphan Stream media is better than a stuck profile tile.
+        }
+      } catch (error) {
+        logUploadApiStep("video delete stream network error", getErrorDetails(error));
+      }
+    }
+  }
+
+  const { error: deleteError } = await input.supabase
+    .from("videos")
+    .delete()
+    .eq("id", input.videoId)
+    .eq("user_id", input.userId);
+
+  if (deleteError) {
+    return Response.json(
+      { error: deleteError.message || "Could not delete video." },
+      { status: 500 },
+    );
+  }
+
+  return Response.json({
+    deleted: true,
+    cloudflareStreamId: streamId,
+  });
+}
+
+const SOURCE_UPLOAD_CAP_SECONDS = 600;
+
+function getMaxDurationSeconds(
+  requestedDuration: unknown,
+  allowedMaxDurationSeconds: number,
+  allowLongerSource = false,
+) {
   if (typeof requestedDuration !== "number" || !Number.isFinite(requestedDuration)) {
     return allowedMaxDurationSeconds;
   }
 
+  const requested = Math.ceil(requestedDuration);
+  if (allowLongerSource && requested > allowedMaxDurationSeconds) {
+    // Source may be longer when the client will clip to the allowed output length.
+    return Math.min(SOURCE_UPLOAD_CAP_SECONDS, Math.max(allowedMaxDurationSeconds, requested));
+  }
+
   return Math.max(
     DEFAULT_MAX_DURATION_SECONDS,
-    Math.min(Math.ceil(requestedDuration), allowedMaxDurationSeconds),
+    Math.min(requested, allowedMaxDurationSeconds),
+  );
+}
+
+function createAuthenticatedClient(accessToken: string) {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      global: {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      },
+    },
   );
 }
 
