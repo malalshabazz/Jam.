@@ -59,6 +59,8 @@ export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => ({}))) as {
     maxDurationSeconds?: number;
     allowLongerSource?: boolean;
+    protocol?: "tus" | "basic";
+    uploadLength?: number;
   };
   const { data: profile } = await supabase
     .from("profiles")
@@ -75,10 +77,34 @@ export async function POST(request: NextRequest) {
     allowedMaxDurationSeconds,
     Boolean(body.allowLongerSource),
   );
+  const uploadLength =
+    typeof body.uploadLength === "number" && Number.isFinite(body.uploadLength)
+      ? Math.max(0, Math.floor(body.uploadLength))
+      : null;
+  const useTus = body.protocol === "tus" || (uploadLength != null && uploadLength > 0);
+
+  if (useTus) {
+    if (!uploadLength || uploadLength <= 0) {
+      return Response.json(
+        { error: "uploadLength is required for resumable uploads." },
+        { status: 400 },
+      );
+    }
+    return createTusDirectUpload({
+      accountId,
+      apiToken,
+      maxDurationSeconds,
+      allowedMaxDurationSeconds,
+      requestedDuration: body.maxDurationSeconds ?? null,
+      uploadLength,
+    });
+  }
+
   logUploadApiStep("cloudflare direct upload create start", {
     maxDurationSeconds,
     allowedMaxDurationSeconds,
     requestedDuration: body.maxDurationSeconds ?? null,
+    protocol: "basic",
   });
 
   let response: Response;
@@ -114,6 +140,7 @@ export async function POST(request: NextRequest) {
     uploadHost: getUrlHost(data.result?.uploadURL),
     cloudflareErrorCode: data.errors?.[0]?.code,
     cloudflareErrorMessage: data.errors?.[0]?.message,
+    protocol: "basic",
   });
 
   if (!response.ok || !data.success || !data.result) {
@@ -140,6 +167,95 @@ export async function POST(request: NextRequest) {
     cloudflareStreamId: data.result.uid,
     uploadUrl: data.result.uploadURL,
     maxDurationSeconds,
+    protocol: "basic",
+  });
+}
+
+async function createTusDirectUpload(input: {
+  accountId: string;
+  apiToken: string;
+  maxDurationSeconds: number;
+  allowedMaxDurationSeconds: number;
+  requestedDuration: number | null;
+  uploadLength: number;
+}) {
+  logUploadApiStep("cloudflare tus upload create start", {
+    maxDurationSeconds: input.maxDurationSeconds,
+    allowedMaxDurationSeconds: input.allowedMaxDurationSeconds,
+    requestedDuration: input.requestedDuration,
+    uploadLength: input.uploadLength,
+    protocol: "tus",
+  });
+
+  // Tus metadata: key + space + base64(value). Omit requiresignedurls (default false).
+  const metadata = `maxDurationSeconds ${Buffer.from(String(input.maxDurationSeconds), "utf8").toString("base64")}`;
+
+  let response: Response;
+  try {
+    response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${input.accountId}/stream?direct_user=true`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${input.apiToken}`,
+          "Tus-Resumable": "1.0.0",
+          "Upload-Length": String(input.uploadLength),
+          "Upload-Metadata": metadata,
+        },
+      },
+    );
+  } catch (error) {
+    logUploadApiStep("cloudflare tus upload create network error", getErrorDetails(error));
+    return Response.json(
+      { error: "Could not reach Cloudflare Stream." },
+      { status: 502 },
+    );
+  }
+
+  const uploadUrl =
+    response.headers.get("Location") ??
+    response.headers.get("location");
+  const cloudflareStreamId =
+    response.headers.get("stream-media-id") ??
+    response.headers.get("Stream-Media-Id");
+
+  logUploadApiStep("cloudflare tus upload create response", {
+    status: response.status,
+    ok: response.ok,
+    hasUploadUrl: Boolean(uploadUrl),
+    hasStreamId: Boolean(cloudflareStreamId),
+    uploadHost: getUrlHost(uploadUrl),
+    protocol: "tus",
+  });
+
+  if (!response.ok || !uploadUrl || !cloudflareStreamId) {
+    const data = (await response.json().catch(() => ({}))) as {
+      errors?: { message?: string; code?: number }[];
+    };
+    const cloudflareError = data.errors?.[0];
+    const permissionMessage =
+      response.status === 401 || response.status === 403
+        ? "Cloudflare Stream API token must include Stream read and write/edit permissions for this account."
+        : null;
+
+    return Response.json(
+      {
+        error:
+          permissionMessage ??
+          cloudflareError?.message ??
+          "Could not create a Cloudflare Stream resumable upload.",
+        cloudflareStatus: response.status,
+        cloudflareErrorCode: cloudflareError?.code,
+      },
+      { status: response.status || 500 },
+    );
+  }
+
+  return Response.json({
+    cloudflareStreamId,
+    uploadUrl,
+    maxDurationSeconds: input.maxDurationSeconds,
+    protocol: "tus",
   });
 }
 

@@ -1,0 +1,642 @@
+diff --git a/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/CompositeVideoComposer.kt b/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/CompositeVideoComposer.kt
+index 0195db3..02c8051 100644
+--- a/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/CompositeVideoComposer.kt
++++ b/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/CompositeVideoComposer.kt
+@@ -95,7 +95,9 @@ class CompositeVideoComposer(private val context: Context, private val config: C
+             val textShadowOffsetX: Float = 0f,
+             val textShadowOffsetY: Float = 0f,
+             val textStrokeColor: String? = null,
+-            val textStrokeWidth: Float = 0f
++            val textStrokeWidth: Float = 0f,
++            /** When true, flip horizontally to match front-camera selfie preview. */
++            val mirrorHorizontal: Boolean = false
+     )
+ 
+     // GL Components
+diff --git a/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/MediaEngineModule.kt b/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/MediaEngineModule.kt
+index e01f241..59bbfc3 100644
+--- a/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/MediaEngineModule.kt
++++ b/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/MediaEngineModule.kt
+@@ -52,6 +52,7 @@ class CompositionClipRecord : Record {
+         @Field val textShadowOffsetY: Double = 0.0
+         @Field val textStrokeColor: String? = null
+         @Field val textStrokeWidth: Double = 0.0
++        @Field val mirrorHorizontal: Boolean = false
+         @Field val volumeEnvelope: VolumeEnvelopeRecord? = null
+ }
+ 
+@@ -422,6 +423,7 @@ class MediaEngineModule : Module() {
+                                                                         textShadowOffsetY = clipRecord.textShadowOffsetY.toFloat(),
+                                                                         textStrokeColor = clipRecord.textStrokeColor,
+                                                                         textStrokeWidth = clipRecord.textStrokeWidth.toFloat(),
++                                                                        mirrorHorizontal = clipRecord.mirrorHorizontal,
+                                                                         volumeKeyframes = clipRecord.volumeEnvelope
+                                                                                 ?.keyframes
+                                                                                 ?.map { kf -> Pair(kf.time, kf.volume.toFloat()) }
+diff --git a/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/RenderEngine.kt b/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/RenderEngine.kt
+index 5b138b9..38d8f3d 100644
+--- a/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/RenderEngine.kt
++++ b/node_modules/@projectyoked/expo-media-engine/android/src/main/java/com/projectyoked/mediaengine/RenderEngine.kt
+@@ -631,6 +631,11 @@ class RenderEngine(val context: Context, val config: CompositeVideoComposer.Comp
+ 
+         Matrix.scaleM(mvpMatrix, 0, scaleX, scaleY, 1f)
+ 
++        // Selfie mirror (front-camera) — flip across vertical center in NDC.
++        if (clip.mirrorHorizontal) {
++            Matrix.scaleM(mvpMatrix, 0, -1f, 1f, 1f)
++        }
++
+         val filterType = when (clip.filter) {
+             "grayscale"  -> 1
+             "sepia"      -> 2
+diff --git a/node_modules/@projectyoked/expo-media-engine/ios/MediaEngineModule.swift b/node_modules/@projectyoked/expo-media-engine/ios/MediaEngineModule.swift
+index b3da729..792fced 100644
+--- a/node_modules/@projectyoked/expo-media-engine/ios/MediaEngineModule.swift
++++ b/node_modules/@projectyoked/expo-media-engine/ios/MediaEngineModule.swift
+@@ -868,14 +868,55 @@ public class MediaEngineModule: Module {
+         }
+     }
+ 
++    /// Coerce JS / Expo dictionary numbers (Double, Int, NSNumber) into Double.
++    private static func doubleValue(_ value: Any?) -> Double? {
++        if let number = value as? NSNumber { return number.doubleValue }
++        if let number = value as? Double { return number }
++        if let number = value as? Int { return Double(number) }
++        if let number = value as? Float { return Double(number) }
++        return nil
++    }
++
++    /// Match Jam editor faces (System / Georgia / Menlo / Avenir / etc).
++    private static func resolveOverlayFont(family: String?, weight: String?, size: CGFloat) -> UIFont {
++        let normalizedFamily = (family ?? "")
++            .trimmingCharacters(in: .whitespacesAndNewlines)
++        if !normalizedFamily.isEmpty,
++           normalizedFamily.caseInsensitiveCompare("System") != .orderedSame,
++           let named = UIFont(name: normalizedFamily, size: size) {
++            return named
++        }
++
++        let normalizedWeight = (weight ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
++        let uiWeight: UIFont.Weight
++        switch normalizedWeight {
++        case "900", "800", "black", "ultrabold", "heavy":
++            uiWeight = .black
++        case "700", "bold":
++            uiWeight = .bold
++        case "600", "semibold":
++            uiWeight = .semibold
++        case "500", "medium":
++            uiWeight = .medium
++        case "400", "normal", "regular":
++            uiWeight = .regular
++        case "300", "light":
++            uiWeight = .light
++        default:
++            // Jam "classic" preview uses weight 900.
++            uiWeight = .black
++        }
++        return UIFont.systemFont(ofSize: size, weight: uiWeight)
++    }
++
+     private static func composeCompositeVideoImplBody(_ config: [String: Any]) async throws -> String {
+             guard let outputUri = config["outputUri"] as? String else {
+                 throw NSError(domain: "MediaEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing outputUri"])
+             }
+ 
+-            let width = config["width"] as? Double ?? 1280
+-            let height = config["height"] as? Double ?? 720
+-            let frameRate = config["frameRate"] as? Int ?? 30
++            let width = Self.doubleValue(config["width"]) ?? 1280
++            let height = Self.doubleValue(config["height"]) ?? 720
++            let frameRate = Int(Self.doubleValue(config["frameRate"]) ?? 30)
+ #if targetEnvironment(simulator)
+             let overlayContentsScale: CGFloat = 1.0
+ #else
+@@ -884,7 +925,20 @@ public class MediaEngineModule: Module {
+ 
+             let enablePassthrough = config["enablePassthrough"] as? Bool ?? true
+ 
++            // Overlay bitmaps are supersampled at ≥3× video pixels so fullscreen
++            // playback matches the retina editor preview.
++            let overlayRasterScale = max(overlayContentsScale, 3.0)
++
+             let tracks = config["tracks"] as? [[String: Any]] ?? []
++            NSLog(
++                "[MediaEngine] compose start output=%@ size=%.0fx%.0f tracks=%d passthroughEnabled=%@ rasterScale=%.1f",
++                outputUri,
++                width,
++                height,
++                tracks.count,
++                enablePassthrough ? "true" : "false",
++                overlayRasterScale
++            )
+ 
+             // --- Smart Passthrough Check ---
+             var usePassthrough = false
+@@ -924,10 +978,15 @@ public class MediaEngineModule: Module {
+             try? FileManager.default.removeItem(at: outputURL)
+ 
+             // Animation Layer Setup (for Overlay)
++            // contentsScale must match overlay bitmaps or AVFoundation softens text on export.
+             let parentLayer = CALayer()
+             let videoLayer = CALayer()
+             parentLayer.frame = CGRect(x: 0, y: 0, width: width, height: height)
+             videoLayer.frame = CGRect(x: 0, y: 0, width: width, height: height)
++            parentLayer.contentsScale = overlayRasterScale
++            videoLayer.contentsScale = overlayRasterScale
++            // Letterboxed contain renders leave transparent areas; force black bars.
++            parentLayer.backgroundColor = UIColor.black.cgColor
+             parentLayer.addSublayer(videoLayer)
+             parentLayer.isGeometryFlipped = true
+ 
+@@ -973,7 +1032,13 @@ public class MediaEngineModule: Module {
+ 
+                         let sourceRange: CMTimeRange
+                         if clipEndVal > 0 {
+-                            let clipEndCM = CMTime(seconds: clipEndVal * speed, preferredTimescale: 600)
++                            var endSeconds = clipEndVal * speed
++                            let assetEndSeconds = CMTimeGetSeconds(assetDuration)
++                            if assetEndSeconds.isFinite && assetEndSeconds > 0 {
++                                endSeconds = min(endSeconds, assetEndSeconds)
++                            }
++                            endSeconds = max(endSeconds, CMTimeGetSeconds(clipStartCM) + 0.05)
++                            let clipEndCM = CMTime(seconds: endSeconds, preferredTimescale: 600)
+                             sourceRange = CMTimeRange(start: clipStartCM, end: clipEndCM)
+                         } else {
+                             // Consume `duration * speed` worth of source content
+@@ -1010,39 +1075,61 @@ public class MediaEngineModule: Module {
+ 
+                         let naturalSize = try? await assetTrack.load(.naturalSize)
+                         let assetSize = naturalSize ?? CGSize(width: 1280, height: 720)
++                        // Honor camera/library orientation tags (portrait iPhone clips are
++                        // usually landscape naturalSize + preferredTransform).
++                        let preferredTransform = (try? await assetTrack.load(.preferredTransform)) ?? .identity
+ 
+                         let targetW = CGFloat(width)
+                         let targetH = CGFloat(height)
+-                        let videoW = assetSize.width
+-                        let videoH = assetSize.height
+-
+-                        var scaleX: CGFloat = 1.0
+-                        var scaleY: CGFloat = 1.0
+-
+-                        if resizeMode == "cover" {
+-                            let widthRatio = targetW / videoW
+-                            let heightRatio = targetH / videoH
+-                            let ratio = max(widthRatio, heightRatio)
+-                            scaleX = ratio; scaleY = ratio
++                        let orientedRect = CGRect(origin: .zero, size: assetSize).applying(preferredTransform)
++                        let videoW = abs(orientedRect.width)
++                        let videoH = abs(orientedRect.height)
++
++                        var fitScale: CGFloat = 1.0
++                        var stretchX: CGFloat = 1.0
++                        var stretchY: CGFloat = 1.0
++                        let useStretch = resizeMode == "stretch"
++
++                        if useStretch {
++                            stretchX = targetW / max(videoW, 1)
++                            stretchY = targetH / max(videoH, 1)
+                         } else if resizeMode == "contain" {
+-                            let widthRatio = targetW / videoW
+-                            let heightRatio = targetH / videoH
+-                            let ratio = min(widthRatio, heightRatio)
+-                            scaleX = ratio; scaleY = ratio
++                            fitScale = min(targetW / max(videoW, 1), targetH / max(videoH, 1))
+                         } else {
+-                            scaleX = targetW / videoW; scaleY = targetH / videoH
++                            // cover
++                            fitScale = max(targetW / max(videoW, 1), targetH / max(videoH, 1))
+                         }
+ 
+-                        // Build transform: scale → rotate → translate to center → user offset
+-                        var t = CGAffineTransform(scaleX: scaleX * CGFloat(scale), y: scaleY * CGFloat(scale))
++                        let userScale = CGFloat(scale)
++                        let mirrorHorizontal = clip["mirrorHorizontal"] as? Bool ?? false
++                        var t = preferredTransform
++                        if useStretch {
++                            t = t.concatenating(CGAffineTransform(scaleX: stretchX * userScale, y: stretchY * userScale))
++                        } else {
++                            t = t.concatenating(CGAffineTransform(scaleX: fitScale * userScale, y: fitScale * userScale))
++                        }
+                         if abs(userRotation) > 0.001 {
+                             t = t.rotated(by: CGFloat(userRotation * .pi / 180))
+                         }
+-                        let scaledW = videoW * scaleX * CGFloat(scale)
+-                        let scaledH = videoH * scaleY * CGFloat(scale)
+-                        let dx = (targetW - scaledW) / 2 + CGFloat(x) * targetW
+-                        let dy = (targetH - scaledH) / 2 + CGFloat(y) * targetH
+-                        t = t.translatedBy(x: dx / (scaleX * CGFloat(scale)), y: dy / (scaleY * CGFloat(scale)))
++
++                        let scaledRect = CGRect(origin: .zero, size: assetSize)
++                            .applying(preferredTransform)
++                            .applying(
++                                useStretch
++                                    ? CGAffineTransform(scaleX: stretchX * userScale, y: stretchY * userScale)
++                                    : CGAffineTransform(scaleX: fitScale * userScale, y: fitScale * userScale)
++                            )
++                        let dx = (targetW - abs(scaledRect.width)) / 2 - scaledRect.origin.x + CGFloat(x) * targetW
++                        let dy = (targetH - abs(scaledRect.height)) / 2 - scaledRect.origin.y + CGFloat(y) * targetH
++                        t = t.concatenating(CGAffineTransform(translationX: dx, y: dy))
++
++                        // Selfie mirror: flip across the composition's vertical center so
++                        // playback matches the front-camera preview (TikTok-style).
++                        if mirrorHorizontal {
++                            t = t.concatenating(CGAffineTransform(scaleX: -1, y: 1))
++                            t = t.concatenating(CGAffineTransform(translationX: targetW, y: 0))
++                            NSLog("[MediaEngine] applied mirrorHorizontal for video clip")
++                        }
+ 
+                         layerInstruction.setTransform(t, at: insertAt)
+ 
+@@ -1169,76 +1256,170 @@ public class MediaEngineModule: Module {
+                     hasOverlays = true
+                     for clip in clips {
+                         let text = clip["text"] as? String ?? ""
+-                        let fontSize = clip["fontSize"] as? Double ?? 24.0
+-                        let x = clip["x"] as? Double ?? 0.5
+-                        let y = clip["y"] as? Double ?? 0.5
+-                        let colorHex = clip["color"] as? String ?? "#FFFFFF"
+-                        let startTime = clip["startTime"] as? Double ?? 0.0
+-                        let clipDuration = clip["duration"] as? Double ?? 5.0
+-
+-                        let clipOpacity = clip["opacity"] as? Float ?? 1.0
++                        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
++                            NSLog("[MediaEngine] skipping empty text clip")
++                            continue
++                        }
++                        // Prefer flat fields; also accept nested textStyle from JS.
++                        let style = clip["textStyle"] as? [String: Any]
++                        let fontSize = Self.doubleValue(clip["fontSize"])
++                            ?? Self.doubleValue(style?["fontSize"])
++                            ?? 24.0
++                        let x = Self.doubleValue(clip["x"]) ?? 0.5
++                        let y = Self.doubleValue(clip["y"]) ?? 0.5
++                        let colorHex = clip["color"] as? String
++                            ?? style?["color"] as? String
++                            ?? "#FFFFFF"
++                        let startTime = Self.doubleValue(clip["startTime"]) ?? 0.0
++                        let clipDuration = Self.doubleValue(clip["duration"]) ?? 5.0
++                        let clipOpacity = Float(Self.doubleValue(clip["opacity"]) ?? 1.0)
+ 
+-                        // Rich text style
+                         let shadowColorHex = clip["shadowColor"] as? String
+-                        let shadowRadius = clip["shadowRadius"] as? Double ?? 0.0
+-                        let shadowOffsetX = clip["shadowOffsetX"] as? Double ?? 0.0
+-                        let shadowOffsetY = clip["shadowOffsetY"] as? Double ?? 0.0
+-
+-                        let textLayer = CATextLayer()
+-                        textLayer.string = text
+-                        textLayer.fontSize = CGFloat(fontSize)
+-                        textLayer.foregroundColor = UIColor(hex: colorHex)?.cgColor ?? UIColor.white.cgColor
+-                        textLayer.alignmentMode = .center
+-                        textLayer.contentsScale = overlayContentsScale
+-                        textLayer.isWrapped = true
+-
+-                        let w = CGFloat(width) * 0.8
+-                        let h = CGFloat(fontSize) * 1.5
+-
+-                        textLayer.frame = CGRect(
+-                            x: CGFloat(x) * CGFloat(width) - w / 2,
+-                            y: CGFloat(y) * CGFloat(height) - h / 2,
+-                            width: w,
+-                            height: h
++                            ?? style?["shadowColor"] as? String
++                        let shadowRadius = Self.doubleValue(clip["shadowRadius"])
++                            ?? Self.doubleValue(style?["shadowRadius"])
++                            ?? 0.0
++                        let shadowOffsetX = Self.doubleValue(clip["shadowOffsetX"])
++                            ?? Self.doubleValue(style?["shadowOffsetX"])
++                            ?? 0.0
++                        let shadowOffsetY = Self.doubleValue(clip["shadowOffsetY"])
++                            ?? Self.doubleValue(style?["shadowOffsetY"])
++                            ?? 0.0
++                        let strokeWidth = Self.doubleValue(clip["strokeWidth"])
++                            ?? Self.doubleValue(style?["strokeWidth"])
++                            ?? 0.0
++                        let strokeHex = clip["strokeColor"] as? String
++                            ?? style?["strokeColor"] as? String
++                            ?? "#000000"
++                        let bgPadding = Self.doubleValue(clip["backgroundPadding"])
++                            ?? Self.doubleValue(style?["backgroundPadding"])
++                            ?? 8.0
++                        let bgHex = clip["backgroundColor"] as? String
++                            ?? style?["backgroundColor"] as? String
++                        let fontWeight = (clip["fontWeight"] as? String)
++                            ?? (style?["fontWeight"] as? String)
++                            ?? "900"
++                        let fontFamily = (clip["fontFamily"] as? String)
++                            ?? (style?["fontFamily"] as? String)
++
++                        // Rasterize text into a supersampled UIImage. Point size is already
++                        // in video-pixel space from JS; draw at 3× so glyphs stay sharp when
++                        // the composition is viewed fullscreen (matches retina editor preview).
++                        let maxTextWidth = CGFloat(width) * 0.86
++                        let font = Self.resolveOverlayFont(
++                            family: fontFamily,
++                            weight: fontWeight,
++                            size: CGFloat(fontSize)
+                         )
+-
+-                        // Shadow via layer properties
++                        let textColor = UIColor(hex: colorHex) ?? .white
++                        var attrs: [NSAttributedString.Key: Any] = [
++                            .font: font,
++                            .foregroundColor: textColor,
++                        ]
++                        if strokeWidth > 0 {
++                            attrs[.strokeColor] = UIColor(hex: strokeHex) ?? .black
++                            // Negative width = fill + stroke (matches preview outline weight).
++                            attrs[.strokeWidth] = -max(strokeWidth, fontSize * 0.1)
++                        }
+                         if let shadowHex = shadowColorHex, shadowRadius > 0 {
+-                            textLayer.shadowColor = UIColor(hex: shadowHex)?.cgColor
+-                            textLayer.shadowRadius = CGFloat(shadowRadius)
+-                            textLayer.shadowOpacity = 1.0
+-                            textLayer.shadowOffset = CGSize(width: shadowOffsetX, height: shadowOffsetY)
++                            let shadow = NSShadow()
++                            shadow.shadowColor = UIColor(hex: shadowHex) ?? UIColor.black.withAlphaComponent(0.55)
++                            shadow.shadowBlurRadius = CGFloat(shadowRadius)
++                            shadow.shadowOffset = CGSize(width: shadowOffsetX, height: shadowOffsetY)
++                            attrs[.shadow] = shadow
+                         }
+-
+-                        // Stroke via NSAttributedString
+-                        let strokeWidth = clip["strokeWidth"] as? Double ?? 0.0
+-                        if strokeWidth > 0, let strokeHex = clip["strokeColor"] as? String {
+-                            let strokeColor = UIColor(hex: strokeHex) ?? .black
+-                            let strokeAttr: [NSAttributedString.Key: Any] = [
+-                                .strokeColor: strokeColor,
+-                                .strokeWidth: -strokeWidth,  // negative = fill + stroke
+-                                .foregroundColor: UIColor(hex: colorHex) ?? .white,
+-                                .font: UIFont.systemFont(ofSize: CGFloat(fontSize))
+-                            ]
+-                            textLayer.string = NSAttributedString(string: text, attributes: strokeAttr)
++                        let paragraph = NSMutableParagraphStyle()
++                        paragraph.alignment = .center
++                        paragraph.lineBreakMode = .byWordWrapping
++                        attrs[.paragraphStyle] = paragraph
++
++                        let attrStr = NSAttributedString(string: text, attributes: attrs)
++                        let textBounds = attrStr.boundingRect(
++                            with: CGSize(width: maxTextWidth, height: CGFloat(height)),
++                            options: [.usesLineFragmentOrigin, .usesFontLeading],
++                            context: nil
++                        ).integral
++                        let padX = CGFloat(bgHex == nil ? 2 : bgPadding)
++                        let padY = CGFloat(bgHex == nil ? 2 : max(4, bgPadding * 0.55))
++                        // Slight padding so antialiased edges aren't clipped.
++                        let imgW = max(2, ceil(textBounds.width + padX * 2))
++                        let imgH = max(2, ceil(textBounds.height + padY * 2))
++
++                        // Always supersample overlays at least 3× relative to video pixels.
++                        let textRasterScale = overlayRasterScale
++                        let format = UIGraphicsImageRendererFormat.default()
++                        format.scale = textRasterScale
++                        format.opaque = false
++                        let renderer = UIGraphicsImageRenderer(
++                            size: CGSize(width: imgW, height: imgH),
++                            format: format
++                        )
++                        let image = renderer.image { _ in
++                            if let bgHex, let bgColor = UIColor(hex: bgHex) {
++                                bgColor.setFill()
++                                UIBezierPath(
++                                    roundedRect: CGRect(x: 0, y: 0, width: imgW, height: imgH),
++                                    cornerRadius: max(4, CGFloat(fontSize) * 0.22)
++                                ).fill()
++                            }
++                            attrStr.draw(
++                                with: CGRect(
++                                    x: padX,
++                                    y: padY,
++                                    width: textBounds.width,
++                                    height: textBounds.height
++                                ),
++                                options: [.usesLineFragmentOrigin, .usesFontLeading],
++                                context: nil
++                            )
+                         }
+ 
+-                        // Background layer
+-                        let bgPadding = clip["backgroundPadding"] as? Double ?? 8.0
+-                        if let bgHex = clip["backgroundColor"] as? String {
+-                            let bgLayer = CALayer()
+-                            bgLayer.contentsScale = overlayContentsScale
+-                            bgLayer.backgroundColor = UIColor(hex: bgHex)?.cgColor
+-                            bgLayer.cornerRadius = 4
+-                            bgLayer.frame = textLayer.frame.insetBy(dx: -bgPadding, dy: -bgPadding / 2)
+-                            bgLayer.opacity = 0
+-                            Self.addTimingAnimation(to: bgLayer, startTime: startTime, duration: clipDuration, maxOpacity: clipOpacity)
+-                            parentLayer.addSublayer(bgLayer)
++                        let imgLayer = CALayer()
++                        imgLayer.contents = image.cgImage
++                        imgLayer.contentsScale = textRasterScale
++                        // Exact frame match — avoid .resize resampling softness.
++                        imgLayer.contentsGravity = .center
++                        imgLayer.allowsEdgeAntialiasing = true
++                        imgLayer.edgeAntialiasingMask = [
++                            .layerLeftEdge, .layerRightEdge, .layerTopEdge, .layerBottomEdge,
++                        ]
++                        imgLayer.minificationFilter = .trilinear
++                        imgLayer.magnificationFilter = .trilinear
++                        // parentLayer.isGeometryFlipped = true → UIKit top-left coords.
++                        let centerX = CGFloat(x) * CGFloat(width)
++                        let centerY = CGFloat(y) * CGFloat(height)
++                        imgLayer.frame = CGRect(
++                            x: (centerX - imgW / 2).rounded(.toNearestOrAwayFromZero),
++                            y: (centerY - imgH / 2).rounded(.toNearestOrAwayFromZero),
++                            width: imgW,
++                            height: imgH
++                        )
++                        // Full-span overlays: set opacity directly. Timed CA opacity
++                        // animations often stay at 0 during AVAssetExportSession.
++                        if startTime <= 0.05 {
++                            imgLayer.opacity = clipOpacity
++                        } else {
++                            imgLayer.opacity = 0
++                            Self.addTimingAnimation(
++                                to: imgLayer,
++                                startTime: startTime,
++                                duration: clipDuration,
++                                maxOpacity: clipOpacity
++                            )
+                         }
+-
+-                        textLayer.opacity = 0
+-                        Self.addTimingAnimation(to: textLayer, startTime: startTime, duration: clipDuration, maxOpacity: clipOpacity)
+-                        parentLayer.addSublayer(textLayer)
++                        parentLayer.addSublayer(imgLayer)
++                        NSLog(
++                            "[MediaEngine] text overlay text=\"%@\" font=%@/%.0f xy=(%.3f,%.3f) px=%.0fx%.0f scale=%.1f opacity=%.2f",
++                            text,
++                            font.fontName,
++                            fontSize,
++                            x,
++                            y,
++                            imgW,
++                            imgH,
++                            textRasterScale,
++                            clipOpacity
++                        )
+                     }
+ 
+                 } else if type == "image" {
+@@ -1246,26 +1427,34 @@ public class MediaEngineModule: Module {
+                     for clip in clips {
+                         guard let uri = clip["uri"] as? String else { continue }
+                         let imagePath = uri.replacingOccurrences(of: "file://", with: "")
+-                        guard let image = UIImage(contentsOfFile: imagePath) else { continue }
++                        guard let image = UIImage(contentsOfFile: imagePath) else {
++                            NSLog("[MediaEngine] image overlay failed to load %@", imagePath)
++                            continue
++                        }
+ 
+-                        let startTime = clip["startTime"] as? Double ?? 0.0
+-                        let clipDuration = clip["duration"] as? Double ?? 5.0
+-                        let x = clip["x"] as? Double ?? 0.5
+-                        let y = clip["y"] as? Double ?? 0.5
+-                        let scale = clip["scale"] as? Double ?? 1.0
+-                        let rotation = clip["rotation"] as? Double ?? 0.0
+-                        let clipOpacity = clip["opacity"] as? Float ?? 1.0
++                        let startTime = Self.doubleValue(clip["startTime"]) ?? 0.0
++                        let clipDuration = Self.doubleValue(clip["duration"]) ?? 5.0
++                        let x = Self.doubleValue(clip["x"]) ?? 0.5
++                        let y = Self.doubleValue(clip["y"]) ?? 0.5
++                        let scale = Self.doubleValue(clip["scale"]) ?? 1.0
++                        let rotation = Self.doubleValue(clip["rotation"]) ?? 0.0
++                        let clipOpacity = Float(Self.doubleValue(clip["opacity"]) ?? 1.0)
+ 
+                         let imgW = CGFloat(width) * CGFloat(scale)
+-                        let imgH = image.size.height / image.size.width * imgW
++                        let imgH = image.size.height / max(image.size.width, 1) * imgW
+ 
+                         let imgLayer = CALayer()
+                         imgLayer.contents = image.cgImage
+-                        imgLayer.contentsScale = overlayContentsScale
++                        // Filter/image PNGs from JS are 1× video pixels — do not apply
++                        // screen scale or AVFoundation will upscale a soft bitmap.
++                        imgLayer.contentsScale = 1
+                         imgLayer.contentsGravity = .resizeAspectFill
++                        imgLayer.allowsEdgeAntialiasing = true
++                        let centerX = CGFloat(x) * CGFloat(width)
++                        let centerY = CGFloat(y) * CGFloat(height)
+                         imgLayer.frame = CGRect(
+-                            x: CGFloat(x) * CGFloat(width) - imgW / 2,
+-                            y: CGFloat(y) * CGFloat(height) - imgH / 2,
++                            x: centerX - imgW / 2,
++                            y: centerY - imgH / 2,
+                             width: imgW,
+                             height: imgH
+                         )
+@@ -1274,9 +1463,25 @@ public class MediaEngineModule: Module {
+                                 CGFloat(rotation * .pi / 180), 0, 0, 1
+                             )
+                         }
+-                        imgLayer.opacity = 0
+-                        Self.addTimingAnimation(to: imgLayer, startTime: startTime, duration: clipDuration, maxOpacity: clipOpacity)
++                        if startTime <= 0.05 {
++                            imgLayer.opacity = clipOpacity
++                        } else {
++                            imgLayer.opacity = 0
++                            Self.addTimingAnimation(
++                                to: imgLayer,
++                                startTime: startTime,
++                                duration: clipDuration,
++                                maxOpacity: clipOpacity
++                            )
++                        }
+                         parentLayer.addSublayer(imgLayer)
++                        NSLog(
++                            "[MediaEngine] image overlay path=%@ xy=(%.3f,%.3f) opacity=%.2f",
++                            imagePath,
++                            x,
++                            y,
++                            clipOpacity
++                        )
+                     }
+                 }
+             }
+@@ -1338,6 +1543,12 @@ public class MediaEngineModule: Module {
+             }
+ 
+             let needsOverlaySecondPass = hasOverlays && !usePassthrough
++            NSLog(
++                "[MediaEngine] export plan hasOverlays=%@ usePassthrough=%@ secondPass=%@",
++                hasOverlays ? "true" : "false",
++                usePassthrough ? "true" : "false",
++                needsOverlaySecondPass ? "true" : "false"
++            )
+ 
+             if needsOverlaySecondPass {
+                 let tempURL = FileManager.default.temporaryDirectory
+@@ -1358,12 +1569,14 @@ public class MediaEngineModule: Module {
+                     audioMix.inputParameters = audioMixParams
+                     pass1.audioMix = audioMix
+                 }
++                NSLog("[MediaEngine] pass-1 export start preset=%@", presetName)
+                 await pass1.export()
+                 guard pass1.status == .completed else {
+                     throw NSError(domain: "MediaEngine", code: 5, userInfo: [
+                         NSLocalizedDescriptionKey: "Video pass-1 export failed: \(pass1.error?.localizedDescription ?? "Unknown error")",
+                     ])
+                 }
++                NSLog("[MediaEngine] pass-1 export complete")
+ 
+                 let pass1Asset = AVAsset(url: tempURL)
+                 let pass1Duration = try await pass1Asset.load(.duration)
+@@ -1392,8 +1605,9 @@ public class MediaEngineModule: Module {
+                 videoComposition2.renderSize = CGSize(width: width, height: height)
+                 videoComposition2.frameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+                 let layerInstruction2 = AVMutableVideoCompositionLayerInstruction(assetTrack: vComp2)
+-                let preferredTransform = try await srcVideo.load(.preferredTransform)
+-                layerInstruction2.setTransform(preferredTransform, at: .zero)
++                // Pass-1 already rendered into renderSize — applying preferredTransform
++                // again rotates/offsets overlays relative to the picture.
++                layerInstruction2.setTransform(.identity, at: .zero)
+                 let instruction2 = AVMutableVideoCompositionInstruction()
+                 instruction2.timeRange = CMTimeRange(start: .zero, duration: pass1Duration)
+                 instruction2.layerInstructions = [layerInstruction2]
+@@ -1412,6 +1626,7 @@ public class MediaEngineModule: Module {
+                 pass2.outputFileType = .mp4
+                 pass2.videoComposition = videoComposition2
+ 
++                NSLog("[MediaEngine] pass-2 overlay export start")
+                 await pass2.export()
+ 
+                 if hasOverlays {
+@@ -1424,6 +1639,7 @@ public class MediaEngineModule: Module {
+                         NSLocalizedDescriptionKey: "Video export to \(outputUri) failed: \(pass2.error?.localizedDescription ?? "Unknown error")",
+                     ])
+                 }
++                NSLog("[MediaEngine] pass-2 overlay export complete → %@", outputUri)
+                 return outputUri
+             }
+ 
+@@ -1523,9 +1739,26 @@ extension UIColor {
+         var hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+         hexSanitized = hexSanitized.replacingOccurrences(of: "#", with: "")
+ 
++        // Expand #rgb → #rrggbb so short Jam colors like #fff parse correctly.
++        if hexSanitized.count == 3 {
++            hexSanitized = hexSanitized.map { char in String([char, char]) }.joined()
++        }
++
+         var rgb: UInt64 = 0
+         guard Scanner(string: hexSanitized).scanHexInt64(&rgb) else { return nil }
+ 
++        if hexSanitized.count == 8 {
++            self.init(
++                red: CGFloat((rgb & 0xFF000000) >> 24) / 255.0,
++                green: CGFloat((rgb & 0x00FF0000) >> 16) / 255.0,
++                blue: CGFloat((rgb & 0x0000FF00) >> 8) / 255.0,
++                alpha: CGFloat(rgb & 0x000000FF) / 255.0
++            )
++            return
++        }
++
++        guard hexSanitized.count == 6 else { return nil }
++
+         self.init(
+             red: CGFloat((rgb & 0xFF0000) >> 16) / 255.0,
+             green: CGFloat((rgb & 0x00FF00) >> 8) / 255.0,

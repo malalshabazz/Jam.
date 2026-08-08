@@ -6,10 +6,17 @@ import {
   createStreamUpload,
   getVideoUploadErrorDetails,
   logVideoUploadStep,
+  resolveLocalFileSize,
   uploadToCloudflare,
   waitForCloudflareStreamReady,
   type NativeVideoAsset,
+  type StreamUploadProtocol,
 } from "@/lib/native-cloudflare";
+import {
+  bakeVideoPresentation,
+  isVideoBakeAvailable,
+  needsPresentationBake,
+} from "@/lib/bake-video-presentation";
 import {
   normalizeVideoFilter,
   normalizeVideoTextOverlays,
@@ -36,14 +43,23 @@ export type PendingVideoUpload = {
   trimEndSeconds: number;
   videoFilter: VideoFilterId;
   textOverlays: VideoTextOverlay[];
+  lookingFor: boolean;
   progress: number;
   phase: PendingVideoUploadPhase;
   errorMessage: string | null;
   /** Set after bytes land on Stream so retries can resume without re-uploading. */
   cloudflareStreamId?: string | null;
+  /** In-progress tus session — resume chunks without creating a new Stream media. */
+  tusUploadUrl?: string | null;
+  pendingStreamId?: string | null;
+  uploadProtocol?: StreamUploadProtocol | null;
   /** Set after clip succeeds (trimmed posts). */
   clippedStreamId?: string | null;
   publishedThumbnailTimeMs?: number | null;
+  /** Local baked MP4 (trim + filter + text) — retries skip re-bake when set. */
+  bakedAsset?: NativeVideoAsset | null;
+  /** True once edits are burned into bakedAsset. */
+  presentationBaked?: boolean;
 };
 
 export type PendingUploadPostedEvent = {
@@ -106,16 +122,8 @@ export function usePendingUploadFeedProgress(userId: string) {
   return useMemo(() => getPendingUploadFeedProgress(userId), [uploads, userId]);
 }
 
-export function getPendingUploads() {
-  return pendingUploads;
-}
-
 export function getPendingUploadsForUser(userId: string) {
   return pendingUploads.filter((upload) => upload.userId === userId);
-}
-
-export function getActivePendingUploadsForUser(userId: string) {
-  return getPendingUploadsForUser(userId).filter((upload) => upload.phase !== "failed");
 }
 
 export function getPendingUploadById(id: string) {
@@ -143,6 +151,8 @@ export function pendingUploadToProfileVideo(upload: PendingVideoUpload): Profile
     thumbnailTimeMs: upload.thumbnailTimeMs,
     videoFilter: upload.videoFilter,
     textOverlays: upload.textOverlays,
+    lookingFor: upload.lookingFor,
+    looking_for: upload.lookingFor,
     created_at: new Date().toISOString(),
   };
 }
@@ -217,44 +227,187 @@ async function runPendingUpload(uploadId: string) {
   });
 
   try {
-    let cloudflareStreamId: string | null = upload.cloudflareStreamId ?? null;
-    let lastError: unknown = null;
-    const uploadMaxDurationSeconds = Math.max(
-      upload.maxDurationSeconds,
-      Math.ceil(upload.sourceDurationSeconds) + 2,
+    let working = getPendingUploadById(uploadId) ?? upload;
+    let assetToUpload = working.bakedAsset ?? working.asset;
+    let publishFilter = working.presentationBaked ? ("none" as VideoFilterId) : working.videoFilter;
+    let publishOverlays = working.presentationBaked ? [] : working.textOverlays;
+    let clientTrimmed = Boolean(working.presentationBaked);
+    let uploadMaxDurationSeconds = Math.max(
+      working.maxDurationSeconds,
+      Math.ceil(working.sourceDurationSeconds) + 2,
     );
+    let publishedThumbnailTimeMs = working.publishedThumbnailTimeMs ?? working.thumbnailTimeMs;
+
+    // Trim-only must NOT local-bake — landscape camera-roll remux often fails and
+    // previously fell through to a soft 540p "success". Cloudflare Stream clip
+    // applies trim after uploading the original full-res file.
+    const shouldBake =
+      !working.presentationBaked &&
+      !working.cloudflareStreamId &&
+      needsPresentationBake(working);
+
+    if (shouldBake && isVideoBakeAvailable()) {
+      updatePendingUpload(uploadId, { phase: "processing", progress: Math.max(working.progress, 4) });
+      const bakePulse = setInterval(() => {
+        const current = getPendingUploadById(uploadId);
+        if (!current || current.phase !== "processing" || current.presentationBaked) return;
+        updatePendingUpload(uploadId, {
+          phase: "processing",
+          progress: Math.min(28, Math.max(4, current.progress + 1)),
+        });
+      }, 1200);
+      try {
+        const baked = await bakeVideoPresentation({
+          asset: working.asset,
+          trimStartSeconds: working.trimStartSeconds,
+          trimEndSeconds: working.trimEndSeconds,
+          videoFilter: working.videoFilter,
+          textOverlays: working.textOverlays,
+          thumbnailTimeMs: working.thumbnailTimeMs,
+          uploadId,
+        });
+        publishedThumbnailTimeMs = getClippedThumbnailTimeMs(working);
+        assetToUpload = baked.asset;
+        publishFilter = "none";
+        publishOverlays = [];
+        clientTrimmed = baked.trimmed;
+        uploadMaxDurationSeconds = Math.max(
+          working.maxDurationSeconds,
+          Math.ceil(baked.outputDurationSeconds) + 2,
+        );
+        const bakedThumbnailUri = baked.thumbnailUri ?? working.localThumbnailUri;
+        updatePendingUpload(uploadId, {
+          bakedAsset: baked.asset,
+          presentationBaked: true,
+          publishedThumbnailTimeMs,
+          localThumbnailUri: bakedThumbnailUri,
+          // Clear overlay metadata on the pending tile — pixels already include them.
+          videoFilter: "none",
+          textOverlays: [],
+          phase: "processing",
+          progress: 30,
+        });
+        working = {
+          ...working,
+          bakedAsset: baked.asset,
+          presentationBaked: true,
+          publishedThumbnailTimeMs,
+          localThumbnailUri: bakedThumbnailUri,
+          videoFilter: "none",
+          textOverlays: [],
+        };
+      } catch (error) {
+        logVideoUploadStep("video bake failed — falling back to overlay metadata", {
+          uploadId,
+          ...getVideoUploadErrorDetails(error),
+        });
+        // Keep original asset + Stream clip / playback overlays.
+      } finally {
+        clearInterval(bakePulse);
+      }
+    } else if (shouldBake && !isVideoBakeAvailable()) {
+      logVideoUploadStep("video bake skipped — native module unavailable", {
+        uploadId,
+        hint: "Rebuild the Jam development client after installing @projectyoked/expo-media-engine.",
+      });
+    }
+
+    working = getPendingUploadById(uploadId) ?? working;
+    let cloudflareStreamId: string | null = working.cloudflareStreamId ?? null;
+    let lastError: unknown = null;
+    const maxUploadAttempts = 5;
+    const uploadBackoffMs = [1000, 2000, 4000, 8000];
 
     if (cloudflareStreamId) {
       logVideoUploadStep("background upload resume after prior success", {
         uploadId,
         cloudflareStreamId,
-        clippedStreamId: upload.clippedStreamId ?? null,
+        clippedStreamId: working.clippedStreamId ?? null,
       });
-      updatePendingUpload(uploadId, { phase: "uploading", progress: Math.max(upload.progress, 78) });
+      updatePendingUpload(uploadId, { phase: "uploading", progress: Math.max(working.progress, 78) });
     } else {
-      for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const uploadLength = await resolveLocalFileSize(assetToUpload);
+      for (let attempt = 1; attempt <= maxUploadAttempts; attempt += 1) {
         try {
-          logVideoUploadStep("background upload attempt start", { uploadId, attempt });
-          const uploadRequest = await createStreamUpload(uploadMaxDurationSeconds, {
-            allowLongerSource: needsTrimClip(upload) || upload.sourceDurationSeconds > upload.maxDurationSeconds,
+          working = getPendingUploadById(uploadId) ?? working;
+          logVideoUploadStep("background upload attempt start", {
+            uploadId,
+            attempt,
+            maxUploadAttempts,
+            presentationBaked: clientTrimmed,
+            uploadLength,
+            hasTusSession: Boolean(working.tusUploadUrl && working.pendingStreamId),
           });
-          await uploadToCloudflare(uploadRequest.uploadUrl, upload.asset, (nextProgress) => {
-            updatePendingUpload(uploadId, {
-              phase: "uploading",
-              progress: Math.min(78, Math.max(1, Math.round(nextProgress * 0.78))),
+
+          let uploadUrl = working.tusUploadUrl ?? null;
+          let streamId = working.pendingStreamId ?? null;
+          let protocol: StreamUploadProtocol = working.uploadProtocol === "tus" ? "tus" : "basic";
+
+          if (!uploadUrl || !streamId) {
+            const uploadRequest = await createStreamUpload(uploadMaxDurationSeconds, {
+              allowLongerSource:
+                (!clientTrimmed && needsTrimClip(working)) ||
+                working.sourceDurationSeconds > working.maxDurationSeconds,
+              uploadLength,
             });
+            uploadUrl = uploadRequest.uploadUrl;
+            streamId = uploadRequest.cloudflareStreamId;
+            protocol = uploadRequest.protocol;
+            if (protocol === "tus") {
+              // Persist before bytes finish so retries can resume mid-file.
+              updatePendingUpload(uploadId, {
+                tusUploadUrl: uploadUrl,
+                pendingStreamId: streamId,
+                uploadProtocol: "tus",
+              });
+            }
+          }
+
+          await uploadToCloudflare(
+            uploadUrl,
+            assetToUpload,
+            (nextProgress) => {
+              updatePendingUpload(uploadId, {
+                phase: "uploading",
+                progress: Math.min(
+                  78,
+                  Math.max(clientTrimmed ? 32 : 1, Math.round(32 + nextProgress * 0.46)),
+                ),
+              });
+            },
+            { protocol },
+          );
+          cloudflareStreamId = streamId;
+          updatePendingUpload(uploadId, {
+            cloudflareStreamId,
+            tusUploadUrl: null,
+            pendingStreamId: null,
+            uploadProtocol: null,
           });
-          cloudflareStreamId = uploadRequest.cloudflareStreamId;
-          updatePendingUpload(uploadId, { cloudflareStreamId });
           break;
         } catch (error) {
           lastError = error;
-          cloudflareStreamId = null;
+          working = getPendingUploadById(uploadId) ?? working;
+          const message = error instanceof Error ? error.message : String(error);
+          const sessionExpired = /upload session expired|starting a new upload/i.test(message);
+          if (sessionExpired || working.uploadProtocol !== "tus") {
+            // Drop dead one-shot / expired tus sessions before the next attempt.
+            updatePendingUpload(uploadId, {
+              tusUploadUrl: null,
+              pendingStreamId: null,
+              uploadProtocol: null,
+            });
+          }
           logVideoUploadStep("background upload attempt failed", {
             uploadId,
             attempt,
+            maxUploadAttempts,
             ...getVideoUploadErrorDetails(error),
           });
+          if (attempt < maxUploadAttempts) {
+            const delay = uploadBackoffMs[attempt - 1] ?? 8000;
+            await new Promise((resolve) => setTimeout(resolve, delay));
+          }
         }
       }
     }
@@ -263,24 +416,39 @@ async function runPendingUpload(uploadId: string) {
       throw lastError instanceof Error ? lastError : new Error("Upload failed.");
     }
 
-    let finalStreamId = upload.clippedStreamId ?? cloudflareStreamId;
-    let thumbnailTimeMs = upload.publishedThumbnailTimeMs ?? upload.thumbnailTimeMs;
+    working = getPendingUploadById(uploadId) ?? working;
+    let finalStreamId = working.clippedStreamId ?? cloudflareStreamId;
+    let thumbnailTimeMs = working.publishedThumbnailTimeMs ?? publishedThumbnailTimeMs;
 
-    if (needsTrimClip(upload) && !upload.clippedStreamId) {
+    if (!clientTrimmed && needsTrimClip(working) && !working.clippedStreamId) {
       updatePendingUpload(uploadId, { phase: "processing", progress: 82 });
+      // Prefer client-known duration so we don't ask Cloudflare to clip past EOF
+      // (a common 400 when camera-roll metadata is slightly longer than encoded duration).
+      const sourceDuration = Math.max(
+        0.1,
+        working.sourceDurationSeconds || working.trimEndSeconds,
+      );
+      const startTimeSeconds = Math.max(0, Math.min(working.trimStartSeconds, sourceDuration - 0.1));
+      const endTimeSeconds = Math.max(
+        startTimeSeconds + 0.1,
+        Math.min(working.trimEndSeconds, Math.max(0.1, sourceDuration - 0.05)),
+      );
       logVideoUploadStep("background trim start", {
         uploadId,
-        startTimeSeconds: upload.trimStartSeconds,
-        endTimeSeconds: upload.trimEndSeconds,
+        startTimeSeconds,
+        endTimeSeconds,
+        sourceDurationSeconds: sourceDuration,
+        rawStartTimeSeconds: working.trimStartSeconds,
+        rawEndTimeSeconds: working.trimEndSeconds,
       });
       const clipped = await clipStreamVideo({
         cloudflareStreamId,
-        startTimeSeconds: upload.trimStartSeconds,
-        endTimeSeconds: upload.trimEndSeconds,
-        thumbnailTimestampPct: getClipThumbnailPct(upload),
+        startTimeSeconds,
+        endTimeSeconds,
+        thumbnailTimestampPct: getClipThumbnailPct(working),
       });
       finalStreamId = clipped.cloudflareStreamId;
-      thumbnailTimeMs = getClippedThumbnailTimeMs(upload);
+      thumbnailTimeMs = getClippedThumbnailTimeMs(working);
       updatePendingUpload(uploadId, {
         clippedStreamId: finalStreamId,
         publishedThumbnailTimeMs: thumbnailTimeMs,
@@ -310,14 +478,15 @@ async function runPendingUpload(uploadId: string) {
     updatePendingUpload(uploadId, { phase: "saving", progress: 97 });
 
     const createdVideo = await createVideo({
-      userId: upload.userId,
-      caption: upload.caption,
-      roles: upload.roles,
-      genres: upload.genres,
+      userId: working.userId,
+      caption: working.caption,
+      roles: working.roles,
+      genres: working.genres,
       cloudflareStreamId: finalStreamId,
       thumbnailTimeMs,
-      videoFilter: upload.videoFilter,
-      textOverlays: upload.textOverlays,
+      videoFilter: publishFilter,
+      textOverlays: publishOverlays,
+      lookingFor: working.lookingFor,
     });
 
     updatePendingUpload(uploadId, { phase: "saving", progress: 100 });
@@ -326,14 +495,15 @@ async function runPendingUpload(uploadId: string) {
       uploadId,
       cloudflareStreamId: finalStreamId,
       videoId: createdVideo.id,
-      videoFilter: upload.videoFilter,
-      textOverlayCount: upload.textOverlays.length,
-      trimmed: needsTrimClip(upload),
+      videoFilter: publishFilter,
+      textOverlayCount: publishOverlays.length,
+      trimmed: clientTrimmed || needsTrimClip(working),
+      presentationBaked: clientTrimmed,
     });
 
-    rememberLocalPosterForVideo(createdVideo.id, upload.localThumbnailUri);
+    rememberLocalPosterForVideo(createdVideo.id, working.localThumbnailUri);
     removePendingUpload(uploadId);
-    notifyPosted({ userId: upload.userId, videoId: createdVideo.id });
+    notifyPosted({ userId: working.userId, videoId: createdVideo.id });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Upload failed.";
     logVideoUploadStep("background upload failed", { uploadId, ...getVideoUploadErrorDetails(error) });
@@ -361,11 +531,16 @@ export type EnqueuePendingVideoUploadInput = {
   trimEndSeconds: number;
   videoFilter?: VideoFilterId | string | null;
   textOverlays?: VideoTextOverlay[] | unknown;
+  lookingFor?: boolean;
+  /** True when asset is already the composed export (skip re-bake). */
+  presentationBaked?: boolean;
+  bakedAsset?: NativeVideoAsset | null;
 };
 
 export function enqueuePendingVideoUpload(input: EnqueuePendingVideoUploadInput) {
   const trimStartSeconds = Math.max(0, input.trimStartSeconds);
   const trimEndSeconds = Math.max(trimStartSeconds + 0.1, input.trimEndSeconds);
+  const presentationBaked = Boolean(input.presentationBaked && (input.bakedAsset ?? input.asset));
   const upload: PendingVideoUpload = {
     id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     userId: input.userId,
@@ -379,11 +554,15 @@ export function enqueuePendingVideoUpload(input: EnqueuePendingVideoUploadInput)
     sourceDurationSeconds: Math.max(input.sourceDurationSeconds, trimEndSeconds),
     trimStartSeconds,
     trimEndSeconds,
-    videoFilter: normalizeVideoFilter(input.videoFilter),
-    textOverlays: normalizeVideoTextOverlays(input.textOverlays),
+    videoFilter: presentationBaked ? "none" : normalizeVideoFilter(input.videoFilter),
+    textOverlays: presentationBaked ? [] : normalizeVideoTextOverlays(input.textOverlays),
+    lookingFor: Boolean(input.lookingFor),
     progress: 1,
     phase: "uploading",
     errorMessage: null,
+    presentationBaked,
+    bakedAsset: presentationBaked ? (input.bakedAsset ?? input.asset) : null,
+    publishedThumbnailTimeMs: presentationBaked ? input.thumbnailTimeMs : null,
   };
 
   pendingUploads.unshift(upload);

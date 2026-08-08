@@ -1,3 +1,4 @@
+import { decode as decodeBase64ArrayBuffer } from "base64-arraybuffer";
 import * as FileSystem from "expo-file-system/legacy";
 import { cloudflareUploadEndpoint, supabase } from "@/lib/native-supabase";
 
@@ -6,12 +7,18 @@ export type NativeVideoAsset = {
   fileName?: string | null;
   mimeType?: string | null;
   fileSize?: number | null;
+  /** Pixel size when known (picker / probe). Used for landscape letterboxing. */
+  width?: number | null;
+  height?: number | null;
 };
+
+export type StreamUploadProtocol = "tus" | "basic";
 
 export type StreamUpload = {
   cloudflareStreamId: string;
   uploadUrl: string;
   maxDurationSeconds: number;
+  protocol: StreamUploadProtocol;
 };
 
 type StreamUploadResponse = Partial<StreamUpload> & {
@@ -19,6 +26,9 @@ type StreamUploadResponse = Partial<StreamUpload> & {
   uploadURL?: string;
   error?: string;
 };
+
+/** Cloudflare tus minimum chunk (except final / small whole-file uploads). */
+const TUS_CHUNK_SIZE = 5_242_880;
 
 export function logVideoUploadStep(step: string, details?: Record<string, unknown>) {
   console.log(`[video upload] ${step}`, details ?? {});
@@ -41,8 +51,45 @@ export function getVideoUploadErrorDetails(error: unknown) {
 
 export async function createStreamUpload(
   maxDurationSeconds: number,
-  options?: { allowLongerSource?: boolean },
+  options?: {
+    allowLongerSource?: boolean;
+    /** Prefer resumable tus when file size is known. */
+    uploadLength?: number | null;
+  },
 ) {
+  const uploadLength =
+    typeof options?.uploadLength === "number" && Number.isFinite(options.uploadLength)
+      ? Math.max(0, Math.floor(options.uploadLength))
+      : null;
+
+  if (uploadLength && uploadLength > 0) {
+    try {
+      return await requestStreamUpload(maxDurationSeconds, {
+        allowLongerSource: Boolean(options?.allowLongerSource),
+        protocol: "tus",
+        uploadLength,
+      });
+    } catch (error) {
+      logVideoUploadStep("stream tus create failed — falling back to basic upload", {
+        ...getVideoUploadErrorDetails(error),
+      });
+    }
+  }
+
+  return requestStreamUpload(maxDurationSeconds, {
+    allowLongerSource: Boolean(options?.allowLongerSource),
+    protocol: "basic",
+  });
+}
+
+async function requestStreamUpload(
+  maxDurationSeconds: number,
+  options: {
+    allowLongerSource?: boolean;
+    protocol: StreamUploadProtocol;
+    uploadLength?: number;
+  },
+): Promise<StreamUpload> {
   if (!cloudflareUploadEndpoint) {
     throw new Error("Set EXPO_PUBLIC_CLOUDFLARE_UPLOAD_ENDPOINT to your Next upload endpoint.");
   }
@@ -50,7 +97,9 @@ export async function createStreamUpload(
   logVideoUploadStep("stream upload request start", {
     endpointHost: getUrlHost(cloudflareUploadEndpoint),
     maxDurationSeconds,
-    allowLongerSource: Boolean(options?.allowLongerSource),
+    allowLongerSource: Boolean(options.allowLongerSource),
+    protocol: options.protocol,
+    uploadLength: options.uploadLength ?? null,
   });
 
   const {
@@ -73,7 +122,9 @@ export async function createStreamUpload(
       },
       body: JSON.stringify({
         maxDurationSeconds,
-        allowLongerSource: Boolean(options?.allowLongerSource),
+        allowLongerSource: Boolean(options.allowLongerSource),
+        protocol: options.protocol,
+        uploadLength: options.uploadLength,
       }),
       signal: controller.signal,
     });
@@ -90,6 +141,8 @@ export async function createStreamUpload(
   const data = (await response.json().catch(() => ({}))) as StreamUploadResponse;
   const cloudflareStreamId = data.cloudflareStreamId ?? data.uid;
   const uploadUrl = data.uploadUrl ?? data.uploadURL;
+  const protocol: StreamUploadProtocol =
+    data.protocol === "tus" || isTusUploadUrl(uploadUrl) ? "tus" : "basic";
 
   logVideoUploadStep("stream upload request response", {
     endpointHost: getUrlHost(cloudflareUploadEndpoint),
@@ -98,6 +151,7 @@ export async function createStreamUpload(
     hasUploadUrl: Boolean(uploadUrl),
     hasStreamId: Boolean(cloudflareStreamId),
     uploadHost: getUrlHost(uploadUrl),
+    protocol,
     error: data.error,
   });
 
@@ -109,14 +163,42 @@ export async function createStreamUpload(
     cloudflareStreamId,
     uploadUrl,
     maxDurationSeconds: data.maxDurationSeconds ?? maxDurationSeconds,
+    protocol,
   };
+}
+
+export async function resolveLocalFileSize(asset: NativeVideoAsset) {
+  if (typeof asset.fileSize === "number" && Number.isFinite(asset.fileSize) && asset.fileSize > 0) {
+    return Math.floor(asset.fileSize);
+  }
+  const info = await FileSystem.getInfoAsync(asset.uri).catch(() => null);
+  if (info?.exists && typeof info.size === "number" && info.size > 0) {
+    return Math.floor(info.size);
+  }
+  return null;
 }
 
 export function uploadToCloudflare(
   uploadUrl: string,
   asset: NativeVideoAsset,
   onProgress: (progress: number) => void,
+  options?: { protocol?: StreamUploadProtocol },
 ) {
+  const protocol =
+    options?.protocol === "tus" || isTusUploadUrl(uploadUrl) ? "tus" : "basic";
+
+  if (protocol === "tus") {
+    logVideoUploadStep("cloudflare direct upload selected", {
+      strategy: "tus-resumable",
+      uploadHost: getUrlHost(uploadUrl),
+      fileName: normalizeFileName(asset.fileName, asset.uri),
+      fileSize: asset.fileSize ?? null,
+      mimeType: asset.mimeType ?? inferMimeType(normalizeFileName(asset.fileName, asset.uri)),
+      uriScheme: getUriScheme(asset.uri),
+    });
+    return uploadToCloudflareWithTus(uploadUrl, asset, onProgress);
+  }
+
   const uploadUrls = getCloudflareUploadUrlCandidates(uploadUrl);
   logVideoUploadStep("cloudflare direct upload selected", {
     strategy: "native-file-system-multipart",
@@ -136,10 +218,6 @@ export function getCloudflarePlaybackUrl(streamId: string) {
   return `https://videodelivery.net/${streamId}/manifest/video.m3u8`;
 }
 
-export function getCloudflareDownloadUrl(streamId: string) {
-  return `https://videodelivery.net/${streamId}/downloads/default.mp4`;
-}
-
 export function extractCloudflareStreamId(mediaUrl: string | null | undefined) {
   if (!mediaUrl) return null;
   const match = mediaUrl.match(
@@ -151,17 +229,45 @@ export function extractCloudflareStreamId(mediaUrl: string | null | undefined) {
 export function getCloudflareThumbnailUrl(
   streamId: string,
   thumbnailTimeMs?: number | null,
-  options?: { height?: number },
+  options?: { height?: number; width?: number },
 ) {
-  const height = options?.height ?? 640;
+  // Cloudflare defaults width+height to 640 and fit=crop, which center-crops
+  // landscape into a tall/square poster and makes the feed think it's portrait.
+  const edge = Math.max(320, options?.height ?? options?.width ?? 1280);
+  const width = options?.width ?? edge;
+  const height = options?.height ?? edge;
   const rawMs =
     typeof thumbnailTimeMs === "number" && Number.isFinite(thumbnailTimeMs) ? thumbnailTimeMs : 1000;
   // Prefer a non-zero timestamp — exact 0s is often a black camera-open frame.
   const timeSeconds = Math.max(0.1, rawMs <= 0 ? 1 : rawMs / 1000);
-  return `https://videodelivery.net/${streamId}/thumbnails/thumbnail.jpg?time=${timeSeconds}s&height=${height}`;
+  return `https://videodelivery.net/${streamId}/thumbnails/thumbnail.jpg?time=${timeSeconds}s&width=${width}&height=${height}&fit=clip`;
 }
 
-function getCloudflareStreamApiEndpoint(action: "clip" | "videos" | "ready") {
+/** Largest RESOLUTION=WxH from an HLS master playlist (Cloudflare Stream). */
+export async function probeHlsVideoSize(
+  manifestUrl: string,
+): Promise<{ width: number; height: number } | null> {
+  try {
+    const response = await fetch(manifestUrl);
+    if (!response.ok) return null;
+    const text = await response.text();
+    let best: { width: number; height: number; pixels: number } | null = null;
+    for (const match of text.matchAll(/RESOLUTION=(\d+)x(\d+)/gi)) {
+      const width = Number(match[1]);
+      const height = Number(match[2]);
+      if (!(width > 0 && height > 0)) continue;
+      const pixels = width * height;
+      if (!best || pixels > best.pixels) {
+        best = { width, height, pixels };
+      }
+    }
+    return best ? { width: best.width, height: best.height } : null;
+  } catch {
+    return null;
+  }
+}
+
+function getCloudflareStreamApiEndpoint(action: "clip" | "videos") {
   if (!cloudflareUploadEndpoint) return "";
   try {
     const url = new URL(cloudflareUploadEndpoint);
@@ -187,10 +293,6 @@ export function getCloudflareVideoDeleteEndpoint() {
   // Prefer the deployed uploads endpoint (DELETE + { videoId }). /videos may 404 on older hosts.
   if (cloudflareUploadEndpoint) return cloudflareUploadEndpoint;
   return getCloudflareStreamApiEndpoint("videos");
-}
-
-export function getCloudflareReadyEndpoint() {
-  return getCloudflareStreamApiEndpoint("ready");
 }
 
 function sleep(ms: number) {
@@ -231,37 +333,23 @@ async function isPublicStreamThumbnailReady(cloudflareStreamId: string) {
 }
 
 export async function waitForCloudflareStreamReady(cloudflareStreamId: string) {
-  const timeoutMs = 120_000;
-  const thumbnailGraceMs = 45_000;
-  const intervalMs = 2_000;
+  // Publish as soon as HLS can play — local posters cover thumb lag.
+  const timeoutMs = 90_000;
+  const intervalMs = 1_500;
   const started = Date.now();
   let polls = 0;
-  let manifestReadyAt: number | null = null;
 
   logVideoUploadStep("stream ready wait start", {
-    strategy: "public-manifest-and-thumbnail-poll",
+    strategy: "public-manifest-poll",
     cloudflareStreamId,
   });
 
   while (Date.now() - started < timeoutMs) {
     polls += 1;
     const manifestReady = await isPublicStreamManifestReady(cloudflareStreamId);
-    if (!manifestReady) {
-      await sleep(intervalMs);
-      continue;
-    }
-
-    if (manifestReadyAt == null) {
-      manifestReadyAt = Date.now();
-      logVideoUploadStep("stream ready manifest available", {
-        cloudflareStreamId,
-        polls,
-        elapsedMs: Date.now() - started,
-      });
-    }
-
-    const thumbnailReady = await isPublicStreamThumbnailReady(cloudflareStreamId);
-    if (thumbnailReady || Date.now() - manifestReadyAt >= thumbnailGraceMs) {
+    if (manifestReady) {
+      // Best-effort thumb check; never block publish on it.
+      const thumbnailReady = await isPublicStreamThumbnailReady(cloudflareStreamId);
       logVideoUploadStep("stream ready wait response", {
         ok: true,
         ready: true,
@@ -271,7 +359,6 @@ export async function waitForCloudflareStreamReady(cloudflareStreamId: string) {
       });
       return { ready: true as const };
     }
-
     await sleep(intervalMs);
   }
 
@@ -404,6 +491,13 @@ export async function clipStreamVideo(input: {
   const data = (await response.json().catch(() => ({}))) as {
     cloudflareStreamId?: string;
     error?: string;
+    details?: {
+      startTimeSeconds?: number;
+      endTimeSeconds?: number;
+      sourceDurationSeconds?: number | null;
+      cloudflareErrors?: { message?: string }[];
+      cloudflareMessages?: { message?: string }[];
+    };
   };
 
   if (response.status === 404) {
@@ -417,6 +511,7 @@ export async function clipStreamVideo(input: {
     ok: response.ok,
     hasStreamId: Boolean(data.cloudflareStreamId),
     error: data.error,
+    details: data.details ?? null,
   });
 
   if (!response.ok || !data.cloudflareStreamId) {
@@ -437,6 +532,159 @@ function inferMimeType(fileName: string) {
   if (extension === "webm") return "video/webm";
   if (extension === "m4v") return "video/x-m4v";
   return "video/mp4";
+}
+
+function isTusUploadUrl(uploadUrl: string | null | undefined) {
+  if (!uploadUrl) return false;
+  try {
+    const url = new URL(uploadUrl);
+    return url.pathname.includes("/tus") || url.searchParams.has("tus");
+  } catch {
+    return /\/tus/i.test(uploadUrl);
+  }
+}
+
+async function getTusUploadOffset(uploadUrl: string) {
+  const response = await fetch(uploadUrl, {
+    method: "HEAD",
+    headers: {
+      "Tus-Resumable": "1.0.0",
+    },
+  });
+  if (response.status === 404 || response.status === 410) {
+    throw new Error("Upload session expired. Starting a new upload.");
+  }
+  if (!response.ok) {
+    throw new Error(`Could not resume upload (${response.status}).`);
+  }
+  const offsetHeader = response.headers.get("Upload-Offset") ?? response.headers.get("upload-offset");
+  const offset = offsetHeader ? Number.parseInt(offsetHeader, 10) : 0;
+  if (!Number.isFinite(offset) || offset < 0) {
+    throw new Error("Could not resume upload (invalid offset).");
+  }
+  return offset;
+}
+
+async function uploadToCloudflareWithTus(
+  uploadUrl: string,
+  asset: NativeVideoAsset,
+  onProgress: (progress: number) => void,
+) {
+  const fileName = normalizeFileName(asset.fileName, asset.uri);
+  const fileInfo = await FileSystem.getInfoAsync(asset.uri).catch(() => null);
+  const fileSize =
+    fileInfo?.exists && typeof fileInfo.size === "number" && fileInfo.size > 0
+      ? fileInfo.size
+      : typeof asset.fileSize === "number" && asset.fileSize > 0
+        ? asset.fileSize
+        : null;
+
+  if (!fileSize) {
+    throw new Error("Could not read the video file size for resumable upload.");
+  }
+
+  onProgress(1);
+  logVideoUploadStep("cloudflare tus upload start", {
+    uploadHost: getUrlHost(uploadUrl),
+    fileName,
+    fileSize,
+    chunkSize: TUS_CHUNK_SIZE,
+  });
+
+  let offset = 0;
+  try {
+    offset = await getTusUploadOffset(uploadUrl);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/upload session expired/i.test(message)) throw error;
+    // Some endpoints reject HEAD before the first PATCH — start at 0.
+    logVideoUploadStep("cloudflare tus offset probe", {
+      uploadHost: getUrlHost(uploadUrl),
+      ...getVideoUploadErrorDetails(error),
+    });
+    offset = 0;
+  }
+
+  if (offset > 0) {
+    onProgress(Math.min(99, Math.max(1, Math.round((offset / fileSize) * 100))));
+    logVideoUploadStep("cloudflare tus resume", {
+      uploadHost: getUrlHost(uploadUrl),
+      offset,
+      fileSize,
+    });
+  }
+
+  try {
+    while (offset < fileSize) {
+      const chunkLength = Math.min(TUS_CHUNK_SIZE, fileSize - offset);
+      const base64 = await FileSystem.readAsStringAsync(asset.uri, {
+        encoding: FileSystem.EncodingType.Base64,
+        position: offset,
+        length: chunkLength,
+      });
+      const chunk = decodeBase64ArrayBuffer(base64);
+      const body = new Uint8Array(chunk);
+
+      const response = await fetch(uploadUrl, {
+        method: "PATCH",
+        headers: {
+          "Tus-Resumable": "1.0.0",
+          "Upload-Offset": String(offset),
+          "Content-Type": "application/offset+octet-stream",
+          "Content-Length": String(body.byteLength),
+        },
+        body,
+      });
+
+      if (response.status === 409) {
+        // Offset conflict — re-sync from server.
+        offset = await getTusUploadOffset(uploadUrl);
+        continue;
+      }
+
+      if (!response.ok) {
+        const details = await response.text().catch(() => "");
+        logVideoUploadStep("cloudflare tus chunk error", {
+          uploadHost: getUrlHost(uploadUrl),
+          status: response.status,
+          offset,
+          chunkLength,
+          details: details.slice(0, 500),
+        });
+        throw new Error(
+          `Cloudflare Stream upload failed (${response.status}).${details ? ` ${details}` : ""}`,
+        );
+      }
+
+      const nextOffsetHeader =
+        response.headers.get("Upload-Offset") ?? response.headers.get("upload-offset");
+      const nextOffset = nextOffsetHeader
+        ? Number.parseInt(nextOffsetHeader, 10)
+        : offset + body.byteLength;
+      if (!Number.isFinite(nextOffset) || nextOffset <= offset) {
+        throw new Error("Cloudflare Stream upload stalled (no progress).");
+      }
+      offset = nextOffset;
+      onProgress(Math.min(99, Math.max(1, Math.round((offset / fileSize) * 100))));
+    }
+
+    onProgress(100);
+    logVideoUploadStep("cloudflare tus upload success", {
+      uploadHost: getUrlHost(uploadUrl),
+      fileName,
+      fileSize,
+    });
+  } catch (error) {
+    logVideoUploadStep("cloudflare tus upload failed", {
+      uploadHost: getUrlHost(uploadUrl),
+      fileName,
+      offset,
+      fileSize,
+      ...getVideoUploadErrorDetails(error),
+    });
+    if (error instanceof Error) throw error;
+    throw new Error("Cloudflare Stream upload failed. Check your connection and try again.");
+  }
 }
 
 async function uploadToCloudflareWithFallbacks(

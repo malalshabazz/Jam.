@@ -259,14 +259,13 @@
 					"-ObjC",
 					"-lc++",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.jam.creators";
-				PRODUCT_NAME = "Jam";
+				PRODUCT_BUNDLE_IDENTIFIER = com.jam.creators;
+				CODE_SIGN_ENTITLEMENTS = Jam/Jam.entitlements;
+				PRODUCT_NAME = Jam;
 				SWIFT_OBJC_BRIDGING_HEADER = "Jam/Jam-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
-				TARGETED_DEVICE_FAMILY = "1";
-				CODE_SIGN_ENTITLEMENTS = Jam/Jam.entitlements;
 			};
 			name = Debug;
 		};
@@ -288,13 +287,12 @@
 					"-ObjC",
 					"-lc++",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.jam.creators";
-				PRODUCT_NAME = "Jam";
+				PRODUCT_BUNDLE_IDENTIFIER = com.jam.creators;
+				CODE_SIGN_ENTITLEMENTS = Jam/Jam.entitlements;
+				PRODUCT_NAME = Jam;
 				SWIFT_OBJC_BRIDGING_HEADER = "Jam/Jam-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
-				TARGETED_DEVICE_FAMILY = "1";
-				CODE_SIGN_ENTITLEMENTS = Jam/Jam.entitlements;
 			};
 			name = Release;
 		};

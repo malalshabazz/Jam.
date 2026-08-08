@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { geocodeProfileLocation } from "@/lib/geocode";
-import { deleteCloudflareVideo } from "@/lib/native-cloudflare";
+import { deleteCloudflareVideo, getCloudflarePlaybackUrl } from "@/lib/native-cloudflare";
 import { creatorRoles, musicGenres } from "@/lib/options";
 import { getProBadgeKind, type ProBadgeKind } from "@/lib/pro-entitlements";
 import { supabase } from "@/lib/native-supabase";
@@ -17,10 +17,6 @@ export type FeedVideo = {
   creatorName: string;
   role: string;
   location: string;
-  latitude: number | null;
-  longitude: number | null;
-  liveLatitude: number | null;
-  liveLongitude: number | null;
   avatarUrl: string | null;
   bio: string | null;
   caption: string;
@@ -33,6 +29,10 @@ export type FeedVideo = {
   thumbnailTimeMs: number | null;
   videoFilter: VideoFilterId;
   textOverlays: VideoTextOverlay[];
+  /** Creator tagged this post as looking for collaborators. */
+  lookingFor: boolean;
+  /** 1–3 when pinned on the creator profile. */
+  pinnedRank?: number | null;
   earlyAdopter: boolean;
   proBadge: ProBadgeKind | null;
   videoCount: number;
@@ -55,6 +55,7 @@ export type Profile = {
   longitude: number | null;
   live_latitude: number | null;
   live_longitude: number | null;
+  live_location_updated_at: string | null;
   near_me_radius_miles: number | null;
   avatar_url: string | null;
   onboarding_complete: boolean | null;
@@ -82,6 +83,11 @@ export type ProfileVideo = {
   videoFilter?: VideoFilterId | null;
   text_overlays?: unknown;
   textOverlays?: VideoTextOverlay[] | null;
+  looking_for?: boolean | null;
+  lookingFor?: boolean;
+  /** 1–3 when pinned on the creator profile; null/undefined when unpinned. */
+  pinned_rank?: number | null;
+  pinnedRank?: number | null;
   created_at?: string;
   creatorName?: string;
   role?: string;
@@ -154,14 +160,45 @@ export type Conversation = {
 };
 
 export type FeedCursor = {
-  createdAt: string;
+  /** Stable random permutation seed for this feed session (unseen or replay). */
+  seed: string;
+  /** md5(id || seed) keyset cursor from the last returned row. */
+  sortKey: string;
   id: string;
 };
+
+function createFeedSeed() {
+  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
+/** Discover feed pool: unseen first, then replay of recently seen clips. */
+export type FeedPhase = "unseen" | "replay";
 
 export type FeedPage = {
   items: FeedVideo[];
   nextCursor: FeedCursor | null;
+  phase: FeedPhase;
 };
+
+/** Optional discover filters applied server-side (role/genre overlaps, location OR). */
+export type FeedLocationFilter = {
+  country: string;
+  cities: string[];
+  country_aliases?: string[];
+};
+
+export type FeedContentFilters = {
+  roles?: string[];
+  genres?: string[];
+  locations?: FeedLocationFilter[];
+  /** When true, only return videos tagged looking_for. */
+  lookingForOnly?: boolean;
+};
+
+/** Soft TTL for seen_videos — matches server video_is_recently_seen default. */
+export const FEED_SEEN_TTL_DAYS = 30;
+/** Dwell time before a playing clip counts as seen. */
+export const FEED_SEEN_DWELL_MS = 2500;
 
 export type MessagePage = {
   messages: ChatMessage[];
@@ -206,16 +243,21 @@ type ProfileRow = Pick<
   | "location"
   | "country"
   | "city"
-  | "latitude"
-  | "longitude"
-  | "live_latitude"
-  | "live_longitude"
   | "avatar_url"
   | "bio"
   | "early_adopter"
   | "video_count"
   | "pro_subscription_active"
 >;
+
+type ProfileLocationRow = {
+  user_id: string;
+  latitude: number | null;
+  longitude: number | null;
+  live_latitude: number | null;
+  live_longitude: number | null;
+  live_location_updated_at: string | null;
+};
 
 type VideoRow = {
   id: string;
@@ -230,6 +272,8 @@ type VideoRow = {
   thumbnail_time_ms: number | null;
   video_filter?: string | null;
   text_overlays?: unknown;
+  looking_for?: boolean | null;
+  pinned_rank?: number | null;
   created_at: string;
 };
 
@@ -278,9 +322,19 @@ type MessageRow = {
 };
 
 const VIDEO_COLUMNS_WITH_TAGS =
-  "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, created_at";
+  "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, pinned_rank, created_at";
 const OWN_VIDEO_COLUMNS_WITH_TAGS =
+  "id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, pinned_rank, created_at";
+const VIDEO_COLUMNS_WITH_TAGS_NO_PIN =
+  "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, created_at";
+const OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PIN =
+  "id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, created_at";
+const VIDEO_COLUMNS_WITH_TAGS_NO_LOOKING_FOR =
+  "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, created_at";
+const OWN_VIDEO_COLUMNS_WITH_TAGS_NO_LOOKING_FOR =
   "id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, created_at";
+
+export const MAX_PINNED_PROFILE_VIDEOS = 3;
 const VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION =
   "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, created_at";
 const OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION =
@@ -298,11 +352,30 @@ const VIDEO_COLUMNS_LEGACY =
 const OWN_VIDEO_COLUMNS_LEGACY =
   "id, caption, hashtags, media_url, cloudflare_stream_id, created_at";
 const PROFILE_COLUMNS =
-  "id, display_name, bio, creator_types, location, country, city, latitude, longitude, live_latitude, live_longitude, near_me_radius_miles, avatar_url, onboarding_complete, welcome_seen, early_adopter, video_count, pro_subscription_active";
+  "id, display_name, bio, creator_types, location, country, city, near_me_radius_miles, avatar_url, onboarding_complete, welcome_seen, early_adopter, video_count, pro_subscription_active";
 const PROFILE_ROW_COLUMNS =
-  "id, display_name, creator_types, location, country, city, latitude, longitude, live_latitude, live_longitude, avatar_url, bio, early_adopter, video_count, pro_subscription_active";
+  "id, display_name, creator_types, location, country, city, avatar_url, bio, early_adopter, video_count, pro_subscription_active";
+const PROFILE_LOCATION_COLUMNS =
+  "user_id, latitude, longitude, live_latitude, live_longitude, live_location_updated_at";
 const creatorRoleSet = new Set(creatorRoles.map(normalizeTag));
 const musicGenreSet = new Set(musicGenres.map(normalizeTag));
+
+type ProfileLocationFields = Pick<
+  Profile,
+  | "latitude"
+  | "longitude"
+  | "live_latitude"
+  | "live_longitude"
+  | "live_location_updated_at"
+>;
+
+const EMPTY_PRIVATE_LOCATION: ProfileLocationFields = {
+  latitude: null,
+  longitude: null,
+  live_latitude: null,
+  live_longitude: null,
+  live_location_updated_at: null,
+};
 
 export async function fetchProfile(userId: string) {
   const { data, error } = await supabase
@@ -312,7 +385,8 @@ export async function fetchProfile(userId: string) {
     .maybeSingle();
 
   if (error) throw error;
-  return data as Profile | null;
+  if (!data) return null;
+  return attachPrivateLocation(data as Omit<Profile, keyof ProfileLocationFields>);
 }
 
 export async function fetchCreatorProfile(viewerId: string, creatorId: string) {
@@ -330,7 +404,9 @@ export async function fetchCreatorProfile(viewerId: string, creatorId: string) {
     .maybeSingle();
 
   if (error) throw error;
-  return data as Profile | null;
+  if (!data) return null;
+  // Never attach private coords for another user's profile response.
+  return { ...(data as Omit<Profile, keyof ProfileLocationFields>), ...EMPTY_PRIVATE_LOCATION };
 }
 
 export async function fetchCreatorVideos(viewerId: string, creatorId: string) {
@@ -347,37 +423,59 @@ export async function fetchCreatorVideos(viewerId: string, creatorId: string) {
   let error = result.error;
 
   if (error && isMissingSchemaError(error)) {
-    const tagsRetry = await supabase
+    const pinRetry = await supabase
       .from("videos")
-      .select(OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION)
+      .select(OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PIN)
       .eq("user_id", creatorId)
       .order("created_at", { ascending: false });
-    if (!tagsRetry.error || !isMissingSchemaError(tagsRetry.error)) {
-      data = tagsRetry.data as ProfileVideo[] | null;
-      error = tagsRetry.error;
+    if (!pinRetry.error || !isMissingSchemaError(pinRetry.error)) {
+      data = pinRetry.data as ProfileVideo[] | null;
+      error = pinRetry.error;
     } else {
-      const categoryRetry = await supabase
+      const lookingForRetry = await supabase
         .from("videos")
-        .select(OWN_VIDEO_COLUMNS_WITH_CATEGORIES)
+        .select(OWN_VIDEO_COLUMNS_WITH_TAGS_NO_LOOKING_FOR)
         .eq("user_id", creatorId)
         .order("created_at", { ascending: false });
-      if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
-        const legacyRetry = await supabase
+      if (!lookingForRetry.error || !isMissingSchemaError(lookingForRetry.error)) {
+        data = lookingForRetry.data as ProfileVideo[] | null;
+        error = lookingForRetry.error;
+      } else {
+        const tagsRetry = await supabase
           .from("videos")
-          .select(OWN_VIDEO_COLUMNS_LEGACY)
+          .select(OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION)
           .eq("user_id", creatorId)
           .order("created_at", { ascending: false });
-        data = legacyRetry.data as ProfileVideo[] | null;
-        error = legacyRetry.error;
-      } else {
-        data = categoryRetry.data as ProfileVideo[] | null;
-        error = categoryRetry.error;
+        if (!tagsRetry.error || !isMissingSchemaError(tagsRetry.error)) {
+          data = tagsRetry.data as ProfileVideo[] | null;
+          error = tagsRetry.error;
+        } else {
+          const categoryRetry = await supabase
+            .from("videos")
+            .select(OWN_VIDEO_COLUMNS_WITH_CATEGORIES)
+            .eq("user_id", creatorId)
+            .order("created_at", { ascending: false });
+          if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
+            const legacyRetry = await supabase
+              .from("videos")
+              .select(OWN_VIDEO_COLUMNS_LEGACY)
+              .eq("user_id", creatorId)
+              .order("created_at", { ascending: false });
+            data = legacyRetry.data as ProfileVideo[] | null;
+            error = legacyRetry.error;
+          } else {
+            data = categoryRetry.data as ProfileVideo[] | null;
+            error = categoryRetry.error;
+          }
+        }
       }
     }
   }
 
   if (error) throw error;
-  return ((data ?? []) as ProfileVideo[]).map(normalizeOwnProfileVideo);
+  return ((data ?? []) as ProfileVideo[]).map((video) =>
+    normalizeOwnProfileVideo(video, creatorId),
+  );
 }
 
 export async function saveProfile(
@@ -391,8 +489,6 @@ export async function saveProfile(
       | "location"
       | "country"
       | "city"
-      | "latitude"
-      | "longitude"
       | "near_me_radius_miles"
       | "avatar_url"
       | "onboarding_complete"
@@ -403,13 +499,11 @@ export async function saveProfile(
   const hasLocationUpdate = "country" in input || "city" in input;
   const payload: Record<string, unknown> = { id: userId, ...input };
 
+  delete payload.latitude;
+  delete payload.longitude;
   delete payload.live_latitude;
   delete payload.live_longitude;
-
-  if (hasLocationUpdate) {
-    delete payload.latitude;
-    delete payload.longitude;
-  }
+  delete payload.live_location_updated_at;
 
   const { data, error } = await supabase
     .from("profiles")
@@ -420,59 +514,63 @@ export async function saveProfile(
   if (error) throw error;
 
   if (!hasLocationUpdate) {
-    return data as Profile;
+    return attachPrivateLocation(data as Omit<Profile, keyof ProfileLocationFields>);
   }
 
   const trimmedCountry = input.country?.trim() ?? "";
   const trimmedCity = input.city?.trim() ?? "";
 
   if (!trimmedCountry && !trimmedCity) {
-    const { data: cleared, error: clearError } = await supabase
-      .from("profiles")
-      .update({ latitude: null, longitude: null })
-      .eq("id", userId)
-      .select(PROFILE_COLUMNS)
-      .single();
-
-    if (clearError) throw clearError;
-    return cleared as Profile;
+    await upsertPrivateProfileGeocode(userId, null);
+    return attachPrivateLocation(data as Omit<Profile, keyof ProfileLocationFields>);
   }
 
   const coordinates = await geocodeProfileLocation(input.country, input.city);
-  if (!coordinates) {
-    return data as Profile;
+  if (coordinates) {
+    await upsertPrivateProfileGeocode(userId, coordinates);
   }
 
-  const { data: updated, error: coordError } = await supabase
-    .from("profiles")
-    .update({
-      latitude: coordinates.latitude,
-      longitude: coordinates.longitude,
-    })
-    .eq("id", userId)
-    .select(PROFILE_COLUMNS)
-    .single();
-
-  if (coordError) throw coordError;
-  return updated as Profile;
+  return attachPrivateLocation(data as Omit<Profile, keyof ProfileLocationFields>);
 }
 
 export async function updateLiveLocation(
   userId: string,
   coordinates: { latitude: number; longitude: number } | null,
 ) {
-  const { data, error } = await supabase
-    .from("profiles")
-    .update({
-      live_latitude: coordinates?.latitude ?? null,
-      live_longitude: coordinates?.longitude ?? null,
-    })
-    .eq("id", userId)
-    .select(PROFILE_COLUMNS)
-    .single();
+  const { data: existing, error: existingError } = await supabase
+    .from("profile_locations")
+    .select("user_id")
+    .eq("user_id", userId)
+    .maybeSingle();
 
-  if (error) throw error;
-  return data as Profile;
+  if (existingError) throw existingError;
+
+  const livePayload = {
+    live_latitude: coordinates?.latitude ?? null,
+    live_longitude: coordinates?.longitude ?? null,
+    live_location_updated_at: coordinates ? new Date().toISOString() : null,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (existing) {
+    const { error } = await supabase
+      .from("profile_locations")
+      .update(livePayload)
+      .eq("user_id", userId);
+    if (error) throw error;
+  } else {
+    const { error } = await supabase.from("profile_locations").insert({
+      user_id: userId,
+      latitude: null,
+      longitude: null,
+      ...livePayload,
+    });
+    if (error) throw error;
+  }
+
+  const profile = await fetchProfile(userId);
+  if (!profile) throw new Error("profile not found");
+  return profile;
 }
 
 export async function markWelcomeSeen(userId: string) {
@@ -498,16 +596,195 @@ export async function createEarlyAdopterWelcome() {
   if (error) throw error;
 }
 
+function normalizeFeedFilterTags(tags: readonly string[] | undefined) {
+  return (tags ?? [])
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+}
+
+function normalizeFeedPhase(phase?: FeedPhase | null): FeedPhase {
+  return phase === "replay" ? "replay" : "unseen";
+}
+
+/** Upsert a per-video seen row (extends the 30-day soft TTL on rewatch). */
+export async function markVideoSeen(currentUserId: string, videoId: string) {
+  if (!currentUserId || !videoId) return;
+
+  const { error } = await supabase.from("seen_videos").upsert(
+    {
+      user_id: currentUserId,
+      video_id: videoId,
+      seen_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,video_id" },
+  );
+
+  if (error) {
+    if (isMissingSchemaError(error)) return;
+    throw error;
+  }
+}
+
 export async function fetchFeedVideos(
   currentUserId: string,
-  options?: { cursor?: FeedCursor | null; limit?: number },
+  options?: {
+    cursor?: FeedCursor | null;
+    limit?: number;
+    filters?: FeedContentFilters | null;
+    phase?: FeedPhase | null;
+  },
 ): Promise<FeedPage> {
-  const limit = Math.max(1, Math.min(options?.limit ?? FEED_PAGE_SIZE, 40));
-  const [savedVideos, jams, moderation] = await Promise.all([
+  // Global + filtered discover both go through the RPC so seen phases stay consistent.
+  return fetchFilteredFeedVideos(currentUserId, options ?? {});
+}
+
+/** Role / genre / location filtered global feed (server-side overlaps + profile location). */
+async function fetchFilteredFeedVideos(
+  currentUserId: string,
+  options: {
+    cursor?: FeedCursor | null;
+    limit?: number;
+    filters?: FeedContentFilters | null;
+    phase?: FeedPhase | null;
+  },
+): Promise<FeedPage> {
+  const limit = Math.max(1, Math.min(options.limit ?? FEED_PAGE_SIZE, 40));
+  const phase = normalizeFeedPhase(options.phase);
+  const roles = normalizeFeedFilterTags(options.filters?.roles);
+  const genres = normalizeFeedFilterTags(options.filters?.genres);
+  const locations = (options.filters?.locations ?? [])
+    .map((selection) => ({
+      country: selection.country.trim(),
+      cities: normalizeFeedFilterTags(selection.cities),
+      country_aliases: normalizeFeedFilterTags(selection.country_aliases),
+    }))
+    .filter((selection) => selection.country);
+
+  const seed = options.cursor?.seed ?? createFeedSeed();
+  const [savedVideos, jams, rpcResult] = await Promise.all([
     fetchSavedVideoRows(currentUserId),
     fetchRelevantJams(currentUserId),
-    fetchFeedModeration(currentUserId),
+    supabase.rpc("fetch_filtered_feed_videos", {
+      filter_roles: roles.length ? roles : null,
+      filter_genres: genres.length ? genres : null,
+      filter_locations: locations.length ? locations : null,
+      page_limit: limit + 1,
+      cursor_sort_key: options.cursor?.sortKey ?? null,
+      cursor_id: options.cursor?.id ?? null,
+      feed_phase: phase,
+      looking_for_only: Boolean(options.filters?.lookingForOnly),
+      feed_seed: seed,
+    }),
   ]);
+
+  if (rpcResult.error) throw rpcResult.error;
+
+  return hydrateFeedPageFromOrderedIds({
+    currentUserId,
+    orderedIds: (rpcResult.data ?? []) as Array<{ id: string; created_at: string; sort_key: string }>,
+    limit,
+    phase,
+    seed,
+    savedVideos,
+    jams,
+  });
+}
+
+export type NearbyFeedOptions = {
+  latitude: number;
+  longitude: number;
+  radiusMiles: number;
+  cursor?: FeedCursor | null;
+  limit?: number;
+  roles?: string[];
+  genres?: string[];
+  phase?: FeedPhase | null;
+  lookingForOnly?: boolean;
+};
+
+/** Distance-filtered feed page (server-side haversine, live-first with 72h TTL). */
+export async function fetchNearbyFeedVideos(
+  currentUserId: string,
+  options: NearbyFeedOptions,
+): Promise<FeedPage> {
+  const limit = Math.max(1, Math.min(options.limit ?? FEED_PAGE_SIZE, 40));
+  const phase = normalizeFeedPhase(options.phase);
+  const roles = normalizeFeedFilterTags(options.roles);
+  const genres = normalizeFeedFilterTags(options.genres);
+  const seed = options.cursor?.seed ?? createFeedSeed();
+  const [savedVideos, jams, rpcResult] = await Promise.all([
+    fetchSavedVideoRows(currentUserId),
+    fetchRelevantJams(currentUserId),
+    supabase.rpc("fetch_nearby_feed_videos", {
+      viewer_lat: options.latitude,
+      viewer_lng: options.longitude,
+      radius_miles: options.radiusMiles,
+      page_limit: limit + 1,
+      cursor_sort_key: options.cursor?.sortKey ?? null,
+      cursor_id: options.cursor?.id ?? null,
+      filter_roles: roles.length ? roles : null,
+      filter_genres: genres.length ? genres : null,
+      feed_phase: phase,
+      looking_for_only: Boolean(options.lookingForOnly),
+      feed_seed: seed,
+    }),
+  ]);
+
+  if (rpcResult.error) throw rpcResult.error;
+
+  return hydrateFeedPageFromOrderedIds({
+    currentUserId,
+    orderedIds: (rpcResult.data ?? []) as Array<{ id: string; created_at: string; sort_key: string }>,
+    limit,
+    phase,
+    seed,
+    savedVideos,
+    jams,
+  });
+}
+
+/** Nearby creator IDs within radius (live-first, same rules as discover near-me). */
+export async function fetchNearbyUserIds(options: {
+  latitude: number;
+  longitude: number;
+  radiusMiles: number;
+}): Promise<Set<string>> {
+  const { data, error } = await supabase.rpc("fetch_nearby_user_ids", {
+    viewer_lat: options.latitude,
+    viewer_lng: options.longitude,
+    radius_miles: options.radiusMiles,
+  });
+
+  if (error) throw error;
+
+  const ids = new Set<string>();
+  for (const row of (data ?? []) as Array<{ user_id: string }>) {
+    if (row?.user_id) ids.add(row.user_id);
+  }
+  return ids;
+}
+
+async function hydrateFeedPageFromOrderedIds(input: {
+  currentUserId: string;
+  orderedIds: Array<{ id: string; created_at: string; sort_key: string }>;
+  limit: number;
+  phase: FeedPhase;
+  seed: string;
+  savedVideos: SavedVideoRow[];
+  jams: JamRequestRow[];
+}): Promise<FeedPage> {
+  const { currentUserId, orderedIds, limit, phase, seed, savedVideos, jams } = input;
+  const hasMore = orderedIds.length > limit;
+  const pageIds = hasMore ? orderedIds.slice(0, limit) : orderedIds;
+  if (pageIds.length === 0) {
+    return { items: [], nextCursor: null, phase };
+  }
+
+  const videoRows = await fetchVideoRowsByIds(pageIds.map((row) => row.id));
+  const videoById = new Map(videoRows.map((video) => [video.id, video]));
+  const orderedRows = pageIds
+    .map((row) => videoById.get(row.id))
+    .filter((video): video is VideoRow => Boolean(video));
 
   const savedByMe = new Set(savedVideos.map((savedVideo) => savedVideo.video_id));
   const jammedByMe = new Set(
@@ -517,57 +794,30 @@ export async function fetchFeedVideos(
     jams.filter((jam) => jam.recipient_id === currentUserId).map((jam) => jam.requester_id),
   );
   const connected = getConnectedJamUserIds(jams, currentUserId);
+  const profiles = await fetchProfilesByIds(orderedRows.map((video) => video.user_id));
 
-  const pageItems: FeedVideo[] = [];
-  let cursor = options?.cursor ?? null;
-  let nextCursor: FeedCursor | null = null;
-  let rounds = 0;
-
-  // Client-side hide/block filtering can thin a page — keep walking cursors a few times.
-  while (pageItems.length < limit && rounds < 6) {
-    const batchSize = Math.max(limit - pageItems.length + 4, 8);
-    const { rows, error } = await fetchFeedVideoRowsPage(currentUserId, cursor, batchSize + 1);
-    if (error) throw error;
-
-    const hasMore = rows.length > batchSize;
-    const pageRows = hasMore ? rows.slice(0, batchSize) : rows;
-    if (pageRows.length === 0) {
-      nextCursor = null;
-      break;
-    }
-
-    const lastRow = pageRows[pageRows.length - 1];
-    cursor = { createdAt: lastRow.created_at, id: lastRow.id };
-    nextCursor = hasMore ? cursor : null;
-
-    const visibleRows = pageRows.filter(
-      (video) =>
-        !moderation.hiddenUserIds.has(video.user_id) &&
-        !moderation.blockedUserIds.has(video.user_id),
+  const items: FeedVideo[] = [];
+  for (const video of orderedRows) {
+    const item = toFeedVideo(
+      video,
+      profiles.get(video.user_id),
+      savedByMe,
+      jammedByMe,
+      jammedMe,
+      connected,
     );
-    const profiles = await fetchProfilesByIds(visibleRows.map((video) => video.user_id));
-    for (const video of visibleRows) {
-      const item = toFeedVideo(
-        video,
-        profiles.get(video.user_id),
-        savedByMe,
-        jammedByMe,
-        jammedMe,
-        connected,
-      );
-      if (!item) continue;
-      if (pageItems.some((existing) => existing.id === item.id)) continue;
-      pageItems.push(item);
-      if (pageItems.length >= limit) break;
-    }
-
-    rounds += 1;
-    if (!hasMore) break;
+    if (!item) continue;
+    items.push(item);
   }
 
+  const lastRow = pageIds[pageIds.length - 1];
   return {
-    items: pageItems.slice(0, limit),
-    nextCursor: pageItems.length > 0 ? nextCursor : null,
+    items,
+    nextCursor:
+      hasMore && lastRow?.sort_key
+        ? { seed, sortKey: lastRow.sort_key, id: lastRow.id }
+        : null,
+    phase,
   };
 }
 
@@ -581,48 +831,91 @@ export async function fetchMyVideos(currentUserId: string) {
   let error = result.error;
 
   if (error && isMissingSchemaError(error)) {
-    const tagsRetry = await supabase
+    const pinRetry = await supabase
       .from("videos")
-      .select(OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION)
+      .select(OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PIN)
       .eq("user_id", currentUserId)
       .order("created_at", { ascending: false });
-    if (!tagsRetry.error || !isMissingSchemaError(tagsRetry.error)) {
-      data = tagsRetry.data as ProfileVideo[] | null;
-      error = tagsRetry.error;
+    if (!pinRetry.error || !isMissingSchemaError(pinRetry.error)) {
+      data = pinRetry.data as ProfileVideo[] | null;
+      error = pinRetry.error;
     } else {
-      const categoryRetry = await supabase
+      const lookingForRetry = await supabase
         .from("videos")
-        .select(OWN_VIDEO_COLUMNS_WITH_CATEGORIES)
+        .select(OWN_VIDEO_COLUMNS_WITH_TAGS_NO_LOOKING_FOR)
         .eq("user_id", currentUserId)
         .order("created_at", { ascending: false });
-      if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
-        const legacyRetry = await supabase
+      if (!lookingForRetry.error || !isMissingSchemaError(lookingForRetry.error)) {
+        data = lookingForRetry.data as ProfileVideo[] | null;
+        error = lookingForRetry.error;
+      } else {
+        const tagsRetry = await supabase
           .from("videos")
-          .select(OWN_VIDEO_COLUMNS_LEGACY)
+          .select(OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION)
           .eq("user_id", currentUserId)
           .order("created_at", { ascending: false });
-        data = legacyRetry.data as ProfileVideo[] | null;
-        error = legacyRetry.error;
-      } else {
-        data = categoryRetry.data as ProfileVideo[] | null;
-        error = categoryRetry.error;
+        if (!tagsRetry.error || !isMissingSchemaError(tagsRetry.error)) {
+          data = tagsRetry.data as ProfileVideo[] | null;
+          error = tagsRetry.error;
+        } else {
+          const categoryRetry = await supabase
+            .from("videos")
+            .select(OWN_VIDEO_COLUMNS_WITH_CATEGORIES)
+            .eq("user_id", currentUserId)
+            .order("created_at", { ascending: false });
+          if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
+            const legacyRetry = await supabase
+              .from("videos")
+              .select(OWN_VIDEO_COLUMNS_LEGACY)
+              .eq("user_id", currentUserId)
+              .order("created_at", { ascending: false });
+            data = legacyRetry.data as ProfileVideo[] | null;
+            error = legacyRetry.error;
+          } else {
+            data = categoryRetry.data as ProfileVideo[] | null;
+            error = categoryRetry.error;
+          }
+        }
       }
     }
   }
 
   if (error) throw error;
-  return ((data ?? []) as ProfileVideo[]).map(normalizeOwnProfileVideo);
+  return ((data ?? []) as ProfileVideo[]).map((video) =>
+    normalizeOwnProfileVideo(video, currentUserId),
+  );
 }
 
-function normalizeOwnProfileVideo(video: ProfileVideo): ProfileVideo {
+export function getProfileVideoPinnedRank(
+  video:
+    | Pick<ProfileVideo, "pinnedRank" | "pinned_rank">
+    | Pick<FeedVideo, "pinnedRank">
+    | null
+    | undefined,
+): number | null {
+  const raw =
+    video && "pinnedRank" in video
+      ? video.pinnedRank
+      : video && "pinned_rank" in video
+        ? video.pinned_rank
+        : null;
+  return typeof raw === "number" && raw >= 1 && raw <= MAX_PINNED_PROFILE_VIDEOS ? raw : null;
+}
+
+function normalizeOwnProfileVideo(video: ProfileVideo, ownerUserId?: string): ProfileVideo {
   const cloudflareStreamId = video.cloudflareStreamId ?? video.cloudflare_stream_id ?? null;
   const mediaUrl =
     video.mediaUrl ??
     video.media_url ??
     (cloudflareStreamId ? getCloudflarePlaybackUrl(cloudflareStreamId) : null);
+  const lookingFor = Boolean(video.lookingFor ?? video.looking_for);
+  const pinnedRank = getProfileVideoPinnedRank(video);
+  // Own/creator selects omit user_id — attach the known owner so profile → feed
+  // mapping (and looking-for chrome) works in fullscreen.
+  const userId = video.userId ?? ownerUserId;
   return {
     ...video,
-    userId: video.userId,
+    userId,
     cloudflareStreamId,
     cloudflare_stream_id: cloudflareStreamId,
     mediaUrl,
@@ -631,7 +924,61 @@ function normalizeOwnProfileVideo(video: ProfileVideo): ProfileVideo {
     thumbnail_time_ms: video.thumbnailTimeMs ?? video.thumbnail_time_ms ?? null,
     videoFilter: normalizeVideoFilter(video.videoFilter ?? video.video_filter),
     textOverlays: normalizeVideoTextOverlays(video.textOverlays ?? video.text_overlays),
+    lookingFor,
+    looking_for: lookingFor,
+    pinnedRank,
+    pinned_rank: pinnedRank,
   };
+}
+
+/** Pin a profile video into the next free 1–3 slot. Throws if already at the cap. */
+export async function pinProfileVideo(userId: string, videoId: string): Promise<number> {
+  const { data: pinnedRows, error: listError } = await supabase
+    .from("videos")
+    .select("id, pinned_rank")
+    .eq("user_id", userId)
+    .not("pinned_rank", "is", null);
+
+  if (listError) throw listError;
+
+  const pinned = (pinnedRows ?? []) as Array<{ id: string; pinned_rank: number | null }>;
+  const already = pinned.find((row) => row.id === videoId);
+  if (already && typeof already.pinned_rank === "number") {
+    return already.pinned_rank;
+  }
+
+  if (pinned.length >= MAX_PINNED_PROFILE_VIDEOS) {
+    throw new Error(`you can pin up to ${MAX_PINNED_PROFILE_VIDEOS} videos`);
+  }
+
+  const used = new Set(
+    pinned
+      .map((row) => row.pinned_rank)
+      .filter((rank): rank is number => typeof rank === "number"),
+  );
+  let nextRank = 1;
+  while (used.has(nextRank) && nextRank <= MAX_PINNED_PROFILE_VIDEOS) {
+    nextRank += 1;
+  }
+
+  const { error } = await supabase
+    .from("videos")
+    .update({ pinned_rank: nextRank })
+    .eq("id", videoId)
+    .eq("user_id", userId);
+
+  if (error) throw error;
+  return nextRank;
+}
+
+export async function unpinProfileVideo(userId: string, videoId: string): Promise<void> {
+  const { error } = await supabase
+    .from("videos")
+    .update({ pinned_rank: null })
+    .eq("id", videoId)
+    .eq("user_id", userId);
+
+  if (error) throw error;
 }
 
 export async function fetchSavedVideos(currentUserId: string) {
@@ -664,31 +1011,41 @@ export async function fetchSavedVideos(currentUserId: string) {
   let videosError = videoResult.error;
 
   if (videosError && isMissingSchemaError(videosError)) {
-    const tagsRetry = await supabase
+    const pinRetry = await supabase
       .from("videos")
-      .select(VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION)
+      .select(VIDEO_COLUMNS_WITH_TAGS_NO_PIN)
       .in("id", savedIds)
       .order("created_at", { ascending: false });
-    if (!tagsRetry.error || !isMissingSchemaError(tagsRetry.error)) {
-      videos = tagsRetry.data as VideoRow[] | null;
-      videosError = tagsRetry.error;
+    if (!pinRetry.error || !isMissingSchemaError(pinRetry.error)) {
+      videos = pinRetry.data as VideoRow[] | null;
+      videosError = pinRetry.error;
     } else {
-      const categoryRetry = await supabase
+      const tagsRetry = await supabase
         .from("videos")
-        .select(VIDEO_COLUMNS_WITH_CATEGORIES)
+        .select(VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION)
         .in("id", savedIds)
         .order("created_at", { ascending: false });
-      if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
-        const legacyRetry = await supabase
+      if (!tagsRetry.error || !isMissingSchemaError(tagsRetry.error)) {
+        videos = tagsRetry.data as VideoRow[] | null;
+        videosError = tagsRetry.error;
+      } else {
+        const categoryRetry = await supabase
           .from("videos")
-          .select(VIDEO_COLUMNS_LEGACY)
+          .select(VIDEO_COLUMNS_WITH_CATEGORIES)
           .in("id", savedIds)
           .order("created_at", { ascending: false });
-        videos = legacyRetry.data as VideoRow[] | null;
-        videosError = legacyRetry.error;
-      } else {
-        videos = categoryRetry.data as VideoRow[] | null;
-        videosError = categoryRetry.error;
+        if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
+          const legacyRetry = await supabase
+            .from("videos")
+            .select(VIDEO_COLUMNS_LEGACY)
+            .in("id", savedIds)
+            .order("created_at", { ascending: false });
+          videos = legacyRetry.data as VideoRow[] | null;
+          videosError = legacyRetry.error;
+        } else {
+          videos = categoryRetry.data as VideoRow[] | null;
+          videosError = categoryRetry.error;
+        }
       }
     }
   }
@@ -934,15 +1291,6 @@ export async function reportVideo(input: {
   });
 
   if (error) throw error;
-}
-
-export async function sendCreatorJamRequest(
-  currentUserId: string,
-  recipientUserId: string,
-  body: string,
-) {
-  void currentUserId;
-  await sendJamRequest(recipientUserId, body);
 }
 
 export async function removeJamConnection(otherUserId: string) {
@@ -1323,11 +1671,15 @@ export async function createVideo(input: {
   thumbnailTimeMs?: number | null;
   videoFilter?: VideoFilterId | string | null;
   textOverlays?: VideoTextOverlay[] | unknown;
+  lookingFor?: boolean;
 }): Promise<{ id: string }> {
   const roles = getUniqueTags(input.roles);
   const genres = getUniqueTags(input.genres);
   const categories = getUniqueTags([...roles, ...genres]);
-  const mediaUrl = input.mediaUrl ?? getCloudflarePlaybackUrl(input.cloudflareStreamId);
+  const lookingFor = Boolean(input.lookingFor);
+  const mediaUrl =
+    input.mediaUrl ??
+    (input.cloudflareStreamId ? getCloudflarePlaybackUrl(input.cloudflareStreamId) : null);
   const thumbnailTimeMs =
     typeof input.thumbnailTimeMs === "number" && Number.isFinite(input.thumbnailTimeMs)
       ? Math.max(0, Math.round(input.thumbnailTimeMs))
@@ -1342,11 +1694,26 @@ export async function createVideo(input: {
     genreCount: genres.length,
     videoFilter,
     textOverlayCount: textOverlays.length,
+    lookingFor,
   });
   // Prefer payloads that keep video_filter/text_overlays. The live DB is missing
   // roles/genres columns, so categories+presentation must come before any fallback
   // that drops presentation (otherwise text/filter never persist).
   const insertAttempts: Array<Record<string, unknown>> = [
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      roles,
+      genres,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+      thumbnail_time_ms: thumbnailTimeMs,
+      video_filter: videoFilter,
+      text_overlays: textOverlays,
+      looking_for: lookingFor,
+    },
     {
       user_id: input.userId,
       caption: input.caption,
@@ -1370,6 +1737,30 @@ export async function createVideo(input: {
       thumbnail_time_ms: thumbnailTimeMs,
       video_filter: videoFilter,
       text_overlays: textOverlays,
+      looking_for: lookingFor,
+    },
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+      thumbnail_time_ms: thumbnailTimeMs,
+      video_filter: videoFilter,
+      text_overlays: textOverlays,
+    },
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      roles,
+      genres,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+      thumbnail_time_ms: thumbnailTimeMs,
+      looking_for: lookingFor,
     },
     {
       user_id: input.userId,
@@ -1415,8 +1806,17 @@ export async function createVideo(input: {
     },
   ];
 
+  // When Looking For is on, prefer payloads that include looking_for so a roles/
+  // genres schema miss doesn't silently save the video without the flag.
+  const orderedInsertAttempts = lookingFor
+    ? [
+        ...insertAttempts.filter((payload) => "looking_for" in payload),
+        ...insertAttempts.filter((payload) => !("looking_for" in payload)),
+      ]
+    : insertAttempts;
+
   let lastSchemaError: unknown = null;
-  for (const [index, payload] of insertAttempts.entries()) {
+  for (const [index, payload] of orderedInsertAttempts.entries()) {
     const attempt = index + 1;
     logVideoDatabaseStep("createVideo insert attempt start", {
       attempt,
@@ -1424,10 +1824,15 @@ export async function createVideo(input: {
       hasCloudflareStreamIdColumn: "cloudflare_stream_id" in payload,
       hasRolesColumns: "roles" in payload || "genres" in payload,
       hasCategoriesColumn: "categories" in payload,
+      hasLookingForColumn: "looking_for" in payload,
     });
     const { data, error } = await supabase.from("videos").insert(payload).select("id").single();
     if (!error) {
-      logVideoDatabaseStep("createVideo insert attempt success", { attempt, videoId: data.id });
+      logVideoDatabaseStep("createVideo insert attempt success", {
+        attempt,
+        videoId: data.id,
+        lookingForPersisted: "looking_for" in payload ? lookingFor : null,
+      });
       return { id: data.id as string };
     }
     logVideoDatabaseStep("createVideo insert attempt failed", {
@@ -1585,11 +1990,14 @@ function mergeMessageRows(...groups: MessageRow[][]) {
 
 async function fetchFeedVideoRowsPage(
   currentUserId: string,
-  cursor: FeedCursor | null,
+  _cursor: FeedCursor | null,
   limit: number,
 ): Promise<{ rows: VideoRow[]; error: unknown | null }> {
+  // Legacy direct-table fallback (unused). Feed paging goes through RPCs with seeded random order.
   const columnSets = [
     VIDEO_COLUMNS_WITH_TAGS,
+    VIDEO_COLUMNS_WITH_TAGS_NO_PIN,
+    VIDEO_COLUMNS_WITH_TAGS_NO_LOOKING_FOR,
     VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION,
     VIDEO_COLUMNS_WITH_CATEGORIES,
     VIDEO_COLUMNS_LEGACY,
@@ -1597,21 +2005,11 @@ async function fetchFeedVideoRowsPage(
 
   let lastError: unknown = null;
   for (const columns of columnSets) {
-    let query = supabase
+    const { data, error } = await supabase
       .from("videos")
       .select(columns)
       .neq("user_id", currentUserId)
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false })
       .limit(limit);
-
-    if (cursor?.createdAt && cursor.id) {
-      query = query.or(
-        `created_at.lt."${cursor.createdAt}",and(created_at.eq."${cursor.createdAt}",id.lt.${cursor.id})`,
-      );
-    }
-
-    const { data, error } = await query;
     if (!error) {
       return { rows: (data ?? []) as unknown as VideoRow[], error: null };
     }
@@ -1622,6 +2020,33 @@ async function fetchFeedVideoRowsPage(
   }
 
   return { rows: [], error: lastError };
+}
+
+async function fetchVideoRowsByIds(videoIds: string[]): Promise<VideoRow[]> {
+  if (videoIds.length === 0) return [];
+
+  const columnSets = [
+    VIDEO_COLUMNS_WITH_TAGS,
+    VIDEO_COLUMNS_WITH_TAGS_NO_PIN,
+    VIDEO_COLUMNS_WITH_TAGS_NO_LOOKING_FOR,
+    VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION,
+    VIDEO_COLUMNS_WITH_CATEGORIES,
+    VIDEO_COLUMNS_LEGACY,
+  ];
+
+  let lastError: unknown = null;
+  for (const columns of columnSets) {
+    const { data, error } = await supabase.from("videos").select(columns).in("id", videoIds);
+    if (!error) {
+      return (data ?? []) as unknown as VideoRow[];
+    }
+    lastError = error;
+    if (!isMissingSchemaError(error)) {
+      throw error;
+    }
+  }
+
+  throw lastError ?? new Error("could not load nearby videos");
 }
 
 async function fetchSystemMessages(currentUserId: string, limit = SYSTEM_MESSAGE_PAGE_SIZE) {
@@ -1652,6 +2077,69 @@ async function fetchProfilesByIds(userIds: string[]) {
 
   if (error) throw error;
   return new Map(((data ?? []) as ProfileRow[]).map((profile) => [profile.id, profile]));
+}
+
+/** Owner-only via RLS — other users always get null coords. */
+async function attachPrivateLocation(
+  profile: Omit<Profile, keyof ProfileLocationFields>,
+): Promise<Profile> {
+  const { data, error } = await supabase
+    .from("profile_locations")
+    .select(PROFILE_LOCATION_COLUMNS)
+    .eq("user_id", profile.id)
+    .maybeSingle();
+
+  if (error) throw error;
+  const location = data as ProfileLocationRow | null;
+  if (!location) {
+    return { ...profile, ...EMPTY_PRIVATE_LOCATION };
+  }
+
+  return {
+    ...profile,
+    latitude: location.latitude,
+    longitude: location.longitude,
+    live_latitude: location.live_latitude,
+    live_longitude: location.live_longitude,
+    live_location_updated_at: location.live_location_updated_at,
+  };
+}
+
+async function upsertPrivateProfileGeocode(
+  userId: string,
+  coordinates: { latitude: number; longitude: number } | null,
+) {
+  const { data: existing, error: existingError } = await supabase
+    .from("profile_locations")
+    .select("user_id")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (existingError) throw existingError;
+
+  const geocodePayload = {
+    latitude: coordinates?.latitude ?? null,
+    longitude: coordinates?.longitude ?? null,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (existing) {
+    const { error } = await supabase
+      .from("profile_locations")
+      .update(geocodePayload)
+      .eq("user_id", userId);
+    if (error) throw error;
+    return;
+  }
+
+  const { error } = await supabase.from("profile_locations").insert({
+    user_id: userId,
+    live_latitude: null,
+    live_longitude: null,
+    live_location_updated_at: null,
+    ...geocodePayload,
+  });
+  if (error) throw error;
 }
 
 async function fetchLocalSavedVideoRows(currentUserId: string) {
@@ -1819,10 +2307,6 @@ async function addLocalReadInboxMessageId(messageId: string) {
   const current = await getLocalReadInboxMessageIds();
   current.add(messageId);
   await AsyncStorage.setItem("jam.localReadInboxMessages", JSON.stringify([...current]));
-}
-
-function getCloudflarePlaybackUrl(streamId: string | null | undefined) {
-  return streamId ? `https://videodelivery.net/${streamId}/manifest/video.m3u8` : null;
 }
 
 function logVideoDatabaseStep(step: string, details?: Record<string, unknown>) {
@@ -1994,10 +2478,6 @@ function toFeedVideo(
     creatorName,
     role: profile ? getRole(profile) : "creator",
     location: profile ? getProfileLocation(profile) : "Unknown",
-    latitude: profile?.latitude ?? null,
-    longitude: profile?.longitude ?? null,
-    liveLatitude: profile?.live_latitude ?? null,
-    liveLongitude: profile?.live_longitude ?? null,
     avatarUrl: profile?.avatar_url ?? null,
     bio: profile?.bio ?? null,
     caption: video.caption ?? "",
@@ -2010,6 +2490,8 @@ function toFeedVideo(
     thumbnailTimeMs: video.thumbnail_time_ms ?? null,
     videoFilter: normalizeVideoFilter(video.video_filter),
     textOverlays: normalizeVideoTextOverlays(video.text_overlays),
+    lookingFor: Boolean(video.looking_for),
+    pinnedRank: getProfileVideoPinnedRank({ pinned_rank: video.pinned_rank }),
     earlyAdopter: Boolean(profile?.early_adopter),
     proBadge,
     videoCount: profile?.video_count ?? 0,
@@ -2032,6 +2514,7 @@ function toSavedProfileVideo(
   const creatorName = profile ? getDisplayName(profile) : "creator";
   const connectedWithCurrentUser = connected.has(video.user_id);
   const tags = getVideoTags(video);
+  const pinnedRank = getProfileVideoPinnedRank({ pinned_rank: video.pinned_rank });
   return {
     id: video.id,
     userId: video.user_id,
@@ -2055,6 +2538,10 @@ function toSavedProfileVideo(
     thumbnailTimeMs: video.thumbnail_time_ms ?? null,
     videoFilter: normalizeVideoFilter(video.video_filter),
     textOverlays: normalizeVideoTextOverlays(video.text_overlays),
+    lookingFor: Boolean(video.looking_for),
+    looking_for: Boolean(video.looking_for),
+    pinnedRank,
+    pinned_rank: pinnedRank,
     created_at: video.created_at,
     savedByMe,
     mutual: connectedWithCurrentUser || (jammedByMe.has(video.user_id) && jammedMe.has(video.user_id)),

@@ -24,18 +24,6 @@ export function categoryAlertKey(subscription: CategoryAlertSubscription) {
   return `${subscription.role.toLowerCase()}|${subscription.genre.toLowerCase()}`;
 }
 
-export function isRoleOnlyCategoryAlert(subscription: CategoryAlertSubscription) {
-  return subscription.role.length > 0 && subscription.genre.length === 0;
-}
-
-export function isDuplicateCategoryAlert(
-  subscriptions: CategoryAlertSubscription[],
-  candidate: CategoryAlertSubscription,
-) {
-  const key = categoryAlertKey(candidate);
-  return subscriptions.some((item) => categoryAlertKey(item) === key);
-}
-
 export function getDefaultNotificationPreferences(): NotificationPreferences {
   return {
     inAppNotifications: true,

@@ -5,11 +5,53 @@ import { getAllowedMaxVideoSeconds } from "@/lib/pro-entitlements";
 type CloudflareVideoResponse = {
   success: boolean;
   errors?: { message?: string; code?: number }[];
+  messages?: { message?: string; code?: number }[];
   result?: {
     uid?: string;
+    duration?: number;
     status?: { state?: string; errorReasonText?: string | null };
   };
 };
+
+function cloudflareErrorMessage(data: CloudflareVideoResponse, fallback: string) {
+  return (
+    data.errors?.find((entry) => entry.message)?.message ||
+    data.messages?.find((entry) => entry.message)?.message ||
+    data.result?.status?.errorReasonText ||
+    fallback
+  );
+}
+
+/** Cloudflare clip is picky about ranges past duration and overly precise floats. */
+function normalizeClipRange(
+  startTimeSeconds: number,
+  endTimeSeconds: number,
+  durationSeconds: number | null | undefined,
+) {
+  const duration =
+    typeof durationSeconds === "number" && Number.isFinite(durationSeconds) && durationSeconds > 0
+      ? durationSeconds
+      : null;
+
+  let start = Math.max(0, startTimeSeconds);
+  let end = Math.max(start + 0.1, endTimeSeconds);
+
+  if (duration != null) {
+    // Keep a tiny epsilon inside the asset so Cloudflare doesn't 400 on overshoot.
+    const maxEnd = Math.max(0.1, duration - 0.05);
+    end = Math.min(end, maxEnd);
+    start = Math.min(start, Math.max(0, end - 0.1));
+  }
+
+  // Prefer centisecond precision — integer-only examples in CF docs, but API accepts numbers.
+  start = Math.round(start * 100) / 100;
+  end = Math.round(end * 100) / 100;
+  if (end <= start) {
+    end = Math.round((start + 0.1) * 100) / 100;
+  }
+
+  return { startTimeSeconds: start, endTimeSeconds: end, durationSeconds: duration };
+}
 
 function createAuthenticatedClient(accessToken: string) {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.EXPO_PUBLIC_SUPABASE_URL;
@@ -44,10 +86,10 @@ async function waitForStreamReady(
     const data = (await response.json().catch(() => ({}))) as CloudflareVideoResponse;
     const state = data.result?.status?.state?.toLowerCase();
     if (response.ok && data.success && state === "ready") {
-      return data.result;
+      return data.result ?? null;
     }
     if (state === "error") {
-      throw new Error(data.result?.status?.errorReasonText || "Video processing failed.");
+      throw new Error(cloudflareErrorMessage(data, "Video processing failed."));
     }
     await sleep(2000);
   }
@@ -83,15 +125,15 @@ export async function POST(request: NextRequest) {
   };
 
   const sourceId = body.cloudflareStreamId?.trim();
-  const startTimeSeconds = Number(body.startTimeSeconds);
-  const endTimeSeconds = Number(body.endTimeSeconds);
+  const rawStartTimeSeconds = Number(body.startTimeSeconds);
+  const rawEndTimeSeconds = Number(body.endTimeSeconds);
   if (!sourceId) {
     return Response.json({ error: "Missing source video." }, { status: 400 });
   }
-  if (!Number.isFinite(startTimeSeconds) || !Number.isFinite(endTimeSeconds)) {
+  if (!Number.isFinite(rawStartTimeSeconds) || !Number.isFinite(rawEndTimeSeconds)) {
     return Response.json({ error: "Invalid trim range." }, { status: 400 });
   }
-  if (startTimeSeconds < 0 || endTimeSeconds <= startTimeSeconds) {
+  if (rawStartTimeSeconds < 0 || rawEndTimeSeconds <= rawStartTimeSeconds) {
     return Response.json({ error: "Trim end must be after trim start." }, { status: 400 });
   }
 
@@ -109,6 +151,22 @@ export async function POST(request: NextRequest) {
     videoCount: profile?.video_count,
     proSubscriptionActive: profile?.pro_subscription_active,
   });
+
+  let sourceVideo: CloudflareVideoResponse["result"] | null | undefined;
+  try {
+    sourceVideo = await waitForStreamReady(accountId, apiToken, sourceId);
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Source video is not ready." },
+      { status: 504 },
+    );
+  }
+
+  const { startTimeSeconds, endTimeSeconds, durationSeconds } = normalizeClipRange(
+    rawStartTimeSeconds,
+    rawEndTimeSeconds,
+    sourceVideo?.duration,
+  );
   const clipDurationSeconds = endTimeSeconds - startTimeSeconds;
   if (clipDurationSeconds > allowedMaxDurationSeconds + 0.5) {
     return Response.json(
@@ -116,13 +174,10 @@ export async function POST(request: NextRequest) {
       { status: 400 },
     );
   }
-
-  try {
-    await waitForStreamReady(accountId, apiToken, sourceId);
-  } catch (error) {
+  if (durationSeconds != null && endTimeSeconds <= startTimeSeconds) {
     return Response.json(
-      { error: error instanceof Error ? error.message : "Source video is not ready." },
-      { status: 504 },
+      { error: "Trim range is outside the uploaded video duration." },
+      { status: 400 },
     );
   }
 
@@ -160,7 +215,15 @@ export async function POST(request: NextRequest) {
   if (!clipResponse.ok || !clipData.success || !clippedId) {
     return Response.json(
       {
-        error: clipData.errors?.[0]?.message ?? "Could not trim video.",
+        error: cloudflareErrorMessage(clipData, "Could not trim video."),
+        details: {
+          startTimeSeconds,
+          endTimeSeconds,
+          sourceDurationSeconds: durationSeconds,
+          cloudflareStatus: clipResponse.status,
+          cloudflareErrors: clipData.errors ?? [],
+          cloudflareMessages: clipData.messages ?? [],
+        },
       },
       { status: clipResponse.status || 500 },
     );

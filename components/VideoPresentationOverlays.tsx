@@ -1,27 +1,209 @@
-import { StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
 import {
+  Dimensions,
+  StyleSheet,
+  Text,
+  View,
+  type StyleProp,
+  type TextStyle,
+  type ViewStyle,
+} from "react-native";
+import {
+  getVideoTextEffectChrome,
+  getVideoTextOutlineRadius,
+  getVideoTextOverlayFontFamily,
+  getVideoTextOverlayFontWeight,
   normalizeVideoFilter,
+  normalizeVideoTextEffectId,
   normalizeVideoTextOverlays,
   type VideoFilterId,
+  type VideoTextEffectId,
   type VideoTextOverlay,
 } from "@/lib/video-presentation";
+import { getFilterOverlayStyle } from "@/lib/video-filters";
 
-export function getVideoFilterOverlayStyle(filter: VideoFilterId): ViewStyle {
-  switch (filter) {
-    case "warm":
-      return { backgroundColor: "rgba(251,146,60,0.18)" };
-    case "cool":
-      return { backgroundColor: "rgba(96,165,250,0.18)" };
-    case "fade":
-      return { backgroundColor: "rgba(255,255,255,0.14)" };
-    case "noir":
-      return { backgroundColor: "rgba(0,0,0,0.34)" };
-    case "vivid":
-      return { backgroundColor: "rgba(236,72,153,0.16)" };
-    case "none":
-    default:
-      return {};
+const FEED_TEXT_MAX_WIDTH = Math.round(Dimensions.get("window").width * 0.86);
+
+export function getVideoFilterOverlayStyle(filter: VideoFilterId | string | null | undefined): ViewStyle {
+  return getFilterOverlayStyle(filter);
+}
+
+const FEED_BASE_FONT_SIZE = 30;
+const THUMB_BASE_FONT_SIZE = 11;
+const MICRO_BASE_FONT_SIZE = 7;
+
+/** Dense circular samples → rounded stroke that hugs glyph curves (not boxy N/S/E/W stacks). */
+function buildCurvedOutlineOffsets(radius: number): Array<[number, number]> {
+  const offsets: Array<[number, number]> = [];
+  // Two rings are enough for a continuous curve when each sample carries a soft halo.
+  const rings = [
+    { scale: 0.72, steps: 24 },
+    { scale: 1, steps: 32 },
+  ];
+  for (const ring of rings) {
+    const r = radius * ring.scale;
+    for (let i = 0; i < ring.steps; i += 1) {
+      const angle = (i / ring.steps) * Math.PI * 2;
+      offsets.push([Math.cos(angle) * r, Math.sin(angle) * r]);
+    }
   }
+  return offsets;
+}
+
+function flattenTextStyle(textStyle: StyleProp<TextStyle>): TextStyle {
+  return (StyleSheet.flatten(textStyle) ?? {}) as TextStyle;
+}
+
+function getOverlayTypeStyles(
+  density: "feed" | "thumb" | "micro",
+  overlay: VideoTextOverlay,
+): TextStyle {
+  const base =
+    density === "micro" ? MICRO_BASE_FONT_SIZE : density === "thumb" ? THUMB_BASE_FONT_SIZE : FEED_BASE_FONT_SIZE;
+  const fontSize = Math.max(6, Math.round(base * overlay.fontScale * 10) / 10);
+  const lineHeight = Math.round(fontSize * 1.25 * 10) / 10;
+  const chrome = getVideoTextEffectChrome(overlay.effectId, { fontSize, density });
+  const shadowRadius = density === "feed" ? 1.5 : 1;
+  const fontWeight = getVideoTextOverlayFontWeight(overlay.fontId);
+  // Leave room inside the frame for box padding so glyphs aren't pressed to the edge.
+  const frameMax =
+    density === "micro" ? 48 : density === "thumb" ? 84 : FEED_TEXT_MAX_WIDTH;
+  const textMaxWidth = Math.max(24, frameMax - chrome.paddingHorizontal * 2);
+
+  return {
+    color: chrome.color,
+    fontSize,
+    lineHeight,
+    ...(fontWeight ? { fontWeight } : null),
+    fontFamily: getVideoTextOverlayFontFamily(overlay.fontId),
+    textAlign: "center",
+    maxWidth: textMaxWidth,
+    includeFontPadding: false,
+    ...(chrome.useSoftShadow
+      ? {
+          textShadowColor: "rgba(0,0,0,0.55)",
+          textShadowRadius: shadowRadius,
+          textShadowOffset: { width: 0, height: density === "feed" ? 1 : 0.5 } as const,
+        }
+      : {
+          textShadowColor: "transparent",
+          textShadowRadius: 0,
+          textShadowOffset: { width: 0, height: 0 } as const,
+        }),
+  };
+}
+
+function getEffectContainerStyle(
+  effectId: VideoTextEffectId,
+  fontSize: number,
+  density: "feed" | "thumb" | "micro" | "edit" | "menu",
+): ViewStyle {
+  const chrome = getVideoTextEffectChrome(effectId, { fontSize, density });
+
+  if (chrome.backgroundColor) {
+    return {
+      backgroundColor: chrome.backgroundColor,
+      paddingHorizontal: chrome.paddingHorizontal,
+      paddingVertical: chrome.paddingVertical,
+      borderRadius: chrome.borderRadius,
+      alignSelf: "center",
+      alignItems: "center",
+      justifyContent: "center",
+      // borderRadius clips on Android unless overflow is visible.
+      overflow: "visible",
+      ...(density === "menu" && effectId === "blackBox"
+        ? { borderWidth: StyleSheet.hairlineWidth, borderColor: "rgba(255,255,255,0.4)" }
+        : null),
+    };
+  }
+
+  if (chrome.useOutline) {
+    return {
+      alignSelf: "center",
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: chrome.paddingHorizontal,
+      paddingVertical: chrome.paddingVertical,
+      overflow: "visible",
+    };
+  }
+
+  return {
+    alignSelf: "center",
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "visible",
+  };
+}
+
+/** Renders overlay copy with none / outline / whiteBox / blackBox chrome. */
+export function VideoTextOverlayGlyph({
+  text,
+  effectId,
+  textStyle,
+  numberOfLines,
+  density = "feed",
+}: {
+  text: string;
+  effectId?: unknown;
+  textStyle: StyleProp<TextStyle>;
+  numberOfLines?: number;
+  density?: "feed" | "thumb" | "micro" | "edit" | "menu";
+}) {
+  const resolvedEffect = normalizeVideoTextEffectId(effectId);
+  const flatStyle = flattenTextStyle(textStyle);
+  const fontSize = typeof flatStyle.fontSize === "number" ? flatStyle.fontSize : 30;
+  const chrome = getVideoTextEffectChrome(resolvedEffect, { fontSize, density });
+  const containerStyle = getEffectContainerStyle(resolvedEffect, fontSize, density);
+  const outlineRadius = getVideoTextOutlineRadius(fontSize, density);
+  const outlineOffsets = chrome.useOutline ? buildCurvedOutlineOffsets(outlineRadius) : [];
+
+  const filledTextStyle: StyleProp<TextStyle> = [
+    textStyle,
+    {
+      color: chrome.color,
+      textAlign: "center",
+      includeFontPadding: false,
+      ...(chrome.useSoftShadow
+        ? null
+        : {
+            textShadowColor: "transparent",
+            textShadowRadius: 0,
+            textShadowOffset: { width: 0, height: 0 },
+          }),
+    },
+  ];
+
+  const label = (
+    <View style={styles.glyphInner}>
+      {outlineOffsets.map(([x, y], index) => (
+        <Text
+          key={`outline-${index}`}
+          pointerEvents="none"
+          numberOfLines={numberOfLines}
+          style={[
+            filledTextStyle,
+            {
+              position: "absolute",
+              left: x,
+              top: y,
+              color: "#000",
+              // Soften each sample slightly so the ring reads as a continuous curve.
+              textShadowColor: "rgba(0,0,0,0.55)",
+              textShadowRadius: Math.max(0.6, outlineRadius * 0.35),
+              textShadowOffset: { width: 0, height: 0 },
+            },
+          ]}
+        >
+          {text}
+        </Text>
+      ))}
+      <Text numberOfLines={numberOfLines} style={filledTextStyle}>
+        {text}
+      </Text>
+    </View>
+  );
+
+  return <View style={containerStyle}>{label}</View>;
 }
 
 export function VideoPresentationOverlays({
@@ -39,9 +221,6 @@ export function VideoPresentationOverlays({
   const resolvedFilter = normalizeVideoFilter(filter);
   const overlays = normalizeVideoTextOverlays(textOverlays);
   if (resolvedFilter === "none" && overlays.length === 0) return null;
-
-  const textStyle: StyleProp<TextStyle> =
-    density === "micro" ? styles.textMicro : density === "thumb" ? styles.textThumb : styles.text;
 
   return (
     <View pointerEvents="none" style={[StyleSheet.absoluteFill, style]}>
@@ -63,9 +242,13 @@ export function VideoPresentationOverlays({
             },
           ]}
         >
-          <Text style={textStyle} numberOfLines={density === "feed" ? undefined : 2}>
-            {overlay.text}
-          </Text>
+          <VideoTextOverlayGlyph
+            text={overlay.text}
+            effectId={overlay.effectId}
+            density={density}
+            textStyle={getOverlayTypeStyles(density, overlay)}
+            numberOfLines={density === "feed" ? undefined : 2}
+          />
         </View>
       ))}
     </View>
@@ -80,40 +263,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  text: {
-    color: "#fff",
-    fontSize: 30,
-    lineHeight: 36,
-    fontWeight: "900",
-    textAlign: "center",
-    width: 280,
-    maxWidth: 320,
-    textShadowColor: "rgba(0,0,0,0.62)",
-    textShadowRadius: 8,
-    textShadowOffset: { width: 0, height: 2 },
-  },
-  textThumb: {
-    color: "#fff",
-    fontSize: 11,
-    lineHeight: 13,
-    fontWeight: "900",
-    textAlign: "center",
-    width: 72,
-    maxWidth: 84,
-    textShadowColor: "rgba(0,0,0,0.7)",
-    textShadowRadius: 3,
-    textShadowOffset: { width: 0, height: 1 },
-  },
-  textMicro: {
-    color: "#fff",
-    fontSize: 7,
-    lineHeight: 8,
-    fontWeight: "900",
-    textAlign: "center",
-    width: 40,
-    maxWidth: 48,
-    textShadowColor: "rgba(0,0,0,0.75)",
-    textShadowRadius: 2,
-    textShadowOffset: { width: 0, height: 1 },
+  glyphInner: {
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "visible",
   },
 });

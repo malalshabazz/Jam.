@@ -2,6 +2,9 @@ export const NEAR_ME_RADIUS_OPTIONS = [5, 10, 25, 50] as const;
 
 export type NearMeRadiusMiles = (typeof NEAR_ME_RADIUS_OPTIONS)[number];
 
+/** Live GPS older than this is ignored for near-me; profile geocode is used instead. */
+export const LIVE_LOCATION_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+
 const EARTH_RADIUS_MILES = 3958.7613;
 
 export function normalizeNearMeRadius(value: number | null | undefined): NearMeRadiusMiles {
@@ -43,6 +46,21 @@ export function isWithinRadiusMiles(
   );
 }
 
+export function isLiveLocationFresh(
+  updatedAt: string | null | undefined,
+  nowMs: number = Date.now(),
+) {
+  if (!updatedAt) return false;
+  const parsed = Date.parse(updatedAt);
+  if (!Number.isFinite(parsed)) return false;
+  return nowMs - parsed <= LIVE_LOCATION_MAX_AGE_MS;
+}
+
+/**
+ * Live-first near-me matching:
+ * - Fresh live GPS (< 72h) → match on live only
+ * - Missing/stale live → demote to profile geocode (city/country)
+ */
 export function isCreatorWithinNearMeRadius(
   viewerLatitude: number,
   viewerLongitude: number,
@@ -50,34 +68,32 @@ export function isCreatorWithinNearMeRadius(
   profileLongitude: number | null | undefined,
   liveLatitude: number | null | undefined,
   liveLongitude: number | null | undefined,
+  liveLocationUpdatedAt: string | null | undefined,
   radiusMiles: number,
 ) {
-  if (
-    profileLatitude != null &&
-    profileLongitude != null &&
-    isWithinRadiusMiles(
-      viewerLatitude,
-      viewerLongitude,
-      profileLatitude,
-      profileLongitude,
-      radiusMiles,
-    )
-  ) {
-    return true;
-  }
-
-  if (
+  const liveFresh =
     liveLatitude != null &&
     liveLongitude != null &&
-    isWithinRadiusMiles(
+    isLiveLocationFresh(liveLocationUpdatedAt);
+
+  if (liveFresh) {
+    return isWithinRadiusMiles(
       viewerLatitude,
       viewerLongitude,
       liveLatitude,
       liveLongitude,
       radiusMiles,
-    )
-  ) {
-    return true;
+    );
+  }
+
+  if (profileLatitude != null && profileLongitude != null) {
+    return isWithinRadiusMiles(
+      viewerLatitude,
+      viewerLongitude,
+      profileLatitude,
+      profileLongitude,
+      radiusMiles,
+    );
   }
 
   return false;

@@ -1,15 +1,31 @@
 import { StatusBar } from "expo-status-bar";
+import * as Haptics from "expo-haptics";
 import * as ImagePicker from "expo-image-picker";
 import { Camera, CameraView, type CameraType } from "expo-camera";
 import * as MediaLibrary from "expo-media-library";
 import * as Linking from "expo-linking";
 import { useEventListener } from "expo";
 import { setAudioModeAsync } from "expo-audio";
-import { VideoView, useVideoPlayer, type VideoContentFit, type VideoPlayerStatus, type VideoSource } from "expo-video";
+import {
+  VideoView,
+  useVideoPlayer,
+  type VideoContentFit,
+  type VideoPlayer,
+  type VideoPlayerStatus,
+  type VideoSource,
+} from "expo-video";
+import {
+  adoptPrewarmedProfileVideoPlayer,
+  getExpoVideoSource as getPrewarmExpoVideoSource,
+  getVideoSourceCacheKey,
+  prewarmProfileVideoSource,
+  touchProfileVideoPrewarm,
+} from "@/lib/profile-video-prewarm";
 import { LinearGradient } from "expo-linear-gradient";
 import MaskedView from "@react-native-masked-view/masked-view";
 import * as Location from "expo-location";
 import { getThumbnailAsync } from "expo-video-thumbnails";
+import * as FileSystem from "expo-file-system/legacy";
 import { DarkTheme, NavigationContainer, useFocusEffect, useIsFocused, type NavigationContainerRef } from "@react-navigation/native";
 import {
   BottomTabBarProps,
@@ -26,7 +42,7 @@ import {
   type PinchGestureHandlerStateChangeEvent,
 } from "react-native-gesture-handler";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, createContext, memo, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
+import { useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, createContext, forwardRef, memo, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -81,11 +97,15 @@ import { getActiveInboxChatUserId, setActiveInboxChatUserId } from "@/lib/active
 import {
   disableLiveLocationSharing,
   enableLiveLocationSharing,
+  hasSeenNearMeLiveLocationNotice,
   isLiveLocationSharingEnabled,
+  markNearMeLiveLocationNoticeSeen,
+  NEAR_ME_LIVE_LOCATION_NOTICE_MESSAGE,
+  NEAR_ME_LIVE_LOCATION_NOTICE_TITLE,
+  pauseLiveLocationSharingOnLogout,
   resumeLiveLocationSharingIfEnabled,
 } from "@/lib/live-location-sharing";
 import {
-  isCreatorWithinNearMeRadius,
   NEAR_ME_RADIUS_OPTIONS,
   normalizeNearMeRadius,
   type NearMeRadiusMiles,
@@ -101,17 +121,25 @@ import {
   fetchCreatorPostAlert,
   fetchCreatorVideos,
   FEED_PAGE_SIZE,
+  FEED_SEEN_DWELL_MS,
   fetchConversationMessages,
   fetchFeedVideos,
+  fetchNearbyFeedVideos,
+  fetchNearbyUserIds,
   fetchInbox,
   fetchMyVideos,
   fetchProfile,
   fetchRelationshipState,
   fetchSavedVideos,
+  getProfileVideoPinnedRank,
+  MAX_PINNED_PROFILE_VIDEOS,
+  pinProfileVideo,
+  unpinProfileVideo,
   getSignupPosition,
   hideCreator,
   markConversationRead,
   markInboxMessageRead,
+  markVideoSeen,
   markWelcomeSeen,
   removeJamConnection,
   reportVideo,
@@ -129,6 +157,8 @@ import {
   type Conversation,
   type DailyJamUsage,
   type FeedCursor,
+  type FeedContentFilters,
+  type FeedPhase,
   type FeedVideo,
   type InboxData,
   type InboxMessage,
@@ -144,6 +174,7 @@ import {
   getCloudflareThumbnailUrl,
   getVideoUploadErrorDetails,
   logVideoUploadStep,
+  probeHlsVideoSize,
   type NativeVideoAsset,
 } from "@/lib/native-cloudflare";
 import {
@@ -159,6 +190,12 @@ import {
   usePendingVideoUploads,
 } from "@/lib/pending-video-uploads";
 import {
+  bakeVideoPresentation,
+  isVideoBakeAvailable,
+  needsPresentationBake,
+  normalizeCameraRecording,
+} from "@/lib/bake-video-presentation";
+import {
   uploadNativeProfileAvatar,
   type NativeAvatarAsset,
 } from "@/lib/native-avatar-storage";
@@ -166,6 +203,7 @@ import { getAuthEmailRedirectUrl, supabase } from "@/lib/native-supabase";
 import { AccountSettingsModal } from "@/components/account-settings-modal";
 import {
   VideoPresentationOverlays,
+  VideoTextOverlayGlyph,
   getVideoFilterOverlayStyle,
 } from "@/components/VideoPresentationOverlays";
 import {
@@ -176,9 +214,29 @@ import {
   type ProBadgeKind,
 } from "@/lib/pro-entitlements";
 import {
+  TEXT_OVERLAY_DEFAULT_EFFECT_ID,
+  TEXT_OVERLAY_DEFAULT_FONT_ID,
+  TEXT_OVERLAY_DEFAULT_FONT_SCALE,
+  VIDEO_TEXT_FONT_OPTIONS,
+  clampTextOverlayFontScale,
+  cycleVideoTextEffectId,
+  getVideoTextEffectChrome,
+  getVideoTextOutlineRadius,
+  getVideoTextOverlayFontFamily,
+  getVideoTextOverlayFontWeight,
   normalizeVideoFilter,
+  normalizeVideoTextEffectId,
+  normalizeVideoTextFontId,
   normalizeVideoTextOverlays,
+  type VideoFilterId,
+  type VideoTextEffectId,
+  type VideoTextFontId,
 } from "@/lib/video-presentation";
+import {
+  ensureFilterCatalogLoaded,
+  getFilterPickerOptions,
+  subscribeFilterCatalog,
+} from "@/lib/video-filters";
 
 type Route = "auth" | "onboarding" | "welcome" | "main";
 type Tab = "discover" | "inbox" | "create" | "you";
@@ -191,7 +249,7 @@ type MainTabParamList = {
 };
 type InboxTab = "requests" | "jams" | "sent";
 type CreateStage = "camera" | "edit" | "details";
-type VideoFilter = "none" | "warm" | "cool" | "fade" | "noir" | "vivid";
+type VideoFilter = VideoFilterId;
 type AuthMode = "login" | "signup" | "forgot" | "reset";
 type AuthDeepLinkResult = "recovery" | "session" | null;
 
@@ -235,6 +293,33 @@ const NAV_BAR_HEIGHT = 92;
 const NAV_BAR_ITEM_HEIGHT = 58;
 const NAV_BAR_TOP_PADDING = 12;
 const FEED_ACTION_GAP = 12;
+/** Hold still this long before chrome fades for a clear video view. */
+const FEED_CHROME_HOLD_MS = 220;
+
+/** Tiny buzz when a press-and-hold gesture activates. */
+function triggerHoldHaptic() {
+  void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
+}
+/** Finger travel needed while holding to fill the lock gesture (visual track stays shorter). */
+const FEED_CHROME_LOCK_PULL_PX = 130;
+/** Visual travel of the lock knob along the pull path. */
+const FEED_CHROME_LOCK_TRACK_TRAVEL = 78;
+const FEED_CHROME_LOCK_CIRCLE_SIZE = 46;
+const FEED_CHROME_FADE_MS = 180;
+/** Right-edge fraction of the feed that opens the playback-speed scrubber. */
+const FEED_SPEED_ZONE_LEFT_RATIO = 0.75;
+/** Top → bottom speed options in the hold scrubber. */
+const FEED_PLAYBACK_SPEEDS = [2, 1.5, 1, 0.5] as const;
+type FeedPlaybackSpeed = (typeof FEED_PLAYBACK_SPEEDS)[number];
+const FEED_SPEED_DEFAULT_INDEX = FEED_PLAYBACK_SPEEDS.indexOf(1);
+/** Vertical drag distance to move one speed step. */
+const FEED_SPEED_SEGMENT_PX = 42;
+/** Slightly wider than the jam/bookmark icons; still centered on the action column. */
+const FEED_SPEED_PILL_WIDTH = 38;
+const FEED_SPEED_PILL_PADDING_V = 12;
+const FEED_SPEED_ROW_HEIGHT = 32;
+const FEED_SPEED_PILL_HEIGHT =
+  FEED_SPEED_PILL_PADDING_V * 2 + FEED_SPEED_ROW_HEIGHT * FEED_PLAYBACK_SPEEDS.length;
 const FULLSCREEN_MESSAGE_SEND_WIDTH = 72;
 const FULLSCREEN_MESSAGE_TICK_WIDTH = 54;
 const MAX_ACCOUNT_CREATOR_TYPES = 3;
@@ -242,25 +327,26 @@ const MAX_VIDEO_ROLES = 1;
 const MAX_VIDEO_GENRES = 3;
 const LOCATION_PICKER_MAX_VISIBLE_ROWS = 3;
 const LOCATION_PICKER_ROW_HEIGHT = 50;
+/** Slightly short of 3 full rows so the next option peeks — same scroll cue as role/genre lists. */
+const LOCATION_PICKER_VISIBLE_HEIGHT =
+  LOCATION_PICKER_MAX_VISIBLE_ROWS * LOCATION_PICKER_ROW_HEIGHT - Math.round(LOCATION_PICKER_ROW_HEIGHT * 0.4);
 const LOCATION_FILTER_PREFIX = "jam-location-v1:";
 const EMPTY_FILTER_GENRES: string[] = [];
-const CREATE_FILTER_OPTIONS: Array<{ id: VideoFilter; label: string }> = [
-  { id: "none", label: "None" },
-  { id: "warm", label: "Warm" },
-  { id: "cool", label: "Cool" },
-  { id: "fade", label: "Fade" },
-  { id: "noir", label: "Noir" },
-  { id: "vivid", label: "Vivid" },
-];
 const CREATE_RECORDING_TIMER_OPTIONS = [0, 3, 10] as const;
 type RecordingTimerSeconds = (typeof CREATE_RECORDING_TIMER_OPTIONS)[number];
 const CREATE_CAMERA_CONTROLS_BOTTOM_PADDING = 24;
 const CREATE_CAMERA_RECORD_BUTTON_SIZE = 78;
+const CREATE_CAMERA_RECORD_BUTTON_BORDER_WIDTH = 4;
 const CREATE_CAMERA_FILTER_ROW_HEIGHT = 44;
 const CREATE_CAMERA_CONTROL_BUTTON_SIZE = 54;
 const CREATE_CAMERA_CONTROL_ICON_SIZE = 28;
 const CREATE_CAMERA_TOP_CONTROLS_OFFSET = 12;
+/** Pixels of drag for bias ±1 from center — two full-screen swipes to either edge. */
+const CREATE_CAMERA_EXPOSURE_DRAG_RANGE_PX = viewportHeight * 2;
+const CREATE_CAMERA_FOCUS_RETICLE_SIZE = 72;
 const CREATE_FILTER_THUMB_BORDER_WIDTH = 2;
+const CREATE_FILTER_PREVIEW_IMAGE = require("./assets/filter-preview-base.png");
+const LOOKING_FOR_BINOCULARS_ICON = require("./assets/looking-for-binoculars.png");
 const CAMERA_PINCH_ZOOM_STEP = 0.14;
 const FEED_VIDEO_BOTTOM_CORNER_RADIUS = 24;
 const FEED_PREVIEW_VIDEO_BOTTOM_CORNER_RADIUS = 12;
@@ -281,17 +367,127 @@ function getCreateCameraFilterRestBottom(navBarHeight: number) {
 function getCreateCameraFilterSlideDistance(navBarHeight: number) {
   return getCreateCameraFilterRestBottom(navBarHeight) + CREATE_CAMERA_FILTER_ROW_HEIGHT;
 }
+
+// Camera-roll thumbnails decode via AVFoundation. Doing that while CameraView is
+// starting freezes the live preview, so we cache/preload outside create focus.
+let cachedRecentVideoThumbnailUri: string | null = null;
+let recentVideoThumbnailLoadPromise: Promise<string | null> | null = null;
+let cameraPreviewActive = false;
+
+function setCameraPreviewActive(active: boolean) {
+  cameraPreviewActive = active;
+}
+
+async function preloadRecentVideoThumbnail(options?: {
+  force?: boolean;
+  requestPermission?: boolean;
+}): Promise<string | null> {
+  if (!options?.force && cachedRecentVideoThumbnailUri) {
+    return cachedRecentVideoThumbnailUri;
+  }
+  if (recentVideoThumbnailLoadPromise && !options?.force) {
+    return recentVideoThumbnailLoadPromise;
+  }
+
+  recentVideoThumbnailLoadPromise = (async () => {
+    try {
+      // If create camera took focus while we were queued, wait it out instead of
+      // decoding on top of the live session.
+      const waitStarted = Date.now();
+      while (cameraPreviewActive && Date.now() - waitStarted < 45000) {
+        await waitMs(250);
+      }
+      if (cameraPreviewActive) return cachedRecentVideoThumbnailUri;
+
+      let permission = await MediaLibrary.getPermissionsAsync();
+      if (!permission.granted) {
+        // Don't prompt during background preload — create keeps the placeholder
+        // until the picker (or an explicit refresh) asks.
+        if (!options?.requestPermission || !permission.canAskAgain) {
+          return cachedRecentVideoThumbnailUri;
+        }
+        permission = await MediaLibrary.requestPermissionsAsync();
+      }
+      if (!permission.granted) return cachedRecentVideoThumbnailUri;
+      if (cameraPreviewActive) return cachedRecentVideoThumbnailUri;
+
+      const assets = await MediaLibrary.getAssetsAsync({
+        first: 1,
+        mediaType: MediaLibrary.MediaType.video,
+        sortBy: [[MediaLibrary.SortBy.creationTime, false]],
+      });
+      const latestVideo = assets.assets[0];
+      if (!latestVideo) {
+        cachedRecentVideoThumbnailUri = null;
+        return null;
+      }
+
+      // Avoid iCloud downloads while the camera may be nearby — local only.
+      const assetInfo = await MediaLibrary.getAssetInfoAsync(latestVideo, {
+        shouldDownloadFromNetwork: false,
+      });
+      const rawUri = (assetInfo.localUri ?? latestVideo.uri).replace(/#.*$/, "");
+      if (!rawUri || rawUri.startsWith("ph://") || assetInfo.isNetworkAsset) {
+        return cachedRecentVideoThumbnailUri;
+      }
+      if (cameraPreviewActive) return cachedRecentVideoThumbnailUri;
+
+      async function thumbnailFromUri(videoUri: string) {
+        return getThumbnailAsync(videoUri, {
+          time: 100,
+          quality: 0.6,
+        });
+      }
+
+      try {
+        const thumbnail = await thumbnailFromUri(rawUri);
+        cachedRecentVideoThumbnailUri = thumbnail.uri;
+        return thumbnail.uri;
+      } catch {
+        // Fall through — iOS often needs a sandbox copy before thumbnails work.
+      }
+
+      if (cameraPreviewActive) return cachedRecentVideoThumbnailUri;
+
+      const cacheDir = FileSystem.cacheDirectory;
+      if (!cacheDir) return cachedRecentVideoThumbnailUri;
+
+      const copiedUri = `${cacheDir}jam-recent-library-video.mp4`;
+      await FileSystem.deleteAsync(copiedUri, { idempotent: true });
+      await FileSystem.copyAsync({ from: rawUri, to: copiedUri });
+      try {
+        if (cameraPreviewActive) return cachedRecentVideoThumbnailUri;
+        const thumbnail = await thumbnailFromUri(copiedUri);
+        cachedRecentVideoThumbnailUri = thumbnail.uri;
+        return thumbnail.uri;
+      } finally {
+        void FileSystem.deleteAsync(copiedUri, { idempotent: true });
+      }
+    } catch {
+      return cachedRecentVideoThumbnailUri;
+    } finally {
+      recentVideoThumbnailLoadPromise = null;
+    }
+  })();
+
+  return recentVideoThumbnailLoadPromise;
+}
+
 function pinchScaleToCameraZoom(baseZoom: number, scale: number) {
   const delta = (Math.log(Math.max(scale, 0.01)) / Math.log(2)) * CAMERA_PINCH_ZOOM_STEP;
   return clamp(baseZoom + delta, 0, 1);
 }
 function clampTextOverlayCenterRatio(ratio: { x: number; y: number }) {
-  return { x: clamp(ratio.x, 0.1, 0.9), y: clamp(ratio.y, 0.1, 0.9) };
+  // Full edit canvas (including letterbox bars). Keep a thin inset so the
+  // overlay center stays on-screen while still allowing edge / bar placement.
+  return { x: clamp(ratio.x, 0.02, 0.98), y: clamp(ratio.y, 0.02, 0.98) };
 }
 const TEXT_OVERLAY_CENTER_SNAP_THRESHOLD = 0.035;
 const TEXT_OVERLAY_CENTER_PROXIMITY_THRESHOLD = 0.09;
 const TEXT_OVERLAY_CENTER_GUIDE_DWELL_MS = 450;
 const TEXT_OVERLAY_CENTER_GUIDE_FADE_MS = 180;
+const TEXT_OVERLAY_BASE_FONT_SIZE = 30;
+const TEXT_OVERLAY_MAX_WIDTH_RATIO = 0.86;
 function snapTextOverlayCenterRatio(
   ratio: { x: number; y: number },
   options: { snapX: boolean; snapY: boolean },
@@ -309,10 +505,22 @@ function snapTextOverlayCenterRatio(
   };
 }
 
+function getCreateTextOverlayFontSize(fontScale: number) {
+  return Math.max(12, Math.round(TEXT_OVERLAY_BASE_FONT_SIZE * fontScale * 10) / 10);
+}
+
+function getCreateTextOverlayLineHeight(fontSize: number) {
+  // Slightly taller than 1.2 so script descenders / boxed text don't clip.
+  return Math.round(fontSize * 1.25 * 10) / 10;
+}
+
 type CreateTextOverlayItem = {
   id: string;
   text: string;
   centerRatio: { x: number; y: number };
+  fontScale: number;
+  fontId: VideoTextFontId;
+  effectId: VideoTextEffectId;
 };
 
 function createTextOverlayId() {
@@ -382,8 +590,42 @@ const LOCATION_FILTER_COUNTRIES = sortLocationCountries([
   { country: "Australia", cities: ["Sydney", "Melbourne", "Brisbane", "Perth", "Adelaide"] },
 ]);
 const SWIPE_BACK_HIT_WIDTH = 112;
-const GESTURE_DIRECTION_LOCK_DISTANCE = 10;
 const THEME_STORAGE_KEY = "jam.themeMode";
+
+/** First-time Near Me gate — discloses the live-location sharing coupling. */
+function confirmNearMeLiveLocationSharing(userId: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    void hasSeenNearMeLiveLocationNotice(userId).then((seen) => {
+      if (seen) {
+        finish(true);
+        return;
+      }
+
+      Alert.alert(
+        NEAR_ME_LIVE_LOCATION_NOTICE_TITLE,
+        NEAR_ME_LIVE_LOCATION_NOTICE_MESSAGE,
+        [
+          { text: "cancel", style: "cancel", onPress: () => finish(false) },
+          {
+            text: "turn on",
+            onPress: () => {
+              void markNearMeLiveLocationNoticeSeen(userId).finally(() => finish(true));
+            },
+          },
+        ],
+        { cancelable: true, onDismiss: () => finish(false) },
+      );
+    });
+  });
+}
+
 const FEED_QUICK_FILTERS = ["vocalist", "instrumentalist", "producer"] as const;
 const FEED_ROLE_FILTER_WHEEL = [
   ...FEED_QUICK_FILTERS,
@@ -446,8 +688,8 @@ function getJamNavigationTheme(themeMode: ThemeMode) {
     },
   };
 }
-const TAB_SWITCH_ANIMATION = {
-  duration: 260,
+const PROFILE_VIDEO_DELETE_ANIMATION = {
+  duration: 300,
   create: {
     type: LayoutAnimation.Types.easeInEaseOut,
     property: LayoutAnimation.Properties.opacity,
@@ -460,6 +702,22 @@ const TAB_SWITCH_ANIMATION = {
     property: LayoutAnimation.Properties.opacity,
   },
 };
+
+/** Keeps deleted videos off the grid if a profile reload races the server delete. */
+const locallyDeletedProfileVideoIds = new Set<string>();
+
+function filterOutLocallyDeletedVideos<T extends { id: string }>(videos: T[]) {
+  if (locallyDeletedProfileVideoIds.size === 0) return videos;
+  return videos.filter((video) => !locallyDeletedProfileVideoIds.has(video.id));
+}
+
+function pruneLocallyDeletedProfileVideoIds(serverVideos: Array<{ id: string }>) {
+  if (locallyDeletedProfileVideoIds.size === 0) return;
+  const serverIds = new Set(serverVideos.map((video) => video.id));
+  for (const id of [...locallyDeletedProfileVideoIds]) {
+    if (!serverIds.has(id)) locallyDeletedProfileVideoIds.delete(id);
+  }
+}
 
 export default function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
@@ -700,9 +958,7 @@ function JamApp({
       onShuffleDiscover={() => setShuffleSignal((current) => current + 1)}
       onLoggedOut={async () => {
         try {
-          if (await isLiveLocationSharingEnabled(userId)) {
-            await disableLiveLocationSharing(userId).catch(() => undefined);
-          }
+          await pauseLiveLocationSharingOnLogout(userId).catch(() => undefined);
           const { error } = await supabase.auth.signOut({ scope: "local" });
           if (error) {
             await supabase.auth.signOut().catch(() => undefined);
@@ -741,6 +997,7 @@ function MainTabs({
   const [inboxRefreshSignal, setInboxRefreshSignal] = useState(0);
   const [unreadInboxCount, setUnreadInboxCount] = useState(0);
   const [inboxNotification, setInboxNotification] = useState<InboxNotification | null>(null);
+  const [postedToastVisible, setPostedToastVisible] = useState(false);
   const [discoverBootReady, setDiscoverBootReady] = useState(!showLaunchSplash);
   const [savedVideoIds, setSavedVideoIds] = useState<Set<string>>(() => new Set());
   const pendingSavedVideoStateRef = useRef(new Map<string, boolean>());
@@ -750,6 +1007,8 @@ function MainTabs({
   const inboxNotificationHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inboxNotificationOpacity = useRef(new Animated.Value(0)).current;
   const inboxNotificationTranslateY = useRef(new Animated.Value(-8)).current;
+  const feedChromeOpacity = useRef(new Animated.Value(1)).current;
+  const [feedChromeClear, setFeedChromeClear] = useState(false);
 
   const refreshUnreadInboxCount = useCallback(async () => {
     const inbox = await fetchInbox(userId);
@@ -1018,6 +1277,21 @@ function MainTabs({
     return () => clearTimeout(timer);
   }, [profileRefreshSignal, userId]);
 
+  useEffect(() => {
+    let toastTimer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = subscribePendingUploadPosted((event) => {
+      if (event.userId !== userId) return;
+      setPostedToastVisible(true);
+      setProfileRefreshSignal((current) => current + 1);
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => setPostedToastVisible(false), 2400);
+    });
+    return () => {
+      unsubscribe();
+      if (toastTimer) clearTimeout(toastTimer);
+    };
+  }, [userId]);
+
   const savedVideoController = useMemo<SavedVideoController>(
     () => ({
       savedVideoIds,
@@ -1030,6 +1304,16 @@ function MainTabs({
   const handleDiscoverBootReady = useCallback(() => {
     setDiscoverBootReady(true);
   }, []);
+
+  useEffect(() => {
+    if (!discoverBootReady) return;
+    // Warm the camera-roll thumb + filter catalog before create opens.
+    const timer = setTimeout(() => {
+      void preloadRecentVideoThumbnail();
+      void ensureFilterCatalogLoaded();
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [discoverBootReady]);
 
   return (
     <NavigationContainer ref={navigationRef} theme={getJamNavigationTheme(themeMode)}>
@@ -1052,6 +1336,8 @@ function MainTabs({
               unreadInboxCount={unreadInboxCount}
               onShuffleDiscover={onShuffleDiscover}
               feedReady={discoverBootReady}
+              chromeOpacity={feedChromeOpacity}
+              chromeClear={feedChromeClear}
             />
           )}
         >
@@ -1063,9 +1349,12 @@ function MainTabs({
                 shuffleSignal={shuffleSignal}
                 savedVideoController={savedVideoController}
                 showBootOverlay={showLaunchSplash}
+                feedChromeOpacity={feedChromeOpacity}
+                onFeedChromeClearChange={setFeedChromeClear}
                 onCreate={() => navigation.navigate("create")}
                 onInboxChanged={bumpInboxRefresh}
                 onBootReady={handleDiscoverBootReady}
+                onViewerProfileUpdated={setTabProfile}
               />
             )}
           </MainTab.Screen>
@@ -1092,9 +1381,11 @@ function MainTabs({
             {() => (
               <InboxScreen
                 userId={userId}
+                viewerProfile={tabProfile}
                 refreshSignal={inboxRefreshSignal}
                 savedVideoController={savedVideoController}
                 onUnreadCountChanged={setUnreadInboxCount}
+                onViewerProfileUpdated={setTabProfile}
               />
             )}
           </MainTab.Screen>
@@ -1106,6 +1397,7 @@ function MainTabs({
                 onThemeModeChange={onThemeModeChange}
                 refreshSignal={profileRefreshSignal}
                 savedVideoController={savedVideoController}
+                initialProfile={tabProfile}
                 onInboxChanged={bumpInboxRefresh}
                 onProfileChanged={(nextProfile) => setTabProfile(nextProfile)}
                 onLoggedOut={onLoggedOut}
@@ -1140,6 +1432,16 @@ function MainTabs({
               </Text>
             </Pressable>
           </Animated.View>
+        ) : null}
+
+        {postedToastVisible ? (
+          <View
+            pointerEvents="none"
+            style={[styles.profilePostedToast, { top: insets.top + 56 }]}
+            accessibilityLabel="Posted"
+          >
+            <Text style={styles.profilePostedToastText}>Posted!</Text>
+          </View>
         ) : null}
 
         {showLaunchSplash && !discoverBootReady ? (
@@ -2260,18 +2562,24 @@ function DiscoverScreen({
   shuffleSignal,
   savedVideoController,
   showBootOverlay = true,
+  feedChromeOpacity,
+  onFeedChromeClearChange,
   onCreate,
   onInboxChanged,
   onBootReady,
+  onViewerProfileUpdated,
 }: {
   userId: string;
   viewerProfile: Profile | null;
   shuffleSignal: number;
   savedVideoController: SavedVideoController;
   showBootOverlay?: boolean;
+  feedChromeOpacity: Animated.Value;
+  onFeedChromeClearChange?: (clear: boolean) => void;
   onCreate: () => void;
   onInboxChanged: () => void;
   onBootReady?: () => void;
+  onViewerProfileUpdated?: (profile: Profile) => void;
 }) {
   const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
@@ -2284,6 +2592,7 @@ function DiscoverScreen({
   const [location, setLocation] = useState("");
   const [nearMeActive, setNearMeActive] = useState(false);
   const [nearMeLoading, setNearMeLoading] = useState(false);
+  const [lookingForActive, setLookingForActive] = useState(false);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [activeProfile, setActiveProfile] = useState<FeedVideo | null>(null);
@@ -2295,14 +2604,30 @@ function DiscoverScreen({
   const [firstClipReady, setFirstClipReady] = useState(!showBootOverlay);
   const [initialBootComplete, setInitialBootComplete] = useState(!showBootOverlay);
   const [feedCursor, setFeedCursor] = useState<FeedCursor | null>(null);
+  const [feedPhase, setFeedPhase] = useState<FeedPhase>("unseen");
   const [filterFillActive, setFilterFillActive] = useState(false);
+  const [feedQueryReloading, setFeedQueryReloading] = useState(false);
   const [feedBridge, setFeedBridge] = useState<FeedVideo[]>([]);
+  const [replayToastVisible, setReplayToastVisible] = useState(false);
   const initialBootCompleteRef = useRef(!showBootOverlay);
   const feedCursorRef = useRef<FeedCursor | null>(null);
+  const feedPhaseRef = useRef<FeedPhase>("unseen");
   const loadingMoreFeedRef = useRef(false);
   const filterFillGenerationRef = useRef(0);
   const itemsRef = useRef<FeedVideo[]>([]);
   const listRef = useRef<FlatList<FeedVideo>>(null);
+  const feedQueryKeyRef = useRef<string | null>(null);
+  const markedSeenVideoIdsRef = useRef<Set<string>>(new Set());
+  const replayToastHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const replayToastOpacity = useRef(new Animated.Value(0)).current;
+  const [feedChromeHolding, setFeedChromeHolding] = useState(false);
+  const [feedChromeLocked, setFeedChromeLocked] = useState(false);
+  const [feedSpeedHolding, setFeedSpeedHolding] = useState(false);
+  /** User-toggled pause for the active clip — survives tab switches / cell recycle. */
+  const [userPausedVideoId, setUserPausedVideoId] = useState<string | null>(null);
+  const feedChromeLockedRef = useRef(false);
+  const discoverFocusedRef = useRef(isFocused);
+  const resumeFeedVideoIdRef = useRef<string | null>(null);
   const { savedVideoIds, setVideoSaved, refreshSavedVideos } = savedVideoController;
   const feedPrefetchTarget = FEED_PAGE_SIZE * 4;
 
@@ -2313,15 +2638,190 @@ function DiscoverScreen({
       genres,
       location,
       nearMeActive,
+      lookingForActive,
       userLocation,
       nearMeRadiusMiles,
     }),
-    [genres, location, nearMeActive, nearMeRadiusMiles, roles, userLocation],
+    [genres, location, lookingForActive, nearMeActive, nearMeRadiusMiles, roles, userLocation],
   );
   const filterStateRef = useRef(filterState);
   filterStateRef.current = filterState;
   itemsRef.current = items;
   const filtersActive = isFeedFilterStateActive(filterState);
+  const activeFilterTags = useMemo(() => {
+    const tags = new Set<string>();
+    for (const role of roles) {
+      const normalized = normalizeVideoTag(role);
+      if (normalized) tags.add(normalized);
+    }
+    for (const genre of genres) {
+      const normalized = normalizeVideoTag(genre);
+      if (normalized) tags.add(normalized);
+    }
+    return tags;
+  }, [genres, roles]);
+
+  const hideReplayToast = useCallback(() => {
+    if (replayToastHideTimerRef.current) {
+      clearTimeout(replayToastHideTimerRef.current);
+      replayToastHideTimerRef.current = null;
+    }
+    replayToastOpacity.stopAnimation();
+    Animated.timing(replayToastOpacity, {
+      toValue: 0,
+      duration: 320,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) setReplayToastVisible(false);
+    });
+  }, [replayToastOpacity]);
+
+  const showReplayToast = useCallback(() => {
+    if (replayToastHideTimerRef.current) {
+      clearTimeout(replayToastHideTimerRef.current);
+      replayToastHideTimerRef.current = null;
+    }
+    replayToastOpacity.stopAnimation();
+    replayToastOpacity.setValue(0);
+    setReplayToastVisible(true);
+    // Defer fade-in until after mount — same-tick timing often paints at full opacity.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        Animated.timing(replayToastOpacity, {
+          toValue: 1,
+          duration: 320,
+          easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
+        }).start();
+      });
+    });
+    replayToastHideTimerRef.current = setTimeout(() => {
+      hideReplayToast();
+    }, 2400);
+  }, [hideReplayToast, replayToastOpacity]);
+
+  useEffect(() => {
+    return () => {
+      if (replayToastHideTimerRef.current) clearTimeout(replayToastHideTimerRef.current);
+    };
+  }, []);
+
+  const animateFeedChrome = useCallback(
+    (visible: boolean) => {
+      feedChromeOpacity.stopAnimation();
+      Animated.timing(feedChromeOpacity, {
+        toValue: visible ? 1 : 0,
+        duration: FEED_CHROME_FADE_MS,
+        easing: Easing.inOut(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    },
+    [feedChromeOpacity],
+  );
+
+  const restoreFeedChrome = useCallback(() => {
+    feedChromeLockedRef.current = false;
+    setFeedChromeLocked(false);
+    setFeedChromeHolding(false);
+    animateFeedChrome(true);
+    onFeedChromeClearChange?.(false);
+  }, [animateFeedChrome, onFeedChromeClearChange]);
+
+  const handleFeedChromeHoldStart = useCallback(() => {
+    if (feedChromeLockedRef.current) return;
+    setFeedChromeHolding(true);
+    animateFeedChrome(false);
+    onFeedChromeClearChange?.(true);
+  }, [animateFeedChrome, onFeedChromeClearChange]);
+
+  const handleFeedChromeHoldEnd = useCallback(() => {
+    setFeedChromeHolding(false);
+    if (feedChromeLockedRef.current) return;
+    animateFeedChrome(true);
+    onFeedChromeClearChange?.(false);
+  }, [animateFeedChrome, onFeedChromeClearChange]);
+
+  const handleFeedChromeLock = useCallback(() => {
+    feedChromeLockedRef.current = true;
+    setFeedChromeLocked(true);
+    setFeedChromeHolding(false);
+    animateFeedChrome(false);
+    onFeedChromeClearChange?.(true);
+  }, [animateFeedChrome, onFeedChromeClearChange]);
+
+  const handleFeedChromeUnlock = useCallback(() => {
+    restoreFeedChrome();
+  }, [restoreFeedChrome]);
+
+  const handleFeedSpeedHoldStart = useCallback(() => {
+    setFeedSpeedHolding(true);
+  }, []);
+
+  const handleFeedSpeedHoldEnd = useCallback(() => {
+    setFeedSpeedHolding(false);
+  }, []);
+
+  useEffect(() => {
+    if (filtersOpen || activeProfile || activeChat || activeDm) {
+      restoreFeedChrome();
+    }
+  }, [activeChat, activeDm, activeProfile, filtersOpen, restoreFeedChrome]);
+
+  const setDiscoverFeedPhase = useCallback((phase: FeedPhase) => {
+    feedPhaseRef.current = phase;
+    setFeedPhase(phase);
+  }, []);
+
+  const fetchDiscoverPage = useCallback(
+    async (cursor?: FeedCursor | null, phase?: FeedPhase) => {
+      const filters = filterStateRef.current;
+      const contentFilters = toFeedContentFilters(filters);
+      const activePhase = phase ?? feedPhaseRef.current;
+      if (filters.nearMeActive && filters.userLocation) {
+        return fetchNearbyFeedVideos(userId, {
+          latitude: filters.userLocation.latitude,
+          longitude: filters.userLocation.longitude,
+          radiusMiles: filters.nearMeRadiusMiles,
+          cursor: cursor ?? null,
+          limit: FEED_PAGE_SIZE,
+          roles: contentFilters.roles,
+          genres: contentFilters.genres,
+          phase: activePhase,
+          lookingForOnly: filters.lookingForActive,
+        });
+      }
+      return fetchFeedVideos(userId, {
+        cursor: cursor ?? null,
+        limit: FEED_PAGE_SIZE,
+        filters: contentFilters,
+        phase: activePhase,
+      });
+    },
+    [userId],
+  );
+
+  const markFeedVideoSeen = useCallback(
+    (videoId: string) => {
+      if (!videoId || markedSeenVideoIdsRef.current.has(videoId)) return;
+      markedSeenVideoIdsRef.current.add(videoId);
+      void markVideoSeen(userId, videoId).catch(() => {
+        markedSeenVideoIdsRef.current.delete(videoId);
+      });
+    },
+    [userId],
+  );
+
+  const enterReplayPhase = useCallback(async () => {
+    setDiscoverFeedPhase("replay");
+    const page = await fetchDiscoverPage(null, "replay");
+    feedCursorRef.current = page.nextCursor;
+    setFeedCursor(page.nextCursor);
+    if (page.items.length > 0) {
+      showReplayToast();
+    }
+    return page;
+  }, [fetchDiscoverPage, setDiscoverFeedPhase, showReplayToast]);
 
   function applyFeedFilterPill(role: string) {
     const isAlreadySelected = roles.some(
@@ -2358,6 +2858,9 @@ function DiscoverScreen({
       return;
     }
 
+    const confirmed = await confirmNearMeLiveLocationSharing(userId);
+    if (!confirmed) return;
+
     setNearMeActive(true);
     setNearMeLoading(true);
     setActiveVideoId(null);
@@ -2366,17 +2869,29 @@ function DiscoverScreen({
     });
 
     try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted") {
-        setNearMeActive(false);
-        Alert.alert(
-          "location needed",
-          "turn on location access to see creators near you.",
-          [
+      // Near-me filter also turns on live location sharing so others can find you,
+      // and so Settings → share live location stays in sync.
+      const alreadySharing = await isLiveLocationSharingEnabled(userId);
+      if (!alreadySharing) {
+        const result = await enableLiveLocationSharing(userId);
+        if ("error" in result) {
+          setNearMeActive(false);
+          Alert.alert("location needed", result.error, [
             { text: "cancel", style: "cancel" },
             { text: "open settings", onPress: () => void Linking.openSettings() },
-          ],
-        );
+          ]);
+          return;
+        }
+
+        onViewerProfileUpdated?.(result.profile);
+        if (result.profile.live_latitude != null && result.profile.live_longitude != null) {
+          setUserLocation({
+            latitude: result.profile.live_latitude,
+            longitude: result.profile.live_longitude,
+          });
+        } else {
+          await refreshViewerGpsLocation();
+        }
         return;
       }
 
@@ -2396,66 +2911,110 @@ function DiscoverScreen({
     filterFillGenerationRef.current += 1;
     setFilterFillActive(false);
     setError(null);
+    setDiscoverFeedPhase("unseen");
     // Only blank the first-clip gate on the initial boot; later refreshes stay on the feed.
     if (!initialBootCompleteRef.current) setFirstClipReady(false);
-    const page = await fetchFeedVideos(userId, { limit: FEED_PAGE_SIZE });
-    feedCursorRef.current = page.nextCursor;
-    setFeedCursor(page.nextCursor);
+
+    let page = await fetchDiscoverPage(null, "unseen");
+    // Cold start with nothing new → drop straight into replay (toast if clips exist).
+    if (page.items.length === 0 && !page.nextCursor) {
+      page = await enterReplayPhase();
+    } else {
+      feedCursorRef.current = page.nextCursor;
+      setFeedCursor(page.nextCursor);
+    }
+
     const nextItems = shuffleVideosWithSpacing(page.items);
     itemsRef.current = nextItems;
     setItems(nextItems);
-  }, [userId]);
+  }, [enterReplayPhase, fetchDiscoverPage, setDiscoverFeedPhase]);
 
-  const loadMoreFeed = useCallback(async () => {
-    const cursor = feedCursorRef.current;
-    if (!cursor || loadingMoreFeedRef.current) return;
+  const loadMoreFeed = useCallback(
+    async (options?: { allowReplayTransition?: boolean }) => {
+      const allowReplayTransition = options?.allowReplayTransition ?? false;
+      if (loadingMoreFeedRef.current) return;
 
-    loadingMoreFeedRef.current = true;
-    try {
-      let nextCursor: FeedCursor | null = cursor;
-      const accumulated: FeedVideo[] = [];
-      let rounds = 0;
-      const filters = filterStateRef.current;
-      const filtersOn = isFeedFilterStateActive(filters);
-      const maxRounds = filtersOn ? 12 : 4;
-      const targetMatches = filtersOn ? Math.min(FEED_PAGE_SIZE, 6) : FEED_PAGE_SIZE;
+      const cursor = feedCursorRef.current;
+      if (!cursor) {
+        if (!allowReplayTransition || feedPhaseRef.current !== "unseen") return;
 
-      while (nextCursor && rounds < maxRounds) {
-        const page = await fetchFeedVideos(userId, {
-          cursor: nextCursor,
-          limit: FEED_PAGE_SIZE,
-        });
-        accumulated.push(...page.items);
-        nextCursor = page.nextCursor;
-        rounds += 1;
-        if (!page.nextCursor) break;
+        loadingMoreFeedRef.current = true;
+        try {
+          const page = await enterReplayPhase();
+          if (page.items.length === 0) return;
 
-        if (!filtersOn) {
-          if (accumulated.length >= FEED_PAGE_SIZE) break;
-        } else {
-          const matchCount = accumulated.filter((item) => feedVideoMatchesFilters(item, filters)).length;
-          if (matchCount >= targetMatches) break;
+          setItems((current) => {
+            const existingIds = new Set(current.map((item) => item.id));
+            const fresh = page.items.filter((item) => !existingIds.has(item.id));
+            if (fresh.length === 0) return current;
+            const nextItems = [...current, ...shuffleVideosWithSpacing(fresh)];
+            itemsRef.current = nextItems;
+            return nextItems;
+          });
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "could not load more");
+        } finally {
+          loadingMoreFeedRef.current = false;
         }
+        return;
       }
 
-      feedCursorRef.current = nextCursor;
-      setFeedCursor(nextCursor);
-      if (accumulated.length === 0) return;
+      loadingMoreFeedRef.current = true;
+      try {
+        let nextCursor: FeedCursor | null = cursor;
+        const accumulated: FeedVideo[] = [];
+        let rounds = 0;
+        const maxRounds = 4;
 
-      setItems((current) => {
-        const existingIds = new Set(current.map((item) => item.id));
-        const fresh = accumulated.filter((item) => !existingIds.has(item.id));
-        if (fresh.length === 0) return current;
-        const nextItems = [...current, ...shuffleVideosWithSpacing(fresh)];
-        itemsRef.current = nextItems;
-        return nextItems;
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "could not load more");
-    } finally {
-      loadingMoreFeedRef.current = false;
-    }
-  }, [userId]);
+        while (nextCursor && rounds < maxRounds) {
+          const page = await fetchDiscoverPage(nextCursor);
+          accumulated.push(...page.items);
+          nextCursor = page.nextCursor;
+          rounds += 1;
+          if (!page.nextCursor) break;
+          if (accumulated.length >= FEED_PAGE_SIZE) break;
+        }
+
+        feedCursorRef.current = nextCursor;
+        setFeedCursor(nextCursor);
+
+        if (accumulated.length > 0) {
+          setItems((current) => {
+            const existingIds = new Set(current.map((item) => item.id));
+            const fresh = accumulated.filter((item) => !existingIds.has(item.id));
+            if (fresh.length === 0) return current;
+            const nextItems = [...current, ...shuffleVideosWithSpacing(fresh)];
+            itemsRef.current = nextItems;
+            return nextItems;
+          });
+        }
+
+        // User-driven: unseen pool just ended — continue into replay.
+        if (
+          allowReplayTransition &&
+          !nextCursor &&
+          feedPhaseRef.current === "unseen" &&
+          accumulated.length < FEED_PAGE_SIZE
+        ) {
+          const replayPage = await enterReplayPhase();
+          if (replayPage.items.length === 0) return;
+          setItems((current) => {
+            const existingIds = new Set(current.map((item) => item.id));
+            const fresh = replayPage.items.filter((item) => !existingIds.has(item.id));
+            if (fresh.length === 0) return current;
+            const nextItems = [...current, ...shuffleVideosWithSpacing(fresh)];
+            itemsRef.current = nextItems;
+            return nextItems;
+          });
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "could not load more");
+      } finally {
+        loadingMoreFeedRef.current = false;
+      }
+    },
+    [enterReplayPhase, fetchDiscoverPage],
+  );
 
   const fillFeedForActiveFilters = useCallback(async () => {
     const generation = ++filterFillGenerationRef.current;
@@ -2477,14 +3036,12 @@ function DiscoverScreen({
 
       loadingMoreFeedRef.current = true;
       try {
+        // Server already returns matching pages; a short walk covers residual thinning.
         let rounds = 0;
-        while (feedCursorRef.current && rounds < 24) {
+        while (feedCursorRef.current && rounds < 4) {
           if (generation !== filterFillGenerationRef.current) return;
 
-          const page = await fetchFeedVideos(userId, {
-            cursor: feedCursorRef.current,
-            limit: FEED_PAGE_SIZE,
-          });
+          const page = await fetchDiscoverPage(feedCursorRef.current);
 
           feedCursorRef.current = page.nextCursor;
           setFeedCursor(page.nextCursor);
@@ -2519,10 +3076,11 @@ function DiscoverScreen({
         setFilterFillActive(false);
       }
     }
-  }, [userId]);
+  }, [fetchDiscoverPage]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
+      feedQueryKeyRef.current = buildDiscoverFeedQueryKey(filterStateRef.current);
       void load()
         .catch((err) => setError(err instanceof Error ? err.message : "could not load feed"))
         .finally(() => setLoading(false));
@@ -2530,8 +3088,50 @@ function DiscoverScreen({
     return () => clearTimeout(timer);
   }, [load]);
 
+  // Reload when near-me mode/center/radius OR role/genre/location filters change —
+  // server query params changed, so start a fresh filtered page (client filter still
+  // thins anything already bridged on screen).
+  useEffect(() => {
+    if (nearMeLoading) return;
+    if (nearMeActive && !userLocation) return;
+
+    const nextKey = buildDiscoverFeedQueryKey(filterState);
+
+    if (feedQueryKeyRef.current === null) {
+      feedQueryKeyRef.current = nextKey;
+      return;
+    }
+    if (feedQueryKeyRef.current === nextKey) return;
+    feedQueryKeyRef.current = nextKey;
+
+    // Keep the current feed on screen (bridge) while the other query loads —
+    // clearing both items + bridge was flashing the empty/end-of-feed state.
+    const snapshot = itemsRef.current;
+    if (snapshot.length > 0) {
+      setFeedBridge(snapshot);
+    }
+    itemsRef.current = [];
+    setItems([]);
+    setFeedCursor(null);
+    feedCursorRef.current = null;
+    setDiscoverFeedPhase("unseen");
+    if (replayToastHideTimerRef.current) {
+      clearTimeout(replayToastHideTimerRef.current);
+      replayToastHideTimerRef.current = null;
+    }
+    replayToastOpacity.setValue(0);
+    setReplayToastVisible(false);
+    setFeedQueryReloading(true);
+    setActiveVideoId(null);
+
+    void load()
+      .catch((err) => setError(err instanceof Error ? err.message : "could not load feed"))
+      .finally(() => setFeedQueryReloading(false));
+  }, [filterState, load, nearMeActive, nearMeLoading, replayToastOpacity, setDiscoverFeedPhase, userLocation]);
+
   useEffect(() => {
     if (shuffleSignal === 0) return;
+    restoreFeedChrome();
     const frame = requestAnimationFrame(() => {
       setItems((current) => {
         const nextItems = shuffleVideosWithSpacing(current);
@@ -2541,7 +3141,7 @@ function DiscoverScreen({
       listRef.current?.scrollToOffset({ offset: 0, animated: true });
     });
     return () => cancelAnimationFrame(frame);
-  }, [shuffleSignal]);
+  }, [restoreFeedChrome, shuffleSignal]);
 
   const itemsWithSavedState = useMemo(
     () =>
@@ -2561,11 +3161,12 @@ function DiscoverScreen({
     filtered.length === 0 &&
     (loading ||
       filterFillActive ||
+      feedQueryReloading ||
       nearMeLoading ||
       (nearMeActive && !userLocation) ||
       (filtersActive && Boolean(feedCursor)));
 
-  // Keep the last non-empty feed on screen while filter paging catches up.
+  // Keep the last non-empty feed on screen while filter paging / mode switch catches up.
   const holdingFilterBridge =
     searchingForFilterMatches && feedBridge.length > 0 && !loading;
 
@@ -2749,23 +3350,62 @@ function DiscoverScreen({
     openJamThread(item);
   }
 
+  const navBarHeight = getNavBarHeight(insets.bottom);
+  // Page height matches the visible feed above the tab bar so the next video
+  // sits flush under the current one (as if waiting behind the nav). pagingEnabled
+  // still snaps by the list viewport, which is constrained to this same height.
+  const feedItemHeight = viewportHeight - navBarHeight;
+
   function updateActiveVideo(event: NativeSyntheticEvent<NativeScrollEvent>) {
     const nextIndex = Math.round(event.nativeEvent.contentOffset.y / feedItemHeight);
     const safeIndex = Math.max(0, Math.min(nextIndex, visibleFeed.length - 1));
     const nextItem = visibleFeed[safeIndex];
-    if (nextItem) setActiveVideoId(nextItem.id);
+    if (nextItem) {
+      if (activeVideoId && activeVideoId !== nextItem.id) {
+        setUserPausedVideoId(null);
+      }
+      setActiveVideoId(nextItem.id);
+      resumeFeedVideoIdRef.current = nextItem.id;
+    }
     // Prefetch the next page before the end-of-feed footer, like TikTok.
-    if (feedCursorRef.current && safeIndex >= visibleFeed.length - 3) {
-      void loadMoreFeed();
+    // Only hand off to replay when the user is actually near the last clips.
+    if (safeIndex >= visibleFeed.length - 3) {
+      void loadMoreFeed({
+        allowReplayTransition: !feedCursorRef.current || safeIndex >= visibleFeed.length - 2,
+      });
     }
   }
 
-  const navBarHeight = getNavBarHeight(insets.bottom);
-  // Full-screen pages so native pagingEnabled can snap like TikTok (no snapToInterval fighting).
-  const feedItemHeight = viewportHeight;
   // Keep the feed playing under the jam compose sheet; pause for profiles/chats/filters.
+  // Keep the active clip playing under the filter sheet — only pause for
+  // full-screen routes / filter-wheel bridge holds.
   const shouldPlayFeedVideos =
-    isFocused && !filtersOpen && !activeProfile && !activeChat && !holdingFilterBridge;
+    isFocused && !activeProfile && !activeChat && !holdingFilterBridge;
+
+  // Remember the clip on blur; restore active id on focus without scrolling.
+  // Forced scrollToOffset remounts the cell and flashes black over the video.
+  useEffect(() => {
+    const wasFocused = discoverFocusedRef.current;
+    discoverFocusedRef.current = isFocused;
+
+    if (!isFocused) {
+      if (wasFocused) {
+        if (activeVideoId) resumeFeedVideoIdRef.current = activeVideoId;
+        restoreFeedChrome();
+        setFeedSpeedHolding(false);
+      }
+      return;
+    }
+
+    if (wasFocused) return;
+
+    const resumeId = resumeFeedVideoIdRef.current ?? activeVideoId;
+    if (!resumeId) return;
+    if (!visibleFeed.some((item) => item.id === resumeId)) return;
+    if (activeVideoId !== resumeId) {
+      setActiveVideoId(resumeId);
+    }
+  }, [activeVideoId, isFocused, restoreFeedChrome, visibleFeed]);
   const activeProfilePreload = useMemo(
     () =>
       activeProfile
@@ -2787,12 +3427,18 @@ function DiscoverScreen({
     onBootReady?.();
   }, [initialBootComplete, onBootReady, showFeedBootOverlay]);
 
+  const feedChromeInteractive = !feedChromeHolding && !feedChromeLocked;
+
   return (
     <View style={darkStyles.feedRoot}>
-      <View style={[styles.feedTopBar, { top: insets.top + 12 }]}>
+      <Animated.View
+        pointerEvents={feedChromeInteractive ? "box-none" : "none"}
+        style={[styles.feedTopBar, { top: insets.top + 12, opacity: feedChromeOpacity }]}
+      >
         <Pressable
           style={[styles.feedNearMeButton, nearMeActive && styles.feedNearMeButtonActive]}
-          accessibilityLabel="near me"
+          accessibilityLabel={nearMeActive ? "near me on, sharing live location" : "near me"}
+          accessibilityHint="turns on share live location to find creators nearby"
           accessibilityRole="button"
           accessibilityState={{ selected: nearMeActive, busy: nearMeLoading }}
           onPress={() => void toggleNearMe()}
@@ -2803,8 +3449,20 @@ function DiscoverScreen({
         <Pressable onPress={() => setFiltersOpen(true)} style={styles.feedFilterButton}>
           <FeedFilterIcon />
         </Pressable>
-      </View>
+      </Animated.View>
       {error && <Toast text={error} />}
+      {replayToastVisible ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.feedReplayToast,
+            { top: insets.top + 64, opacity: replayToastOpacity },
+          ]}
+          accessibilityLabel="All new videos watched, replaying seen"
+        >
+          <Text style={styles.feedReplayToastText}>all new videos watched — replaying seen</Text>
+        </Animated.View>
+      ) : null}
       {visibleFeed.length === 0 ? (
         searchingForFilterMatches ? (
           <View style={styles.endOfFeedFullscreen}>
@@ -2813,66 +3471,94 @@ function DiscoverScreen({
           </View>
         ) : (
           <View style={styles.endOfFeedFullscreen}>
-            <Text style={styles.emptyText}>{getEndOfFeedCopy(filtersActive)}</Text>
-            <Pressable style={styles.createNav} onPress={onCreate} accessibilityLabel="upload">
-              <Text style={styles.createNavText}>+</Text>
-            </Pressable>
+            <Text style={styles.emptyText}>
+              {getEndOfFeedCopy({
+                filtersActive,
+                nearMeActive,
+                seenEveryone: feedPhase === "replay",
+              })}
+            </Text>
+            {nearMeActive ? null : (
+              <Pressable style={styles.createNav} onPress={onCreate} accessibilityLabel="upload">
+                <Text style={styles.createNavText}>+</Text>
+              </Pressable>
+            )}
           </View>
         )
       ) : (
-        <FlatList
-          ref={listRef}
-          data={visibleFeed}
-          keyExtractor={(item) => item.id}
-          pagingEnabled
-          scrollEnabled={!holdingFilterBridge}
-          decelerationRate="fast"
-          disableIntervalMomentum
-          windowSize={5}
-          maxToRenderPerBatch={3}
-          initialNumToRender={2}
-          getItemLayout={(_, index) => ({
-            length: feedItemHeight,
-            offset: feedItemHeight * index,
-            index,
-          })}
-          showsVerticalScrollIndicator={false}
-          onMomentumScrollEnd={updateActiveVideo}
-          onEndReached={() => {
-            if (holdingFilterBridge) return;
-            void loadMoreFeed();
-          }}
-          onEndReachedThreshold={0.8}
-          refreshControl={<RefreshControl tintColor={getActivityIndicatorColor()} refreshing={refreshing} onRefresh={refresh} />}
-          ListFooterComponent={
-            feedCursor || holdingFilterBridge ? null : (
-              <EndOfFeedState
-                filtersActive={filtersActive}
-                height={viewportHeight}
-                onCreate={onCreate}
+        <View style={{ height: feedItemHeight }}>
+          <FlatList
+            ref={listRef}
+            data={visibleFeed}
+            keyExtractor={(item) => item.id}
+            style={{ height: feedItemHeight }}
+            pagingEnabled
+            scrollEnabled={!holdingFilterBridge && !feedChromeHolding && !feedSpeedHolding}
+            decelerationRate="fast"
+            disableIntervalMomentum
+            windowSize={5}
+            maxToRenderPerBatch={3}
+            initialNumToRender={2}
+            getItemLayout={(_, index) => ({
+              length: feedItemHeight,
+              offset: feedItemHeight * index,
+              index,
+            })}
+            showsVerticalScrollIndicator={false}
+            onMomentumScrollEnd={updateActiveVideo}
+            onEndReached={() => {
+              if (holdingFilterBridge) return;
+              void loadMoreFeed({ allowReplayTransition: true });
+            }}
+            onEndReachedThreshold={0.8}
+            refreshControl={<RefreshControl tintColor={getActivityIndicatorColor()} refreshing={refreshing} onRefresh={refresh} />}
+            ListFooterComponent={
+              feedCursor || holdingFilterBridge || feedPhase === "unseen" ? null : (
+                <EndOfFeedState
+                  filtersActive={filtersActive}
+                  nearMeActive={nearMeActive}
+                  seenEveryone
+                  height={feedItemHeight}
+                  onCreate={onCreate}
+                />
+              )
+            }
+            renderItem={({ item }) => (
+              <FeedItem
+                item={item}
+                height={feedItemHeight}
+                navBarHeight={0}
+                isActive={shouldPlayFeedVideos && item.id === activeVideoId}
+                paused={userPausedVideoId === item.id}
+                onPausedChange={(nextPaused) => {
+                  setUserPausedVideoId(nextPaused ? item.id : null);
+                }}
+                activeFilterTags={activeFilterTags}
+                chromeOpacity={feedChromeOpacity}
+                chromeHolding={feedChromeHolding}
+                chromeLocked={feedChromeLocked}
+                onChromeHoldStart={handleFeedChromeHoldStart}
+                onChromeHoldEnd={handleFeedChromeHoldEnd}
+                onChromeLock={handleFeedChromeLock}
+                onChromeUnlock={handleFeedChromeUnlock}
+                onSpeedHoldStart={handleFeedSpeedHoldStart}
+                onSpeedHoldEnd={handleFeedSpeedHoldEnd}
+                onFirstPlay={
+                  item.id === activeVideoId || item.id === visibleFeed[0]?.id
+                    ? () => setFirstClipReady(true)
+                    : undefined
+                }
+                onWatched={() => markFeedVideoSeen(item.id)}
+                onOpenProfile={() => setActiveProfile(item)}
+                onSave={(nextSaved) => toggleSave(item, nextSaved)}
+                onMessage={() => void openJamThread(item)}
+                onNotInterested={() => hideFeedCreator(item)}
+                onBlock={() => blockFeedCreator(item)}
+                onReport={() => setReportItem(item)}
               />
-            )
-          }
-          renderItem={({ item }) => (
-            <FeedItem
-              item={item}
-              height={feedItemHeight}
-              navBarHeight={navBarHeight}
-              isActive={shouldPlayFeedVideos && item.id === activeVideoId}
-              onFirstPlay={
-                item.id === activeVideoId || item.id === visibleFeed[0]?.id
-                  ? () => setFirstClipReady(true)
-                  : undefined
-              }
-              onOpenProfile={() => setActiveProfile(item)}
-              onSave={(nextSaved) => toggleSave(item, nextSaved)}
-              onMessage={() => void openJamThread(item)}
-              onNotInterested={() => hideFeedCreator(item)}
-              onBlock={() => blockFeedCreator(item)}
-              onReport={() => setReportItem(item)}
-            />
-          )}
-        />
+            )}
+          />
+        </View>
       )}
       {showFeedBootOverlay ? (
         <View pointerEvents="none" style={darkStyles.feedBootOverlay}>
@@ -2884,11 +3570,13 @@ function DiscoverScreen({
         selectedRoles={roles}
         selectedGenres={genres}
         selectedLocation={location}
+        lookingForActive={lookingForActive}
         onClose={() => setFiltersOpen(false)}
-        onApply={(nextRoles, nextGenres, nextLocation) => {
+        onApply={(nextRoles, nextGenres, nextLocation, nextLookingFor) => {
           setRoles(nextRoles);
           setGenres(nextGenres);
           setLocation(nextLocation);
+          setLookingForActive(nextLookingFor);
           setActiveVideoId(null);
           requestAnimationFrame(() => {
             listRef.current?.scrollToOffset({ offset: 0, animated: false });
@@ -3119,42 +3807,190 @@ type JamVideoPlaybackStatus = {
   status: VideoPlayerStatus;
 };
 
+function contentFitForVideoSize(
+  width?: number | null,
+  height?: number | null,
+  fallback: VideoContentFit = "cover",
+): VideoContentFit {
+  // Non-portrait (landscape or square): letterbox like TikTok. Portrait keeps cover.
+  if (typeof width === "number" && typeof height === "number" && width > 0 && height > 0 && width >= height) {
+    return "contain";
+  }
+  return fallback;
+}
+
+function imageResizeModeForVideoSize(
+  width?: number | null,
+  height?: number | null,
+): "contain" | "cover" {
+  return contentFitForVideoSize(width, height) === "contain" ? "contain" : "cover";
+}
+
+/** Aspect hints learned from grid thumbs / HLS so fullscreen opens letterboxed instantly. */
+const videoAspectSizeByKey = new Map<string, { width: number; height: number }>();
+
+function rememberVideoAspectSize(
+  key: string | null | undefined,
+  width?: number | null,
+  height?: number | null,
+) {
+  if (!key) return;
+  if (!(typeof width === "number" && typeof height === "number" && width > 0 && height > 0)) {
+    return;
+  }
+  videoAspectSizeByKey.set(key, { width, height });
+}
+
+function getRememberedVideoAspectSize(key: string | null | undefined) {
+  if (!key) return null;
+  return videoAspectSizeByKey.get(key) ?? null;
+}
+
+function getVideoAspectCacheKeyFromSource(source: string | null | undefined) {
+  return getVideoSourceCacheKey(source);
+}
+
+function getVideoAspectCacheKeyFromVideo(video: {
+  id?: string;
+  cloudflareStreamId?: string | null;
+  cloudflare_stream_id?: string | null;
+  mediaUrl?: string | null;
+  media_url?: string | null;
+}) {
+  const streamId =
+    video.cloudflareStreamId ||
+    video.cloudflare_stream_id ||
+    extractCloudflareStreamId(video.mediaUrl) ||
+    extractCloudflareStreamId(video.media_url);
+  return streamId || video.id || null;
+}
+
+/** Populate aspect cache from the HLS master playlist (authoritative track size). */
+async function ensureVideoAspectCached(video: {
+  id?: string;
+  cloudflareStreamId?: string | null;
+  cloudflare_stream_id?: string | null;
+  mediaUrl?: string | null;
+  media_url?: string | null;
+}) {
+  const key = getVideoAspectCacheKeyFromVideo(video);
+  const existing = getRememberedVideoAspectSize(key);
+  if (existing) return existing;
+  const source = getGridVideoSource(video as ProfileVideo | FeedVideo);
+  if (!source?.includes(".m3u8")) return null;
+  const size = await probeHlsVideoSize(source);
+  if (!size) return null;
+  rememberVideoAspectSize(key, size.width, size.height);
+  rememberVideoAspectSize(getVideoAspectCacheKeyFromSource(source), size.width, size.height);
+  return size;
+}
+
+/** Open profile fullscreen; warm aspect cache without blocking the open. */
+function openProfileVideoFullscreen(
+  video: ProfileVideo | FeedVideo,
+  open: () => void,
+) {
+  const source = getGridVideoSource(video);
+  // Kick prewarm if the thumb became visible but pool entry isn't ready yet.
+  prewarmProfileVideoSource(source);
+  if (!getRememberedVideoAspectSize(getVideoAspectCacheKeyFromVideo(video))) {
+    void ensureVideoAspectCached(video);
+  }
+  open();
+}
+
+const PROFILE_VIDEO_OPEN_GREY = "#3f3f46";
+
+function configureJamVideoPlayer(
+  nextPlayer: VideoPlayer,
+  options: {
+    isLooping: boolean;
+    isMuted: boolean;
+    volume: number;
+    timeUpdateIntervalSec: number;
+  },
+) {
+  nextPlayer.loop = options.isLooping;
+  nextPlayer.muted = options.isMuted;
+  nextPlayer.volume = options.volume;
+  nextPlayer.timeUpdateEventInterval = options.timeUpdateIntervalSec;
+  nextPlayer.audioMixingMode = "duckOthers";
+  // Keep the decoder warm while backgrounded (paused). Needs the expo-video
+  // background-playback plugin in standalone/dev builds; still helps in Expo Go
+  // when the host app already allows audio background modes.
+  nextPlayer.staysActiveInBackground = true;
+  nextPlayer.showNowPlayingNotification = false;
+  nextPlayer.bufferOptions = {
+    // Start playback as soon as a tiny buffer exists (TikTok-like), instead of
+    // waiting until AVPlayer thinks stalling is unlikely.
+    waitsToMinimizeStalling: false,
+    preferredForwardBufferDuration: Platform.OS === "android" ? 2 : 1,
+    minBufferForPlayback: 0.5,
+    prioritizeTimeOverSizeThreshold: true,
+  };
+}
+
 function JamVideoView({
   source,
   style,
-  contentFit,
+  contentFit = "cover",
+  knownWidth = null,
+  knownHeight = null,
   shouldPlay,
   isLooping = false,
   isMuted = false,
   volume = 1,
+  playbackRate = 1,
   nativeControls = false,
   trimStartRatio,
   trimEndRatio,
   scrubToRatio,
   trimPlaybackResumeSignal = 0,
   timeUpdateIntervalSec = 0.25,
+  adoptPrewarmed = false,
+  surfaceColor = "#000",
   onDurationResolved,
   onPlaybackStatusUpdate,
+  onFirstFrameRender,
+  onContentFitChange,
 }: {
   source: string | null;
   style: StyleProp<ViewStyle>;
-  contentFit: VideoContentFit;
+  contentFit?: VideoContentFit;
+  /** Optional early size hint (picker / probe) so landscape letterboxes before tracks load. */
+  knownWidth?: number | null;
+  knownHeight?: number | null;
   shouldPlay: boolean;
   isLooping?: boolean;
   isMuted?: boolean;
   volume?: number;
+  playbackRate?: number;
   nativeControls?: boolean;
   trimStartRatio?: number;
   trimEndRatio?: number;
   scrubToRatio?: number | null;
   trimPlaybackResumeSignal?: number;
   timeUpdateIntervalSec?: number;
+  /** Reuse a grid-prewarmed player so the first frame can paint immediately. */
+  adoptPrewarmed?: boolean;
+  surfaceColor?: string;
   onDurationResolved?: (durationMs: number) => void;
   onPlaybackStatusUpdate?: (status: JamVideoPlaybackStatus) => void;
+  onFirstFrameRender?: () => void;
+  onContentFitChange?: (fit: VideoContentFit) => void;
 }) {
   const videoSource = useMemo<VideoSource>(() => getExpoVideoSource(source), [source]);
+  const aspectCacheKey = getVideoAspectCacheKeyFromSource(source);
+  const rememberedSize = getRememberedVideoAspectSize(aspectCacheKey);
+  const seedWidth = knownWidth ?? rememberedSize?.width ?? null;
+  const seedHeight = knownHeight ?? rememberedSize?.height ?? null;
   const onPlaybackStatusUpdateRef = useRef(onPlaybackStatusUpdate);
   const onDurationResolvedRef = useRef(onDurationResolved);
+  const onFirstFrameRenderRef = useRef(onFirstFrameRender);
+  const onContentFitChangeRef = useRef(onContentFitChange);
+  const [resolvedContentFit, setResolvedContentFit] = useState<VideoContentFit>(() =>
+    contentFitForVideoSize(seedWidth, seedHeight, contentFit),
+  );
   const trimStartRatioRef = useRef(trimStartRatio ?? 0);
   const trimEndRatioRef = useRef(trimEndRatio ?? 1);
   const scrubToRatioRef = useRef<number | null>(scrubToRatio ?? null);
@@ -3165,6 +4001,8 @@ function JamVideoView({
   const wasScrubbingRef = useRef(false);
   const durationReportedRef = useRef(false);
   const [freezeFrameUri, setFreezeFrameUri] = useState<string | null>(null);
+  const firstFrameClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const firstFrameNotifiedRef = useRef(false);
   const playbackStatusRef = useRef<JamVideoPlaybackStatus>({
     isLoaded: false,
     isBuffering: Boolean(source),
@@ -3172,29 +4010,108 @@ function JamVideoView({
     positionMillis: 0,
     status: "idle",
   });
-  const player = useVideoPlayer(videoSource, (nextPlayer) => {
-    nextPlayer.loop = isLooping;
-    nextPlayer.muted = isMuted;
-    nextPlayer.volume = volume;
-    nextPlayer.timeUpdateEventInterval = timeUpdateIntervalSec;
-    nextPlayer.audioMixingMode = "duckOthers";
-    // Keep the decoder warm while backgrounded (paused). Needs the expo-video
-    // background-playback plugin in standalone/dev builds; still helps in Expo Go
-    // when the host app already allows audio background modes.
-    nextPlayer.staysActiveInBackground = true;
-    nextPlayer.showNowPlayingNotification = false;
-    nextPlayer.bufferOptions = {
-      // Start playback as soon as a tiny buffer exists (TikTok-like), instead of
-      // waiting until AVPlayer thinks stalling is unlikely.
-      waitsToMinimizeStalling: false,
-      preferredForwardBufferDuration: Platform.OS === "android" ? 2 : 1,
-      minBufferForPlayback: 0.5,
-      prioritizeTimeOverSizeThreshold: true,
-    };
+  // Adopt a grid-prewarmed player once on mount (pair with key={video.id} at call site).
+  const [prewarmedPlayer] = useState<VideoPlayer | null>(() =>
+    adoptPrewarmed && source ? adoptPrewarmedProfileVideoPlayer(source) : null,
+  );
+  const hookPlayer = useVideoPlayer(prewarmedPlayer ? null : videoSource, (nextPlayer) => {
+    configureJamVideoPlayer(nextPlayer, {
+      isLooping,
+      isMuted,
+      volume,
+      timeUpdateIntervalSec,
+    });
   });
+  const player = prewarmedPlayer ?? hookPlayer;
+
+  // Configure adopted players when mute/volume/loop change — never release here.
+  // Release belongs only in the unmount effect below; releasing on prop changes
+  // left JS holding a dead shared object (NativeSharedObjectNotFoundException on set/pause).
+  useEffect(() => {
+    if (!prewarmedPlayer) return;
+    try {
+      configureJamVideoPlayer(prewarmedPlayer, {
+        isLooping,
+        isMuted,
+        volume,
+        timeUpdateIntervalSec,
+      });
+    } catch {
+      /* native object already gone */
+    }
+  }, [isLooping, isMuted, prewarmedPlayer, timeUpdateIntervalSec, volume]);
+
+  useEffect(() => {
+    if (!prewarmedPlayer) return;
+    return () => {
+      try {
+        prewarmedPlayer.release();
+      } catch {
+        /* already released */
+      }
+    };
+  }, [prewarmedPlayer]);
 
   const hasTrim =
     (trimStartRatio ?? 0) > 0.001 || (trimEndRatio ?? 1) < 0.999;
+  const prevShouldPlayRef = useRef(shouldPlay);
+
+  const revealAfterFirstFrame = useCallback(() => {
+    if (firstFrameNotifiedRef.current) return;
+    firstFrameNotifiedRef.current = true;
+    if (firstFrameClearTimeoutRef.current) {
+      clearTimeout(firstFrameClearTimeoutRef.current);
+    }
+    // onFirstFrameRender can fire before pixels are composited — delay cover removal.
+    // Prewarmed players often never re-fire onFirstFrameRender, so callers also
+    // invoke this from playingChange once audio/video is actually running.
+    firstFrameClearTimeoutRef.current = setTimeout(() => {
+      if (appStateRef.current !== "active") {
+        // Allow a later playing/active pass to notify the parent cover.
+        firstFrameNotifiedRef.current = false;
+        return;
+      }
+      setFreezeFrameUri(null);
+      onFirstFrameRenderRef.current?.();
+    }, 48);
+  }, []);
+
+  useEffect(() => {
+    firstFrameNotifiedRef.current = false;
+  }, [source]);
+
+  const captureFreezeFrame = useCallback(
+    (atTimeSec: number) => {
+      if (!source) return;
+      const captureId = freezeCaptureIdRef.current + 1;
+      freezeCaptureIdRef.current = captureId;
+
+      const cloudflareUri = getCloudflareFreezeFrameUri(source, atTimeSec);
+      if (cloudflareUri) {
+        setFreezeFrameUri(cloudflareUri);
+        void Image.prefetch(cloudflareUri);
+        return;
+      }
+
+      if (
+        source.startsWith("file://") ||
+        source.startsWith("content://") ||
+        source.startsWith("ph://") ||
+        source.startsWith("assets-library://")
+      ) {
+        void getThumbnailAsync(source, {
+          time: Math.max(0, Math.round(atTimeSec * 1000)),
+          quality: 0.72,
+        })
+          .then((thumbnail) => {
+            if (freezeCaptureIdRef.current !== captureId) return;
+            setFreezeFrameUri(thumbnail.uri);
+          })
+          .catch(() => undefined);
+      }
+    },
+    [source],
+  );
 
   useEffect(() => {
     shouldPlayRef.current = shouldPlay;
@@ -3205,6 +4122,94 @@ function JamVideoView({
     freezePositionRef.current = null;
     setFreezeFrameUri(null);
   }, [source]);
+
+  useEffect(() => {
+    onContentFitChangeRef.current = onContentFitChange;
+  }, [onContentFitChange]);
+
+  useLayoutEffect(() => {
+    const cached = getRememberedVideoAspectSize(aspectCacheKey);
+    const width = knownWidth ?? cached?.width ?? null;
+    const height = knownHeight ?? cached?.height ?? null;
+    const nextFit = contentFitForVideoSize(width, height, contentFit);
+    setResolvedContentFit(nextFit);
+  }, [aspectCacheKey, contentFit, knownHeight, knownWidth, source]);
+
+  useEffect(() => {
+    onContentFitChangeRef.current?.(resolvedContentFit);
+  }, [resolvedContentFit]);
+
+  const applyVideoTrackSize = useCallback(
+    (width?: number | null, height?: number | null) => {
+      if (!(typeof width === "number" && typeof height === "number" && width > 0 && height > 0)) {
+        return;
+      }
+      rememberVideoAspectSize(aspectCacheKey, width, height);
+      const nextFit = contentFitForVideoSize(width, height, contentFit);
+      // Never call parent setState inside this updater — that updates
+      // ProfileFullscreenFeedItem while JamVideoView is rendering.
+      setResolvedContentFit((current) => (current === nextFit ? current : nextFit));
+    },
+    [aspectCacheKey, contentFit],
+  );
+
+  const applyBestTrackSize = useCallback(
+    (tracks?: Array<{ size?: { width?: number; height?: number } | null } | null> | null) => {
+      // Oriented camera/picker size wins over coded track size. iOS often reports
+      // landscape natural size for portrait phone recordings (rotation metadata).
+      if (
+        typeof seedWidth === "number" &&
+        typeof seedHeight === "number" &&
+        seedWidth > 0 &&
+        seedHeight > 0 &&
+        seedWidth < seedHeight
+      ) {
+        applyVideoTrackSize(seedWidth, seedHeight);
+        return;
+      }
+
+      const sizes = (tracks ?? [])
+        .map((track) => track?.size)
+        .filter(
+          (size): size is { width: number; height: number } =>
+            typeof size?.width === "number" &&
+            typeof size?.height === "number" &&
+            size.width > 0 &&
+            size.height > 0,
+        );
+      if (!sizes.length) return;
+      // Prefer any landscape/square track so a portrait HLS rung can't force cover.
+      const landscape = sizes.find((size) => size.width >= size.height);
+      const largest = sizes.reduce((best, size) =>
+        size.width * size.height > best.width * best.height ? size : best,
+      );
+      const pick = landscape ?? largest;
+      applyVideoTrackSize(pick.width, pick.height);
+    },
+    [applyVideoTrackSize, seedHeight, seedWidth],
+  );
+
+  useEffect(() => {
+    applyBestTrackSize([player.videoTrack, ...(player.availableVideoTracks ?? [])]);
+  }, [applyBestTrackSize, player, source]);
+
+  // HLS often omits usable track sizes until late (or never). Probe the master
+  // playlist RESOLUTION tags so landscape letterboxes instead of cover-zooming.
+  useEffect(() => {
+    if (!source || !source.includes(".m3u8")) return;
+    const cached = getRememberedVideoAspectSize(aspectCacheKey);
+    if (cached) {
+      applyVideoTrackSize(cached.width, cached.height);
+    }
+    let cancelled = false;
+    void probeHlsVideoSize(source).then((size) => {
+      if (cancelled || !size) return;
+      applyVideoTrackSize(size.width, size.height);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [applyVideoTrackSize, aspectCacheKey, source]);
 
   useEffect(() => {
     player.timeUpdateEventInterval = timeUpdateIntervalSec;
@@ -3255,10 +4260,20 @@ function JamVideoView({
   }, [onDurationResolved]);
 
   useEffect(() => {
+    onFirstFrameRenderRef.current = onFirstFrameRender;
+  }, [onFirstFrameRender]);
+
+  useEffect(() => {
     player.loop = isLooping && !hasTrim;
     player.muted = isMuted;
     player.volume = volume;
   }, [hasTrim, isLooping, isMuted, player, volume]);
+
+  useEffect(() => {
+    const nextRate = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
+    if (player.playbackRate === nextRate) return;
+    player.playbackRate = nextRate;
+  }, [playbackRate, player]);
 
   useEffect(() => {
     onPlaybackStatusUpdateRef.current = onPlaybackStatusUpdate;
@@ -3301,6 +4316,14 @@ function JamVideoView({
     onPlaybackStatusUpdateRef.current?.(playbackStatusRef.current);
   }, [emitPlaybackStatus, player, source]);
 
+  useEventListener(player, "videoTrackChange", ({ videoTrack }) => {
+    applyBestTrackSize([videoTrack, ...(player.availableVideoTracks ?? [])]);
+  });
+
+  useEventListener(player, "sourceLoad", ({ availableVideoTracks }) => {
+    applyBestTrackSize([...(availableVideoTracks ?? []), player.videoTrack]);
+  });
+
   useEventListener(player, "statusChange", ({ status }) => {
     const alreadyPlayable =
       playbackStatusRef.current.isLoaded || playbackStatusRef.current.isPlaying;
@@ -3311,6 +4334,10 @@ function JamVideoView({
       isBuffering: status === "loading" && !alreadyPlayable,
       status,
     });
+
+    if (status === "readyToPlay") {
+      applyBestTrackSize([player.videoTrack, ...(player.availableVideoTracks ?? [])]);
+    }
 
     if (status === "readyToPlay" && player.duration > 0 && !durationReportedRef.current) {
       durationReportedRef.current = true;
@@ -3340,8 +4367,10 @@ function JamVideoView({
       isPlaying,
       ...(isPlaying ? { isBuffering: false, isLoaded: true } : {}),
     });
-    if (isPlaying && appStateRef.current === "active") {
-      setFreezeFrameUri(null);
+    // Clear covers once playback is running. Prewarmed/adopted players often skip
+    // VideoView.onFirstFrameRender, which left the profile grey cover stuck forever.
+    if (isPlaying) {
+      revealAfterFirstFrame();
     }
   });
 
@@ -3376,12 +4405,40 @@ function JamVideoView({
   });
 
   useEffect(() => {
+    return () => {
+      if (firstFrameClearTimeoutRef.current) {
+        clearTimeout(firstFrameClearTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (!source || !shouldPlay || appStateRef.current !== "active") {
-      player.pause();
+      // TikTok-style: pause in place and keep the same surface attached.
+      prevShouldPlayRef.current = shouldPlay;
+      if (player.playing) {
+        const freezeAt = Math.max(
+          0,
+          player.currentTime || playbackStatusRef.current.positionMillis / 1000,
+        );
+        freezePositionRef.current = freezeAt;
+        player.pause();
+        // Cover the surface while the tab is hidden — native layers often go black.
+        captureFreezeFrame(freezeAt);
+      }
       return;
     }
-    player.play();
-  }, [player, shouldPlay, source]);
+
+    prevShouldPlayRef.current = true;
+    // Keep any freeze cover up until playingChange/first-frame clears it.
+    if (!player.playing) {
+      player.play();
+    } else {
+      // Already playing (common with adopted prewarm players) — no playingChange
+      // will fire, so clear the open cover here.
+      revealAfterFirstFrame();
+    }
+  }, [captureFreezeFrame, player, revealAfterFirstFrame, shouldPlay, source]);
 
   useEffect(() => {
     const resumeRetryTimeouts: Array<ReturnType<typeof setTimeout>> = [];
@@ -3390,36 +4447,6 @@ function JamVideoView({
       while (resumeRetryTimeouts.length) {
         const timeoutId = resumeRetryTimeouts.pop();
         if (timeoutId != null) clearTimeout(timeoutId);
-      }
-    };
-
-    const captureFreezeFrame = (atTimeSec: number) => {
-      if (!source) return;
-      const captureId = freezeCaptureIdRef.current + 1;
-      freezeCaptureIdRef.current = captureId;
-
-      const cloudflareUri = getCloudflareFreezeFrameUri(source, atTimeSec);
-      if (cloudflareUri) {
-        setFreezeFrameUri(cloudflareUri);
-        void Image.prefetch(cloudflareUri);
-        return;
-      }
-
-      if (
-        source.startsWith("file://") ||
-        source.startsWith("content://") ||
-        source.startsWith("ph://") ||
-        source.startsWith("assets-library://")
-      ) {
-        void getThumbnailAsync(source, {
-          time: Math.max(0, Math.round(atTimeSec * 1000)),
-          quality: 0.72,
-        })
-          .then((thumbnail) => {
-            if (freezeCaptureIdRef.current !== captureId) return;
-            setFreezeFrameUri(thumbnail.uri);
-          })
-          .catch(() => undefined);
       }
     };
 
@@ -3432,6 +4459,7 @@ function JamVideoView({
         return;
       }
 
+      setFreezeFrameUri(null);
       // Never seek on resume — seeking forces an HLS rebuffer and is why return
       // from background felt slow compared to TikTok.
       player.play();
@@ -3467,29 +4495,25 @@ function JamVideoView({
       clearResumeRetries();
       subscription.remove();
     };
-  }, [player, source]);
+  }, [captureFreezeFrame, player, source]);
 
   return (
-    <View style={style}>
+    <View style={[style, { backgroundColor: surfaceColor }]}>
       <VideoView
         player={player}
         style={StyleSheet.absoluteFill}
-        contentFit={contentFit}
+        contentFit={resolvedContentFit}
         nativeControls={nativeControls}
         fullscreenOptions={{ enable: nativeControls }}
         allowsPictureInPicture={false}
-        onFirstFrameRender={() => {
-          if (appStateRef.current === "active") {
-            setFreezeFrameUri(null);
-          }
-        }}
+        onFirstFrameRender={revealAfterFirstFrame}
       />
       {freezeFrameUri ? (
         <View pointerEvents="none" style={StyleSheet.absoluteFill}>
           <Image
             source={{ uri: freezeFrameUri }}
             style={StyleSheet.absoluteFill}
-            resizeMode={contentFit === "contain" ? "contain" : "cover"}
+            resizeMode={resolvedContentFit === "contain" ? "contain" : "cover"}
           />
         </View>
       ) : null}
@@ -3502,7 +4526,20 @@ function FeedItem({
   height,
   navBarHeight,
   isActive,
+  paused = false,
+  onPausedChange,
+  activeFilterTags,
+  chromeOpacity,
+  chromeHolding = false,
+  chromeLocked = false,
+  onChromeHoldStart,
+  onChromeHoldEnd,
+  onChromeLock,
+  onChromeUnlock,
+  onSpeedHoldStart,
+  onSpeedHoldEnd,
   onFirstPlay,
+  onWatched,
   onOpenProfile,
   onSave,
   onMessage,
@@ -3514,7 +4551,23 @@ function FeedItem({
   height: number;
   navBarHeight: number;
   isActive: boolean;
+  /** Controlled pause — owned by Discover so it survives tab switches. */
+  paused?: boolean;
+  onPausedChange?: (paused: boolean) => void;
+  /** Normalized role/genre tags from the user's discover filters. */
+  activeFilterTags?: ReadonlySet<string>;
+  chromeOpacity?: Animated.Value;
+  chromeHolding?: boolean;
+  chromeLocked?: boolean;
+  onChromeHoldStart?: () => void;
+  onChromeHoldEnd?: () => void;
+  onChromeLock?: () => void;
+  onChromeUnlock?: () => void;
+  onSpeedHoldStart?: () => void;
+  onSpeedHoldEnd?: () => void;
   onFirstPlay?: () => void;
+  /** Fired once after a short dwell while the clip is actively playing. */
+  onWatched?: () => void;
   onOpenProfile: () => void;
   onSave: (nextSaved: boolean) => Promise<boolean>;
   onMessage: () => void;
@@ -3525,13 +4578,34 @@ function FeedItem({
   const source = getVideoSource(item);
   const posterUri = getFeedPosterSource(item);
   const onFirstPlayRef = useRef(onFirstPlay);
-  const [paused, setPaused] = useState(false);
+  const onWatchedRef = useRef(onWatched);
+  const watchedReportedRef = useRef(false);
+  const chromeHoldingRef = useRef(false);
+  const speedHoldingRef = useRef(false);
+  const chromeSuppressPressRef = useRef(false);
+  const chromeHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chromeLockHudHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chromeTouchStartYRef = useRef<number | null>(null);
+  const chromeTouchStartXRef = useRef<number | null>(null);
+  const chromeTouchInSpeedZoneRef = useRef(false);
+  const chromeTouchMovedRef = useRef(false);
+  const chromePullProgressRef = useRef(0);
+  const speedIndexRef = useRef(FEED_SPEED_DEFAULT_INDEX);
+  const speedDragBaseIndexRef = useRef(FEED_SPEED_DEFAULT_INDEX);
+  const chromeLockedRef = useRef(chromeLocked);
+  const chromeLockHudOpacity = useRef(new Animated.Value(0)).current;
+  const speedHudOpacity = useRef(new Animated.Value(0)).current;
+  const [chromePullProgress, setChromePullProgress] = useState(0);
+  const [chromeLockHudSealed, setChromeLockHudSealed] = useState(false);
+  const [speedIndex, setSpeedIndex] = useState(FEED_SPEED_DEFAULT_INDEX);
+  const [playbackRate, setPlaybackRate] = useState<FeedPlaybackSpeed>(1);
   const [saved, setSaved] = useState(item.savedByMe);
   const [bufferingState, setBufferingState] = useState(() => ({
     source,
     waitingForFirstPlay: Boolean(source),
   }));
   const [showWaitingSpinner, setShowWaitingSpinner] = useState(false);
+  const [mediaContentFit, setMediaContentFit] = useState<VideoContentFit>("cover");
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [saveScale] = useState(() => new Animated.Value(1));
   const [jamShake] = useState(() => new Animated.Value(0));
@@ -3542,10 +4616,24 @@ function FeedItem({
   const visibleTags = tags.length ? tags : getUniqueVideoTags(item.categories);
   const caption = item.caption.trim();
   const actionsBottom = navBarHeight + FEED_ACTION_GAP;
+  const chromeInteractive = !chromeHolding && !chromeLocked;
+  const overlayOpacity = chromeOpacity ?? 1;
 
   useEffect(() => {
     onFirstPlayRef.current = onFirstPlay;
   }, [onFirstPlay]);
+
+  useEffect(() => {
+    onWatchedRef.current = onWatched;
+  }, [onWatched]);
+
+  useEffect(() => {
+    watchedReportedRef.current = false;
+    speedIndexRef.current = FEED_SPEED_DEFAULT_INDEX;
+    setSpeedIndex(FEED_SPEED_DEFAULT_INDEX);
+    setPlaybackRate(1);
+    speedHudOpacity.setValue(0);
+  }, [item.id, speedHudOpacity]);
 
   useEffect(() => {
     if (posterUri) {
@@ -3561,7 +4649,18 @@ function FeedItem({
   useEffect(() => {
     setBufferingState({ source, waitingForFirstPlay: Boolean(source) });
     setShowWaitingSpinner(false);
+    setMediaContentFit("cover");
   }, [source]);
+
+  useEffect(() => {
+    if (!isActive || paused || !source || watchedReportedRef.current) return;
+    const timer = setTimeout(() => {
+      if (watchedReportedRef.current) return;
+      watchedReportedRef.current = true;
+      onWatchedRef.current?.();
+    }, FEED_SEEN_DWELL_MS);
+    return () => clearTimeout(timer);
+  }, [isActive, paused, source]);
 
   useEffect(() => {
     const shouldWait =
@@ -3586,27 +4685,214 @@ function FeedItem({
     onFirstPlayRef.current?.();
   }, [bufferingState.source, bufferingState.waitingForFirstPlay, source]);
 
+  useEffect(() => {
+    chromeLockedRef.current = chromeLocked;
+  }, [chromeLocked]);
+
+  useEffect(() => {
+    return () => {
+      if (chromeHoldTimerRef.current) {
+        clearTimeout(chromeHoldTimerRef.current);
+        chromeHoldTimerRef.current = null;
+      }
+      if (chromeLockHudHideTimerRef.current) {
+        clearTimeout(chromeLockHudHideTimerRef.current);
+        chromeLockHudHideTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  function clearChromeHoldTimer() {
+    if (chromeHoldTimerRef.current) {
+      clearTimeout(chromeHoldTimerRef.current);
+      chromeHoldTimerRef.current = null;
+    }
+  }
+
+  function hideChromeLockHud() {
+    if (chromeLockHudHideTimerRef.current) {
+      clearTimeout(chromeLockHudHideTimerRef.current);
+      chromeLockHudHideTimerRef.current = null;
+    }
+    chromeLockHudOpacity.stopAnimation();
+    Animated.timing(chromeLockHudOpacity, {
+      toValue: 0,
+      duration: FEED_CHROME_FADE_MS,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (!finished) return;
+      setChromePullProgress(0);
+      setChromeLockHudSealed(false);
+      chromePullProgressRef.current = 0;
+    });
+  }
+
+  function showChromeLockHud() {
+    if (chromeLockHudHideTimerRef.current) {
+      clearTimeout(chromeLockHudHideTimerRef.current);
+      chromeLockHudHideTimerRef.current = null;
+    }
+    chromePullProgressRef.current = 0;
+    setChromePullProgress(0);
+    setChromeLockHudSealed(false);
+    chromeLockHudOpacity.stopAnimation();
+    chromeLockHudOpacity.setValue(0);
+    // Same duration/easing as feed chrome fade-out so they crossfade together.
+    Animated.timing(chromeLockHudOpacity, {
+      toValue: 1,
+      duration: FEED_CHROME_FADE_MS,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }
+
+  function applySpeedIndex(nextIndex: number) {
+    const clamped = Math.max(0, Math.min(FEED_PLAYBACK_SPEEDS.length - 1, nextIndex));
+    speedIndexRef.current = clamped;
+    setSpeedIndex(clamped);
+    setPlaybackRate(FEED_PLAYBACK_SPEEDS[clamped]);
+  }
+
+  function showSpeedHud() {
+    speedHudOpacity.stopAnimation();
+    speedHudOpacity.setValue(0);
+    Animated.timing(speedHudOpacity, {
+      toValue: 1,
+      duration: FEED_CHROME_FADE_MS,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }
+
+  function hideSpeedHud() {
+    speedHudOpacity.stopAnimation();
+    Animated.timing(speedHudOpacity, {
+      toValue: 0,
+      duration: FEED_CHROME_FADE_MS,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }
+
+  function handleFeedTouchStart(locationX: number, pageY: number) {
+    clearChromeHoldTimer();
+    chromeTouchStartXRef.current = locationX;
+    chromeTouchStartYRef.current = pageY;
+    chromeTouchMovedRef.current = false;
+    chromePullProgressRef.current = 0;
+    chromeTouchInSpeedZoneRef.current = locationX >= viewportWidth * FEED_SPEED_ZONE_LEFT_RATIO;
+    if (moreMenuOpen) return;
+    // Speed scrubber still works while chrome is locked; clear-hold does not re-trigger.
+    if (!chromeTouchInSpeedZoneRef.current && chromeLockedRef.current) return;
+
+    chromeHoldTimerRef.current = setTimeout(() => {
+      chromeHoldTimerRef.current = null;
+      if (chromeTouchMovedRef.current) return;
+
+      if (chromeTouchInSpeedZoneRef.current) {
+        speedHoldingRef.current = true;
+        speedDragBaseIndexRef.current = speedIndexRef.current;
+        applySpeedIndex(speedIndexRef.current);
+        showSpeedHud();
+        triggerHoldHaptic();
+        onSpeedHoldStart?.();
+        return;
+      }
+
+      if (chromeLockedRef.current) return;
+      chromeHoldingRef.current = true;
+      showChromeLockHud();
+      triggerHoldHaptic();
+      onChromeHoldStart?.();
+    }, FEED_CHROME_HOLD_MS);
+  }
+
+  function handleFeedTouchMove(pageY: number) {
+    const startY = chromeTouchStartYRef.current;
+    if (startY == null) return;
+    const dy = pageY - startY;
+
+    if (!chromeHoldingRef.current && !speedHoldingRef.current) {
+      if (Math.abs(dy) > 12) {
+        chromeTouchMovedRef.current = true;
+        clearChromeHoldTimer();
+      }
+      return;
+    }
+
+    if (speedHoldingRef.current) {
+      // Pull up (negative dy) → faster speeds at the top of the pill.
+      const nextIndex = Math.round(speedDragBaseIndexRef.current + dy / FEED_SPEED_SEGMENT_PX);
+      applySpeedIndex(nextIndex);
+      return;
+    }
+
+    const progress = Math.min(1, Math.max(0, dy / FEED_CHROME_LOCK_PULL_PX));
+    chromePullProgressRef.current = progress;
+    setChromePullProgress(progress);
+    setChromeLockHudSealed(progress >= 1);
+  }
+
+  function handleFeedTouchEnd() {
+    clearChromeHoldTimer();
+    const wasChromeHolding = chromeHoldingRef.current;
+    const wasSpeedHolding = speedHoldingRef.current;
+    chromeHoldingRef.current = false;
+    speedHoldingRef.current = false;
+    chromeTouchStartYRef.current = null;
+    chromeTouchStartXRef.current = null;
+
+    if (!wasChromeHolding && !wasSpeedHolding) return;
+
+    chromeSuppressPressRef.current = true;
+
+    if (wasSpeedHolding) {
+      hideSpeedHud();
+      onSpeedHoldEnd?.();
+      return;
+    }
+
+    // Fade the lock HUD as soon as the finger lifts, locked or not.
+    hideChromeLockHud();
+
+    // Confirm lock only on release, and only if pull reached the bottom.
+    if (chromePullProgressRef.current >= 1 && !chromeLockedRef.current) {
+      onChromeLock?.();
+      return;
+    }
+
+    if (!chromeLockedRef.current) {
+      onChromeHoldEnd?.();
+    }
+  }
+
   function togglePlayback() {
     if (moreMenuOpen) {
       setMoreMenuOpen(false);
       return;
     }
     if (!source) return;
-    setPaused((current) => !current);
+    onPausedChange?.(!paused);
   }
 
-  function updatePlaybackStatus(status: JamVideoPlaybackStatus) {
-    const hasStartedPlayback = status.isPlaying || status.positionMillis > 50;
+  function handleFeedPress() {
+    if (chromeSuppressPressRef.current) {
+      chromeSuppressPressRef.current = false;
+      return;
+    }
+    if (chromeLockedRef.current) {
+      onChromeUnlock?.();
+      return;
+    }
+    if (chromeHoldingRef.current || speedHoldingRef.current) return;
+    togglePlayback();
+  }
+
+  function revealFirstFrame() {
     setBufferingState((current) => {
-      if (current.source !== source) {
-        return { source, waitingForFirstPlay: !hasStartedPlayback };
-      }
-      if (!current.waitingForFirstPlay || hasStartedPlayback) {
-        return current.waitingForFirstPlay
-          ? { source, waitingForFirstPlay: false }
-          : current;
-      }
-      return current;
+      if (current.source !== source || !current.waitingForFirstPlay) return current;
+      return { source, waitingForFirstPlay: false };
     });
   }
 
@@ -3705,18 +4991,28 @@ function FeedItem({
   ];
 
   return (
-    <Pressable style={[styles.feedItem, { height }]} onPress={togglePlayback}>
+    <Pressable
+      style={[styles.feedItem, { height }]}
+      onPress={handleFeedPress}
+      onPressIn={(event) =>
+        handleFeedTouchStart(event.nativeEvent.locationX, event.nativeEvent.pageY)
+      }
+      onTouchMove={(event) => handleFeedTouchMove(event.nativeEvent.pageY)}
+      onPressOut={handleFeedTouchEnd}
+      delayLongPress={FEED_CHROME_HOLD_MS + 400}
+    >
       {source ? (
         <View style={feedVideoFrameStyle}>
           <JamVideoView
             source={source}
             style={StyleSheet.absoluteFill}
-            contentFit="cover"
             shouldPlay={isActive && !paused}
             isLooping
             isMuted={false}
             volume={1}
-            onPlaybackStatusUpdate={updatePlaybackStatus}
+            playbackRate={playbackRate}
+            onFirstFrameRender={revealFirstFrame}
+            onContentFitChange={setMediaContentFit}
           />
           <VideoPresentationOverlays filter={item.videoFilter} textOverlays={item.textOverlays} />
           {posterUri && bufferingState.waitingForFirstPlay ? (
@@ -3724,7 +5020,11 @@ function FeedItem({
               <Image
                 source={{ uri: posterUri }}
                 style={StyleSheet.absoluteFill}
-                resizeMode="cover"
+                resizeMode={mediaContentFit === "contain" ? "contain" : "cover"}
+                onLoad={(event) => {
+                  const { width, height } = event.nativeEvent.source;
+                  setMediaContentFit(contentFitForVideoSize(width, height));
+                }}
               />
             </View>
           ) : null}
@@ -3742,8 +5042,93 @@ function FeedItem({
           <ActivityIndicator color="#fff" />
         </View>
       )}
-      <View style={[styles.feedShade, { bottom: navBarHeight }]} />
-      <View pointerEvents="box-none" style={styles.feedOverlayLayer}>
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.feedChromeLockHud,
+          {
+            opacity: chromeLockHudOpacity,
+            // Open-lock circle sits on the jam button's vertical center; track extends down.
+            bottom:
+              actionsBottom +
+              (56 + FEED_ACTION_GAP) * 2 +
+              56 / 2 -
+              (FEED_CHROME_LOCK_TRACK_TRAVEL + FEED_CHROME_LOCK_CIRCLE_SIZE / 2),
+          },
+        ]}
+      >
+        <View
+          style={[
+            styles.feedChromeLockTrack,
+            { height: FEED_CHROME_LOCK_TRACK_TRAVEL + FEED_CHROME_LOCK_CIRCLE_SIZE },
+          ]}
+        >
+          <View style={styles.feedChromeLockPath} />
+          <View
+            style={[
+              styles.feedChromeLockTarget,
+              {
+                opacity: 0.28 + chromePullProgress * 0.55,
+                transform: [{ scale: 0.92 + chromePullProgress * 0.08 }],
+              },
+            ]}
+          >
+            <FeedChromeLockIcon open={false} size={18} />
+          </View>
+          <View
+            style={[
+              styles.feedChromeLockKnob,
+              {
+                transform: [{ translateY: chromePullProgress * FEED_CHROME_LOCK_TRACK_TRAVEL }],
+              },
+            ]}
+          >
+            <FeedChromeLockIcon open={!chromeLockHudSealed && chromePullProgress < 0.92} size={20} />
+          </View>
+        </View>
+      </Animated.View>
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.feedSpeedHud,
+          {
+            opacity: speedHudOpacity,
+            // Center on the full window (feed item stops above the tab bar).
+            top: viewportHeight / 2 - FEED_SPEED_PILL_HEIGHT / 2,
+            // Center on the action-icon column (56pt buttons at right: 18).
+            right: 18 + (56 - FEED_SPEED_PILL_WIDTH) / 2,
+          },
+        ]}
+      >
+        <View style={styles.feedSpeedPill}>
+          {FEED_PLAYBACK_SPEEDS.map((speed, index) => {
+            const selected = index === speedIndex;
+            return (
+              <View key={speed} style={styles.feedSpeedRow}>
+                <Text style={[styles.feedSpeedText, selected && styles.feedSpeedTextSelected]}>
+                  {speed}x
+                </Text>
+              </View>
+            );
+          })}
+        </View>
+      </Animated.View>
+      <Animated.View
+        pointerEvents={chromeInteractive ? "box-none" : "none"}
+        style={[styles.feedOverlayLayer, { opacity: overlayOpacity }]}
+      >
+        <LinearGradient
+          pointerEvents="none"
+          colors={["rgba(0,0,0,0.40)", "rgba(0,0,0,0)"]}
+          locations={[0, 1]}
+          style={styles.feedTopShade}
+        />
+        <LinearGradient
+          pointerEvents="none"
+          colors={["rgba(0,0,0,0)", "rgba(0,0,0,0.52)"]}
+          locations={[0.05, 1]}
+          style={[styles.feedBottomShade, { bottom: navBarHeight }]}
+        />
         <View style={[styles.feedMeta, { bottom: navBarHeight + 30 }]}>
           <View style={styles.row}>
             <Pressable onPress={onOpenProfile}>
@@ -3760,12 +5145,29 @@ function FeedItem({
               <Text style={styles.feedRole}>{item.role} - {item.location}</Text>
             </View>
           </View>
-          {caption ? <Text style={styles.caption}>{caption}</Text> : null}
+          {item.lookingFor || caption ? (
+            <View style={styles.feedCaptionRow}>
+              {item.lookingFor ? (
+                <View style={styles.feedLookingForIcon} accessibilityLabel="looking for collaborators">
+                  <LookingForIcon active size={19} shadow />
+                </View>
+              ) : null}
+              {caption ? <Text style={[styles.caption, styles.feedCaptionText]}>{caption}</Text> : null}
+            </View>
+          ) : null}
           {visibleTags.length > 0 ? (
             <View style={styles.tags}>
-              {visibleTags.map((tag, index) => (
-                <Text key={`${tag}-${index}`} style={styles.tag}>{tag}</Text>
-              ))}
+              {visibleTags.map((tag, index) => {
+                const highlighted = Boolean(activeFilterTags?.has(normalizeVideoTag(tag)));
+                return (
+                  <Text
+                    key={`${tag}-${index}`}
+                    style={[styles.tag, highlighted ? styles.tagHighlighted : null]}
+                  >
+                    {tag}
+                  </Text>
+                );
+              })}
             </View>
           ) : null}
         </View>
@@ -3825,7 +5227,7 @@ function FeedItem({
           <Text style={[styles.actionText, styles.actionDotsText]}>⋯</Text>
         </Pressable>
       </View>
-      </View>
+      </Animated.View>
       <Modal animationType="slide" transparent visible={moreMenuOpen} onRequestClose={() => setMoreMenuOpen(false)}>
         <View style={styles.feedMoreSheetWrap}>
           <Pressable
@@ -3861,34 +5263,61 @@ function FeedItem({
 
 function EndOfFeedState({
   filtersActive,
+  nearMeActive,
+  seenEveryone = false,
   height,
   onCreate,
 }: {
   filtersActive: boolean;
+  nearMeActive: boolean;
+  seenEveryone?: boolean;
   height: number;
   onCreate: () => void;
 }) {
   return (
     <View style={[styles.endOfFeed, { height }]}>
-      <Text style={styles.emptyText}>{getEndOfFeedCopy(filtersActive)}</Text>
-      <Pressable style={styles.createNav} onPress={onCreate} accessibilityLabel="upload">
-        <Text style={styles.createNavText}>+</Text>
-      </Pressable>
+      <Text style={styles.emptyText}>
+        {getEndOfFeedCopy({ filtersActive, nearMeActive, seenEveryone })}
+      </Text>
+      {nearMeActive ? null : (
+        <Pressable style={styles.createNav} onPress={onCreate} accessibilityLabel="upload">
+          <Text style={styles.createNavText}>+</Text>
+        </Pressable>
+      )}
     </View>
   );
 }
 
-function getEndOfFeedCopy(filtersActive: boolean) {
+function getEndOfFeedCopy({
+  filtersActive,
+  nearMeActive,
+  seenEveryone = false,
+}: {
+  filtersActive: boolean;
+  nearMeActive: boolean;
+  seenEveryone?: boolean;
+}) {
+  if (seenEveryone) {
+    if (nearMeActive) return "You've seen everyone nearby — check back soon";
+    if (filtersActive) return "You've seen everyone in this filter — check back soon";
+    return "You've seen everyone — check back soon for new faces";
+  }
+  if (nearMeActive) {
+    return "No more creators nearby — try expanding your radius in settings";
+  }
   return filtersActive
     ? "Try expanding your search — or be one of the first to add to this filter →"
     : "The feed is just getting started — be one of the first faces people see";
 }
+
+type FilterSheetSectionKey = "role" | "genre" | "location";
 
 function FilterSheet({
   visible,
   selectedRoles,
   selectedGenres,
   selectedLocation,
+  lookingForActive,
   includeGenres = true,
   onClose,
   onApply,
@@ -3897,12 +5326,16 @@ function FilterSheet({
   selectedRoles: string[];
   selectedGenres: string[];
   selectedLocation: string;
+  /** When provided, shows the looking-for control as draft state until apply. */
+  lookingForActive?: boolean;
   includeGenres?: boolean;
   onClose: () => void;
-  onApply: (roles: string[], genres: string[], location: string) => void;
+  onApply: (roles: string[], genres: string[], location: string, lookingFor: boolean) => void;
 }) {
+  const showLookingFor = lookingForActive !== undefined;
   const [roles, setRoles] = useState(selectedRoles);
   const [genres, setGenres] = useState(selectedGenres);
+  const [lookingForDraft, setLookingForDraft] = useState(Boolean(lookingForActive));
   const [roleQuery, setRoleQuery] = useState("");
   const [genreQuery, setGenreQuery] = useState("");
   const [locationSelections, setLocationSelections] = useState<LocationFilterSelection[]>(() => parseLocationFilter(selectedLocation));
@@ -3910,41 +5343,152 @@ function FilterSheet({
   const [locationQuery, setLocationQuery] = useState("");
   const [mounted, setMounted] = useState(visible);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
-  const [translateY] = useState(() => new Animated.Value(-viewportHeight));
+  const sheetOffscreen = Math.max(viewportHeight, 640);
+  const translateY = useRef(new Animated.Value(-sheetOffscreen)).current;
+  const shadeOpacity = useRef(new Animated.Value(0)).current;
   const closingRef = useRef(false);
+  const openingRef = useRef(false);
   const wasVisibleRef = useRef(visible);
+  const scrollRef = useRef<ScrollView>(null);
+  const scrollOffsetYRef = useRef(0);
+  const scrollViewportHeightRef = useRef(0);
+  const sectionLayoutsRef = useRef<Partial<Record<FilterSheetSectionKey, { y: number; height: number }>>>({});
+  const focusedSectionRef = useRef<FilterSheetSectionKey | null>(null);
+  const ensureSectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const insets = useSafeAreaInsets();
+
+  function clearEnsureSectionTimer() {
+    if (ensureSectionTimerRef.current == null) return;
+    clearTimeout(ensureSectionTimerRef.current);
+    ensureSectionTimerRef.current = null;
+  }
+
+  function ensureSectionVisible(section: FilterSheetSectionKey, delayMs = 0) {
+    clearEnsureSectionTimer();
+    const run = () => {
+      ensureSectionTimerRef.current = null;
+      const layout = sectionLayoutsRef.current[section];
+      const viewportHeightForScroll = scrollViewportHeightRef.current;
+      if (!layout || viewportHeightForScroll <= 0) return;
+
+      const padding = 8;
+      const visibleTop = scrollOffsetYRef.current;
+      const visibleBottom = visibleTop + viewportHeightForScroll;
+      const sectionTop = layout.y;
+      const sectionBottom = layout.y + layout.height;
+      if (sectionTop >= visibleTop + padding && sectionBottom <= visibleBottom - padding) return;
+
+      const maxScrollY = Math.max(0, sectionBottom - viewportHeightForScroll + padding);
+      const targetY = Math.min(Math.max(0, sectionTop - padding), maxScrollY);
+      scrollRef.current?.scrollTo({ y: targetY, animated: true });
+    };
+
+    if (delayMs <= 0) {
+      requestAnimationFrame(run);
+      return;
+    }
+    ensureSectionTimerRef.current = setTimeout(run, delayMs);
+  }
+
+  function syncDraftFromProps() {
+    setRoles(selectedRoles);
+    setGenres(includeGenres ? selectedGenres : []);
+    setLookingForDraft(Boolean(lookingForActive));
+    const nextLocationSelections = parseLocationFilter(selectedLocation);
+    setLocationSelections(nextLocationSelections);
+    setExpandedCountries(nextLocationSelections.map((selection) => selection.country));
+    setLocationQuery("");
+    setRoleQuery("");
+    setGenreQuery("");
+    focusedSectionRef.current = null;
+    scrollOffsetYRef.current = 0;
+    sectionLayoutsRef.current = {};
+  }
+
+  function runOpenAnimation() {
+    if (openingRef.current || closingRef.current) return;
+    openingRef.current = true;
+    translateY.stopAnimation();
+    shadeOpacity.stopAnimation();
+    translateY.setValue(-sheetOffscreen);
+    shadeOpacity.setValue(0);
+    // Wait one frame so the off-screen position paints before sliding in.
+    requestAnimationFrame(() => {
+      Animated.parallel([
+        Animated.timing(translateY, {
+          toValue: 0,
+          duration: 340,
+          easing: Easing.bezier(0.22, 1, 0.36, 1),
+          useNativeDriver: true,
+        }),
+        Animated.timing(shadeOpacity, {
+          toValue: 1,
+          duration: 280,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]).start(({ finished }) => {
+        if (finished) openingRef.current = false;
+      });
+    });
+  }
+
+  function closeWithAnimation(onComplete = onClose) {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    openingRef.current = false;
+    translateY.stopAnimation();
+    shadeOpacity.stopAnimation();
+    Animated.parallel([
+      Animated.timing(translateY, {
+        toValue: -sheetOffscreen,
+        duration: 280,
+        easing: Easing.bezier(0.4, 0, 0.2, 1),
+        useNativeDriver: true,
+      }),
+      Animated.timing(shadeOpacity, {
+        toValue: 0,
+        duration: 240,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (!finished) return;
+      setMounted(false);
+      closingRef.current = false;
+      onComplete();
+    });
+  }
 
   useEffect(() => {
     const justOpened = visible && !wasVisibleRef.current;
+    const justClosed = !visible && wasVisibleRef.current;
     wasVisibleRef.current = visible;
-    if (!visible || !justOpened) return;
 
-    const frame = requestAnimationFrame(() => {
+    if (justOpened) {
       closingRef.current = false;
+      syncDraftFromProps();
       setMounted(true);
-      setRoles(selectedRoles);
-      setGenres(includeGenres ? selectedGenres : []);
-      const nextLocationSelections = parseLocationFilter(selectedLocation);
-      setLocationSelections(nextLocationSelections);
-      setExpandedCountries(nextLocationSelections.map((selection) => selection.country));
-      setLocationQuery("");
-      setRoleQuery("");
-      setGenreQuery("");
-      translateY.setValue(-viewportHeight);
-      Animated.timing(translateY, {
-        toValue: 0,
-        duration: 260,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }).start();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [includeGenres, selectedGenres, selectedLocation, selectedRoles, translateY, visible]);
+      return;
+    }
+
+    if (justClosed && mounted && !closingRef.current) {
+      closeWithAnimation(() => onClose());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- open/close edges only
+  }, [visible]);
+
+  useLayoutEffect(() => {
+    if (!mounted || !visible || closingRef.current) return;
+    runOpenAnimation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run when sheet mounts open
+  }, [mounted]);
 
   useEffect(() => {
     if (!mounted) {
       setKeyboardOffset(0);
+      focusedSectionRef.current = null;
+      clearEnsureSectionTimer();
       return;
     }
 
@@ -3952,31 +5496,23 @@ function FilterSheet({
     const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
     const showSubscription = Keyboard.addListener(showEvent, (event) => {
       setKeyboardOffset(Math.max(0, viewportHeight - event.endCoordinates.screenY));
+      const focused = focusedSectionRef.current;
+      if (focused) {
+        ensureSectionVisible(focused, Platform.OS === "ios" ? 80 : 40);
+      }
     });
     const hideSubscription = Keyboard.addListener(hideEvent, () => {
       setKeyboardOffset(0);
+      focusedSectionRef.current = null;
+      clearEnsureSectionTimer();
     });
 
     return () => {
       showSubscription.remove();
       hideSubscription.remove();
+      clearEnsureSectionTimer();
     };
   }, [mounted]);
-
-  function closeWithAnimation(onComplete = onClose) {
-    if (closingRef.current) return;
-    closingRef.current = true;
-    Animated.timing(translateY, {
-      toValue: -viewportHeight,
-      duration: 220,
-      easing: Easing.in(Easing.cubic),
-      useNativeDriver: true,
-    }).start(() => {
-      setMounted(false);
-      closingRef.current = false;
-      onComplete();
-    });
-  }
 
   const roleMatches = useSuggestions(creatorRoles, roleQuery, roles);
   const genreMatches = useSuggestions(musicGenres, genreQuery, genres);
@@ -4044,7 +5580,9 @@ function FilterSheet({
 
   return (
     <Modal animationType="none" visible={mounted} transparent onRequestClose={() => closeWithAnimation()}>
-      <Pressable style={styles.modalShade} onPress={() => closeWithAnimation()} />
+      <Animated.View style={[styles.modalShade, { opacity: shadeOpacity }]}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={() => closeWithAnimation()} />
+      </Animated.View>
       <Animated.View
         style={[
           styles.topSheet,
@@ -4059,27 +5597,76 @@ function FilterSheet({
         ]}
       >
         <ScrollView
+          ref={scrollRef}
           style={styles.topSheetScroll}
           contentContainerStyle={styles.topSheetScrollContent}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"
           showsVerticalScrollIndicator={false}
+          onLayout={(event) => {
+            scrollViewportHeightRef.current = event.nativeEvent.layout.height;
+          }}
+          onScroll={(event) => {
+            scrollOffsetYRef.current = event.nativeEvent.contentOffset.y;
+          }}
+          scrollEventThrottle={16}
         >
-          <SectionLabel label="role" light />
-          <ChipRow items={roles} onRemove={(item) => setRoles((current) => current.filter((role) => role !== item))} />
-          <FilterQueryField
-            value={roleQuery}
-            onChangeText={setRoleQuery}
-            placeholder="type to filter roles..."
-            onReset={resetRoles}
-          />
-          <SuggestionList items={roleMatches} maxVisibleItems={3} onPick={(role) => {
-            setRoles((current) => [...current, role]);
-            setRoleQuery("");
-          }} />
-          <Text style={styles.helper}>{roles.length === 0 ? "no role selection" : ""}</Text>
+          {showLookingFor ? (
+            <View style={styles.filterLookingForRow}>
+              <Pressable
+                style={styles.filterLookingForControl}
+                onPress={() => setLookingForDraft((current) => !current)}
+                accessibilityRole="button"
+                accessibilityLabel="looking for collaborators"
+                accessibilityState={{ selected: lookingForDraft }}
+              >
+                <Text style={styles.filterLookingForLabel}>looking for?</Text>
+                <View
+                  style={[
+                    styles.filterLookingForIconSlot,
+                    lookingForDraft && styles.feedNearMeButtonActive,
+                  ]}
+                >
+                  <LookingForIcon active={lookingForDraft} size={22} />
+                </View>
+              </Pressable>
+            </View>
+          ) : null}
+          <View
+            style={styles.filterSheetSection}
+            onLayout={(event) => {
+              const { y, height } = event.nativeEvent.layout;
+              sectionLayoutsRef.current.role = { y, height };
+              if (focusedSectionRef.current === "role") ensureSectionVisible("role");
+            }}
+          >
+            <SectionLabel label="role" light />
+            <ChipRow items={roles} onRemove={(item) => setRoles((current) => current.filter((role) => role !== item))} />
+            <FilterQueryField
+              value={roleQuery}
+              onChangeText={setRoleQuery}
+              placeholder="type to filter roles..."
+              onReset={resetRoles}
+              onFocus={() => {
+                focusedSectionRef.current = "role";
+                ensureSectionVisible("role", Platform.OS === "ios" ? 280 : 120);
+              }}
+            />
+            <SuggestionList items={roleMatches} maxVisibleItems={3} onPick={(role) => {
+              setRoles((current) => [...current, role]);
+              setRoleQuery("");
+            }} />
+            <Text style={styles.helper}>{roles.length === 0 ? "no role selection" : ""}</Text>
+          </View>
           {includeGenres ? (
-            <>
+            <View
+              style={styles.filterSheetSection}
+              onLayout={(event) => {
+                const { y, height } = event.nativeEvent.layout;
+                sectionLayoutsRef.current.genre = { y, height };
+                if (focusedSectionRef.current === "genre") ensureSectionVisible("genre");
+              }}
+            >
               <SectionLabel label="genre" light />
               <ChipRow items={genres} onRemove={(item) => setGenres((current) => current.filter((genre) => genre !== item))} />
               <FilterQueryField
@@ -4087,77 +5674,99 @@ function FilterSheet({
                 onChangeText={setGenreQuery}
                 placeholder="type to filter genres..."
                 onReset={resetGenres}
+                onFocus={() => {
+                  focusedSectionRef.current = "genre";
+                  ensureSectionVisible("genre", Platform.OS === "ios" ? 280 : 120);
+                }}
               />
               <SuggestionList items={genreMatches} maxVisibleItems={3} onPick={(genre) => {
                 setGenres((current) => [...current, genre]);
                 setGenreQuery("");
               }} />
               <Text style={styles.helper}>{genres.length === 0 ? "no genre selection" : ""}</Text>
-            </>
+            </View>
           ) : null}
-          <SectionLabel label="location" light />
-          <FilterQueryField
-            value={locationQuery}
-            onChangeText={setLocationQuery}
-            placeholder="search countries..."
-            onReset={resetLocations}
-          />
-          <ScrollView
-            nestedScrollEnabled
-            keyboardShouldPersistTaps="handled"
-            style={[
-              styles.locationFilterList,
-              { maxHeight: LOCATION_PICKER_MAX_VISIBLE_ROWS * LOCATION_PICKER_ROW_HEIGHT },
-            ]}
+          <View
+            style={styles.filterSheetSection}
+            onLayout={(event) => {
+              const { y, height } = event.nativeEvent.layout;
+              sectionLayoutsRef.current.location = { y, height };
+              if (focusedSectionRef.current === "location") ensureSectionVisible("location");
+            }}
           >
-            {countryMatches.map((option) => {
-              const selection = findLocationSelection(option.country);
-              const isExpanded = expandedCountries.includes(option.country);
-              const isCountrySelected = Boolean(selection && selection.cities.length === 0);
-              const isPartiallySelected = Boolean(selection && selection.cities.length > 0);
+            <SectionLabel label="location" light />
+            <FilterQueryField
+              value={locationQuery}
+              onChangeText={setLocationQuery}
+              placeholder="search countries..."
+              onReset={resetLocations}
+              onFocus={() => {
+                focusedSectionRef.current = "location";
+                ensureSectionVisible("location", Platform.OS === "ios" ? 280 : 120);
+              }}
+            />
+            <ScrollView
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+              style={[
+                styles.locationFilterList,
+                { maxHeight: LOCATION_PICKER_VISIBLE_HEIGHT },
+              ]}
+            >
+              {countryMatches.map((option) => {
+                const selection = findLocationSelection(option.country);
+                const isExpanded = expandedCountries.includes(option.country);
+                const isCountrySelected = Boolean(selection && selection.cities.length === 0);
+                const isPartiallySelected = Boolean(selection && selection.cities.length > 0);
 
-              return (
-                <View key={option.country} style={styles.locationCountryGroup}>
-                  <Pressable style={styles.locationOptionRow} onPress={() => toggleCountry(option)}>
-                    <View
-                      style={[
-                        styles.locationCircle,
-                        isCountrySelected && styles.locationCircleSelected,
-                        isPartiallySelected && styles.locationCirclePartial,
-                      ]}
-                    >
-                      {isPartiallySelected && <View style={styles.locationCirclePartialFill} />}
-                    </View>
-                    <Text style={styles.locationCountryText}>{option.country}</Text>
-                  </Pressable>
-                  {isExpanded && (
-                    <View style={styles.locationCityList}>
-                      {option.cities.map((city) => {
-                        const isCitySelected = Boolean(selection?.cities.includes(city));
-                        return (
-                          <Pressable key={city} style={styles.locationCityRow} onPress={() => toggleCity(option, city)}>
-                            <View style={[styles.locationCityCircle, isCitySelected && styles.locationCircleSelected]} />
-                            <Text style={styles.locationCityText}>{city}</Text>
-                          </Pressable>
-                        );
-                      })}
-                    </View>
-                  )}
-                </View>
-              );
-            })}
-          </ScrollView>
-          <Text style={styles.helper}>
-            {selectedLocationCount === 0
-              ? "no location selection — anywhere"
-              : `${selectedLocationCount} location ${selectedLocationCount === 1 ? "selection" : "selections"}`}
-          </Text>
+                return (
+                  <View key={option.country} style={styles.locationCountryGroup}>
+                    <Pressable style={styles.locationOptionRow} onPress={() => toggleCountry(option)}>
+                      <View
+                        style={[
+                          styles.locationCircle,
+                          isCountrySelected && styles.locationCircleSelected,
+                          isPartiallySelected && styles.locationCirclePartial,
+                        ]}
+                      >
+                        {isPartiallySelected && <View style={styles.locationCirclePartialFill} />}
+                      </View>
+                      <Text style={styles.locationCountryText}>{option.country}</Text>
+                    </Pressable>
+                    {isExpanded && (
+                      <View style={styles.locationCityList}>
+                        {option.cities.map((city) => {
+                          const isCitySelected = Boolean(selection?.cities.includes(city));
+                          return (
+                            <Pressable key={city} style={styles.locationCityRow} onPress={() => toggleCity(option, city)}>
+                              <View style={[styles.locationCityCircle, isCitySelected && styles.locationCircleSelected]} />
+                              <Text style={styles.locationCityText}>{city}</Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </ScrollView>
+            <Text style={styles.helper}>
+              {selectedLocationCount === 0
+                ? "no location selection — anywhere"
+                : `${selectedLocationCount} location ${selectedLocationCount === 1 ? "selection" : "selections"}`}
+            </Text>
+          </View>
         </ScrollView>
         <PrimaryButton
           label="apply"
           onPress={() =>
             closeWithAnimation(() =>
-              onApply(roles, includeGenres ? genres : [], encodeLocationFilter(locationSelections)),
+              onApply(
+                roles,
+                includeGenres ? genres : [],
+                encodeLocationFilter(locationSelections),
+                lookingForDraft,
+              ),
             )
           }
         />
@@ -4221,7 +5830,7 @@ function ProfileLocationPicker({
         keyboardShouldPersistTaps="handled"
         style={[
           styles.locationFilterList,
-          { maxHeight: LOCATION_PICKER_MAX_VISIBLE_ROWS * LOCATION_PICKER_ROW_HEIGHT },
+          { maxHeight: LOCATION_PICKER_VISIBLE_HEIGHT },
         ]}
       >
         {countryMatches.map((option) => {
@@ -4306,8 +5915,15 @@ function UserProfileModal({
     kind: "cancel" | "unjam";
     anchor: { x: number; y: number };
   } | null>(null);
+  const [notifyConfirmAnchor, setNotifyConfirmAnchor] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
   const menuUnjamItemRef = useRef<View>(null);
+  const notifyHeaderButtonRef = useRef<View>(null);
+  const notifyCollapsedButtonRef = useRef<View>(null);
   const [profileHeaderCollapsed, setProfileHeaderCollapsed] = useState(false);
+  const profileLockScrollSyncRef = useRef<(() => void) | null>(null);
   const [notifyOnPost, setNotifyOnPost] = useState(false);
   const [notifyScale] = useState(() => new Animated.Value(1));
   const notifyRequestIdRef = useRef(0);
@@ -4318,11 +5934,15 @@ function UserProfileModal({
   const insets = useSafeAreaInsets();
 
   useEffect(() => {
-    if (profileHeaderCollapsed) setMenuOpen(false);
+    if (profileHeaderCollapsed) {
+      setMenuOpen(false);
+      setNotifyConfirmAnchor(null);
+    }
   }, [profileHeaderCollapsed]);
 
   useEffect(() => {
     setMenuOpen(false);
+    setNotifyConfirmAnchor(null);
     setJamComposeItem(null);
     setProfileChat(null);
     setNotifyOnPost(false);
@@ -4390,7 +6010,7 @@ function UserProfileModal({
 
   const preloadedMatches = preloadedProfile?.userId === userId;
   const visibleProfile = preloadedMatches ? preloadedProfile.profile : profile;
-  const visibleVideos = sortProfileVideosByNewest(
+  const visibleVideos = sortProfileVideos(
     preloadedMatches ? preloadedProfile.videos : videos,
   );
   const { savedVideoIds, setVideoSaved } = savedVideoController;
@@ -4410,8 +6030,11 @@ function UserProfileModal({
     proSubscriptionActive: visibleProfile?.pro_subscription_active,
   };
   const proBadge = getProBadgeKind(proEntitlement);
-  const showProProgress = shouldShowProProgress(proEntitlement);
+  const showProProgress =
+    currentUserId === userId && shouldShowProProgress(proEntitlement);
   const canUnjam = visibleJammedByMe;
+  const isOwnProfile = currentUserId === userId;
+  const profileUnlocked = isOwnProfile || (visibleJammedByMe && visibleJammedMe);
   const visibleFeedVideos = visibleProfile
     ? visibleVideos.map((video) =>
         profileToFeedVideo(
@@ -4440,6 +6063,7 @@ function UserProfileModal({
     if (!userId) return;
 
     setMenuOpen(false);
+    setNotifyConfirmAnchor(null);
     setUnjamConfirm({ kind, anchor });
   }
 
@@ -4559,47 +6183,69 @@ function UserProfileModal({
     ]).start();
   }
 
-  function pressNotifyOnPost() {
+  function applyNotifyOnPost(enabled: boolean) {
     if (!userId || userId === currentUserId) return;
 
-    const nextNotify = !notifyOnPost;
     const requestId = ++notifyRequestIdRef.current;
-    setNotifyOnPost(nextNotify);
-    if (nextNotify) runNotifyAnimation();
+    setNotifyOnPost(enabled);
+    if (enabled) runNotifyAnimation();
 
-    void setCreatorPostAlert(currentUserId, userId, nextNotify).catch((err) => {
+    void setCreatorPostAlert(currentUserId, userId, enabled).catch((err) => {
       if (requestId !== notifyRequestIdRef.current) return;
-      setNotifyOnPost(!nextNotify);
+      setNotifyOnPost(!enabled);
       Alert.alert(
-        nextNotify ? "could not turn on alerts" : "could not turn off alerts",
+        enabled ? "could not turn on alerts" : "could not turn off alerts",
         err instanceof Error ? err.message : "try again",
       );
     });
   }
 
-  const profileNotifyButton = (
-    <Pressable
-      style={styles.headerIconButton}
-      onPress={pressNotifyOnPost}
-      accessibilityRole="button"
-      accessibilityLabel={
-        notifyOnPost
-          ? `Stop notifications when ${displayName} posts`
-          : `Notify me when ${displayName} posts`
-      }
-      accessibilityState={{ selected: notifyOnPost }}
-    >
-      <Animated.View style={{ transform: [{ scale: notifyScale }] }}>
-        <BellIcon filled={notifyOnPost} />
-      </Animated.View>
-    </Pressable>
-  );
+  function pressNotifyOnPost(anchorRef: RefObject<View | null>) {
+    if (!userId || userId === currentUserId) return;
+
+    if (notifyOnPost) {
+      setNotifyConfirmAnchor(null);
+      applyNotifyOnPost(false);
+      return;
+    }
+
+    setMenuOpen(false);
+    setUnjamConfirm(null);
+    anchorRef.current?.measureInWindow((x, y, width, height) => {
+      setNotifyConfirmAnchor({ x: x + width / 2, y: y + height });
+    });
+  }
+
+  function renderProfileNotifyButton(anchorRef: RefObject<View | null>) {
+    return (
+      <View ref={anchorRef} collapsable={false} style={styles.profileMenuAnchor}>
+        <Pressable
+          style={styles.headerIconButton}
+          onPress={() => pressNotifyOnPost(anchorRef)}
+          accessibilityRole="button"
+          accessibilityLabel={
+            notifyOnPost
+              ? `Stop notifications when ${displayName} posts`
+              : `Notify me when ${displayName} posts`
+          }
+          accessibilityState={{ selected: notifyOnPost }}
+        >
+          <Animated.View style={{ transform: [{ scale: notifyScale }] }}>
+            <BellIcon filled={notifyOnPost} />
+          </Animated.View>
+        </Pressable>
+      </View>
+    );
+  }
 
   const profileOptionsButton = (
     <View style={styles.profileMenuAnchor}>
       <Pressable
         style={styles.headerIconButton}
-        onPress={() => setMenuOpen((current) => !current)}
+        onPress={() => {
+          setNotifyConfirmAnchor(null);
+          setMenuOpen((current) => !current);
+        }}
         accessibilityLabel="profile options"
       >
         <Text style={styles.iconText}>⋯</Text>
@@ -4628,18 +6274,26 @@ function UserProfileModal({
               visibleProfile
                 ? {
                     title: displayName,
-                    left: profileNotifyButton,
+                    left: renderProfileNotifyButton(notifyCollapsedButtonRef),
                     right: profileOptionsButton,
                   }
                 : undefined
             }
             onCollapseChange={setProfileHeaderCollapsed}
+            onScroll={() => {
+              profileLockScrollSyncRef.current?.();
+            }}
             onScrollBeginDrag={() => {
               if (menuOpen) setMenuOpen(false);
+              if (notifyConfirmAnchor) setNotifyConfirmAnchor(null);
             }}
           >
             <View style={styles.headerRow}>
-              {profileHeaderCollapsed ? <View style={styles.headerSpacer} /> : profileNotifyButton}
+              {profileHeaderCollapsed ? (
+                <View style={styles.headerSpacer} />
+              ) : (
+                renderProfileNotifyButton(notifyHeaderButtonRef)
+              )}
               <View style={styles.headerCenterSlot} pointerEvents="box-none">
                 {showProProgress && !profileHeaderCollapsed ? (
                   <ProProgressBar posted={postedVideoCount} />
@@ -4695,9 +6349,13 @@ function UserProfileModal({
                 <View style={styles.profileVideoDivider} />
                 <VideoGrid
                   videos={visibleFeedVideos}
-                  onVideoPress={(_video, index) => {
+                  locked={!profileUnlocked}
+                  lockMessage={`you must be jamming with ${displayName} to see their full profile`}
+                  lockScrollSyncRef={profileLockScrollSyncRef}
+                  prewarmVisibleVideos
+                  onVideoPress={(video, index) => {
                     setMenuOpen(false);
-                    setFullscreenIndex(index);
+                    openProfileVideoFullscreen(video, () => setFullscreenIndex(index));
                   }}
                 />
               </>
@@ -4766,6 +6424,53 @@ function UserProfileModal({
                   </Pressable>
                   <Pressable style={styles.confirmOption} onPress={performUnjam}>
                     <Text style={styles.confirmOptionDangerText}>confirm</Text>
+                  </Pressable>
+                </View>
+              </View>
+            </Modal>
+          ) : null}
+          {notifyConfirmAnchor ? (
+            <Modal
+              animationType="fade"
+              transparent
+              visible
+              onRequestClose={() => setNotifyConfirmAnchor(null)}
+            >
+              <Pressable
+                style={StyleSheet.absoluteFill}
+                onPress={() => setNotifyConfirmAnchor(null)}
+                accessibilityLabel="dismiss"
+              />
+              <View
+                style={[
+                  styles.notifyPopover,
+                  {
+                    top: notifyConfirmAnchor.y + 8,
+                    left: Math.min(
+                      Math.max(notifyConfirmAnchor.x - NOTIFY_POPOVER_WIDTH / 2, 12),
+                      viewportWidth - NOTIFY_POPOVER_WIDTH - 12,
+                    ),
+                  },
+                ]}
+              >
+                <Text style={styles.unjamPopoverTitle}>
+                  get notified when {displayName} posts?
+                </Text>
+                <View style={styles.twoCol}>
+                  <Pressable
+                    style={styles.confirmOption}
+                    onPress={() => setNotifyConfirmAnchor(null)}
+                  >
+                    <Text style={styles.confirmOptionCancelText}>cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.confirmOption}
+                    onPress={() => {
+                      setNotifyConfirmAnchor(null);
+                      applyNotifyOnPost(true);
+                    }}
+                  >
+                    <Text style={styles.confirmOptionYesText}>yes</Text>
                   </Pressable>
                 </View>
               </View>
@@ -4924,7 +6629,7 @@ function UserProfileModal({
           {visibleProfile && (
             <ProfileVideoFullscreenModal
               visible={fullscreenIndex !== null}
-              videos={visibleFeedVideos}
+              videos={profileUnlocked ? visibleFeedVideos : visibleFeedVideos.slice(0, 3)}
               initialIndex={fullscreenIndex ?? 0}
               owner={{
                 creatorName: displayName,
@@ -4998,27 +6703,33 @@ function UserProfileModal({
   );
 }
 
-function ProfileVideoFullscreenModal({
-  visible,
-  videos,
-  initialIndex,
+function ProfileFullscreenFeedItem({
+  video,
+  height,
   owner,
-  saved,
-  presentation = "modal",
-  onClose,
+  isActive,
+  videoBottomInset,
+  actionsBottom,
+  metaBottom,
+  ownProfileNavBarHeight,
+  ownVideoActions,
+  chromeOpacity,
+  chromeHolding = false,
+  chromeLocked = false,
+  onChromeHoldStart,
+  onChromeHoldEnd,
+  onChromeLock,
+  onChromeUnlock,
+  onSpeedHoldStart,
+  onSpeedHoldEnd,
   onSave,
   onMessage,
-  getSavedForVideo,
-  getOwnerForVideo,
-  ownVideoActions,
   onNotInterested,
   onBlock,
   onReport,
-  onSendMessage,
 }: {
-  visible: boolean;
-  videos: Array<ProfileVideo | FeedVideo>;
-  initialIndex: number;
+  video: ProfileVideo | FeedVideo;
+  height: number;
   owner: {
     creatorName: string;
     role: string;
@@ -5027,410 +6738,305 @@ function ProfileVideoFullscreenModal({
     earlyAdopter: boolean;
     proBadge?: ProBadgeKind | null;
   };
-  saved: boolean;
-  presentation?: "modal" | "overlay";
-  onClose: () => void;
-  onSave: (video: ProfileVideo | FeedVideo, nextSaved: boolean) => void;
-  onMessage: (video: ProfileVideo | FeedVideo) => void;
-  getSavedForVideo?: (video: ProfileVideo | FeedVideo) => boolean;
+  isActive: boolean;
+  videoBottomInset: number;
+  actionsBottom: number;
+  metaBottom: number;
+  ownProfileNavBarHeight: number;
   ownVideoActions?: {
     onDelete: (video: ProfileVideo | FeedVideo) => void;
   };
+  chromeOpacity?: Animated.Value;
+  chromeHolding?: boolean;
+  chromeLocked?: boolean;
+  onChromeHoldStart?: () => void;
+  onChromeHoldEnd?: () => void;
+  onChromeLock?: () => void;
+  onChromeUnlock?: () => void;
+  onSpeedHoldStart?: () => void;
+  onSpeedHoldEnd?: () => void;
+  onSave: (video: ProfileVideo | FeedVideo, nextSaved: boolean) => void;
+  onMessage: (video: ProfileVideo | FeedVideo) => void;
   onNotInterested?: (video: ProfileVideo | FeedVideo) => void;
   onBlock?: (video: ProfileVideo | FeedVideo) => void;
   onReport?: (video: ProfileVideo | FeedVideo) => void;
-  onSendMessage?: (video: ProfileVideo | FeedVideo, body: string) => Promise<void>;
-  getOwnerForVideo?: (video: ProfileVideo | FeedVideo) => {
-    creatorName: string;
-    role: string;
-    location: string;
-    avatarUrl: string | null;
-    earlyAdopter: boolean;
-    proBadge?: ProBadgeKind | null;
-  };
 }) {
-  const wasVisibleRef = useRef(false);
-  const pendingSwipeResetOffsetRef = useRef<number | null>(null);
-  const gestureDirectionRef = useRef<"horizontal" | "vertical" | null>(null);
-  const [index, setIndex] = useState(initialIndex);
-  const [sessionVideos, setSessionVideos] = useState<Array<ProfileVideo | FeedVideo>>(videos);
-  const [savedLocal, setSavedLocal] = useState(saved);
+  const source = getGridVideoSource(video);
+  const feedItem = profileVideoToFeedVideo(video);
+  const presentation = getVideoPresentation(video);
+  const lookingFor = Boolean(
+    feedItem?.lookingFor ||
+      ("lookingFor" in video && video.lookingFor) ||
+      ("looking_for" in video && (video as { looking_for?: boolean | null }).looking_for),
+  );
+  const aspectCacheKey = getVideoAspectCacheKeyFromVideo(video);
+  const rememberedAspect = getRememberedVideoAspectSize(aspectCacheKey);
   const [paused, setPaused] = useState(false);
+  const [saved, setSaved] = useState(Boolean(video.savedByMe));
   const [menuOpen, setMenuOpen] = useState(false);
-  const [messageDraft, setMessageDraft] = useState("");
-  const [messageInputFocused, setMessageInputFocused] = useState(false);
-  const messageInputRef = useRef<TextInput>(null);
-  const [messageSending, setMessageSending] = useState(false);
-  const [messageSentTickVisible, setMessageSentTickVisible] = useState(false);
-  const [messageSentTickScale] = useState(() => new Animated.Value(0));
-  const [messageSendButtonWidth] = useState(() => new Animated.Value(FULLSCREEN_MESSAGE_SEND_WIDTH));
-  const [keyboardOffset, setKeyboardOffset] = useState(0);
-  const [profileBufferingState, setProfileBufferingState] = useState<{
-    source: string | null;
-    loading: boolean;
-  }>({ source: null, loading: false });
-  const [delayedProfileLoadingSource, setDelayedProfileLoadingSource] = useState<string | null>(null);
-  const [translateX] = useState(() => new Animated.Value(0));
-  const [translateY] = useState(() => new Animated.Value(0));
-  const [horizontalTranslateY] = useState(() => new Animated.Value(0));
-  const [translateYCorrection] = useState(() => new Animated.Value(0));
+  const [waitingForFirstPlay, setWaitingForFirstPlay] = useState(Boolean(source));
+  const [showGreyCover, setShowGreyCover] = useState(Boolean(source));
+  const [showWaitingSpinner, setShowWaitingSpinner] = useState(false);
+  const [mediaContentFit, setMediaContentFit] = useState<VideoContentFit>(() =>
+    contentFitForVideoSize(rememberedAspect?.width, rememberedAspect?.height),
+  );
   const [heartScale] = useState(() => new Animated.Value(1));
   const [jamShake] = useState(() => new Animated.Value(0));
-  const insets = useSafeAreaInsets();
-  const activeVideos = visible ? sessionVideos : videos;
-  const video = activeVideos[index] ?? activeVideos[0];
-  const previousVideo = index > 0 ? activeVideos[index - 1] : null;
-  const nextVideo = index < activeVideos.length - 1 ? activeVideos[index + 1] : null;
-  const source = video ? getGridVideoSource(video) : null;
-  const showMessageBar = Boolean(onSendMessage && !ownVideoActions);
-  const messageBarHeight = getNavBarHeight(insets.bottom);
-  const messageBarInset = showMessageBar ? messageBarHeight + keyboardOffset : 0;
-  const ownProfileNavBarHeight = ownVideoActions ? messageBarHeight : 0;
-  const videoBottomInset = showMessageBar ? messageBarInset : ownProfileNavBarHeight;
-  const actionsBottom = videoBottomInset + FEED_ACTION_GAP;
-  const metaBottom = showMessageBar ? messageBarInset + 30 : 122;
-  const fullscreenCells = [
-    previousVideo ? { video: previousVideo, offset: -viewportHeight } : null,
-    video ? { video, offset: 0 } : null,
-    nextVideo ? { video: nextVideo, offset: viewportHeight } : null,
-  ].filter((cell): cell is { video: ProfileVideo | FeedVideo; offset: number } => Boolean(cell));
-  const currentFeedItem = video ? profileVideoToFeedVideo(video) : null;
-  const currentPendingSentJam = Boolean(currentFeedItem && isPendingSentJam(currentFeedItem));
-  const animatedTranslateX = useMemo(
-    () =>
-      translateX.interpolate({
-        inputRange: [0, viewportWidth],
-        outputRange: [0, viewportWidth],
-        extrapolate: "clamp",
-      }),
-    [translateX],
-  );
-  const animatedTranslateY = useMemo(
-    () =>
-      Animated.add(translateYCorrection, translateY.interpolate({
-        inputRange: [-viewportHeight, viewportHeight],
-        outputRange: [-viewportHeight, viewportHeight],
-        extrapolate: "clamp",
-      })),
-    [translateY, translateYCorrection],
-  );
-  const animatedHorizontalTranslateY = useMemo(
-    () => horizontalTranslateY,
-    [horizontalTranslateY],
-  );
-  const handleGestureEvent = useCallback(
-    (event: PanGestureHandlerGestureEvent) => {
-      const { translationX, translationY } = event.nativeEvent;
-      if (!gestureDirectionRef.current) {
-        const absX = Math.abs(translationX);
-        const absY = Math.abs(translationY);
-        if (Math.max(absX, absY) < GESTURE_DIRECTION_LOCK_DISTANCE) {
-          translateX.setValue(0);
-          horizontalTranslateY.setValue(0);
-          translateY.setValue(0);
-          return;
-        }
-
-        gestureDirectionRef.current = absX > absY ? "horizontal" : "vertical";
-      }
-
-      if (gestureDirectionRef.current === "horizontal") {
-        translateX.setValue(Math.max(0, translationX));
-        horizontalTranslateY.setValue(translationY);
-        translateY.setValue(0);
-        return;
-      }
-
-      translateX.setValue(0);
-      horizontalTranslateY.setValue(0);
-      translateY.setValue(translationY);
-    },
-    [horizontalTranslateY, translateX, translateY],
-  );
+  const greyCoverOpacity = useRef(new Animated.Value(1)).current;
+  const chromeHoldingRef = useRef(false);
+  const speedHoldingRef = useRef(false);
+  const chromeSuppressPressRef = useRef(false);
+  const chromeHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chromeLockHudHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chromeTouchStartYRef = useRef<number | null>(null);
+  const chromeTouchStartXRef = useRef<number | null>(null);
+  const chromeTouchInSpeedZoneRef = useRef(false);
+  const chromeTouchMovedRef = useRef(false);
+  const chromePullProgressRef = useRef(0);
+  const speedIndexRef = useRef(FEED_SPEED_DEFAULT_INDEX);
+  const speedDragBaseIndexRef = useRef(FEED_SPEED_DEFAULT_INDEX);
+  const chromeLockedRef = useRef(chromeLocked);
+  const chromeLockHudOpacity = useRef(new Animated.Value(0)).current;
+  const speedHudOpacity = useRef(new Animated.Value(0)).current;
+  const [chromePullProgress, setChromePullProgress] = useState(0);
+  const [chromeLockHudSealed, setChromeLockHudSealed] = useState(false);
+  const [speedIndex, setSpeedIndex] = useState(FEED_SPEED_DEFAULT_INDEX);
+  const [playbackRate, setPlaybackRate] = useState<FeedPlaybackSpeed>(1);
+  const connection = feedItem?.mutual ? "jamming" : feedItem?.jammedMe ? "jammed you" : null;
+  const hasJam = Boolean(feedItem && hasSentJam(feedItem));
+  const pendingJam = Boolean(feedItem && isPendingSentJam(feedItem));
+  const caption = getVideoCaption(video);
+  const tags = getProfileFullscreenTags(video);
+  const showModerationMenu = Boolean(onNotInterested && onBlock && onReport);
+  const chromeInteractive = !chromeHolding && !chromeLocked;
+  const overlayOpacity = chromeOpacity ?? 1;
 
   useEffect(() => {
-    if (!visible) {
-      wasVisibleRef.current = false;
+    setSaved(Boolean(video.savedByMe));
+  }, [video.id, video.savedByMe]);
+
+  useEffect(() => {
+    setPaused(false);
+    setMenuOpen(false);
+    setWaitingForFirstPlay(Boolean(source));
+    setShowGreyCover(Boolean(source));
+    setShowWaitingSpinner(false);
+    greyCoverOpacity.stopAnimation();
+    greyCoverOpacity.setValue(1);
+    const cached = getRememberedVideoAspectSize(getVideoAspectCacheKeyFromVideo(video));
+    setMediaContentFit(contentFitForVideoSize(cached?.width, cached?.height));
+    speedIndexRef.current = FEED_SPEED_DEFAULT_INDEX;
+    setSpeedIndex(FEED_SPEED_DEFAULT_INDEX);
+    setPlaybackRate(1);
+    speedHudOpacity.setValue(0);
+  }, [greyCoverOpacity, source, speedHudOpacity, video.id]);
+
+  useEffect(() => {
+    if (!isActive || paused || !source || !waitingForFirstPlay) {
+      setShowWaitingSpinner(false);
       return;
     }
-    if (wasVisibleRef.current) return;
-
-    wasVisibleRef.current = true;
-    const frame = requestAnimationFrame(() => {
-      setSessionVideos(videos);
-      setIndex(Math.min(Math.max(initialIndex, 0), Math.max(videos.length - 1, 0)));
-      const initialVideo = videos[initialIndex];
-      setSavedLocal(initialVideo ? getSavedForVideo?.(initialVideo) ?? saved : saved);
-      setPaused(false);
-      setMenuOpen(false);
-      setMessageDraft("");
-      setMessageInputFocused(false);
-      setMessageSentTickVisible(false);
-      messageSentTickScale.setValue(0);
-      messageSendButtonWidth.setValue(FULLSCREEN_MESSAGE_SEND_WIDTH);
-      translateX.setValue(0);
-      translateY.setValue(0);
-      horizontalTranslateY.setValue(0);
-      translateYCorrection.setValue(0);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [getSavedForVideo, horizontalTranslateY, initialIndex, messageSendButtonWidth, messageSentTickScale, saved, translateX, translateY, translateYCorrection, videos, visible]);
-
-  useEffect(() => {
-    if (!visible || !video) return;
-    const frame = requestAnimationFrame(() => {
-      setSavedLocal(getSavedForVideo?.(video) ?? saved);
-      setMenuOpen(false);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [getSavedForVideo, index, saved, video, visible]);
-
-  useEffect(() => {
-    if (!visible) return;
-    setMessageDraft("");
-    setMessageInputFocused(false);
-    setMessageSentTickVisible(false);
-    messageSentTickScale.setValue(0);
-    messageSendButtonWidth.setValue(FULLSCREEN_MESSAGE_SEND_WIDTH);
-  }, [index, messageSendButtonWidth, messageSentTickScale, visible]);
-
-  useLayoutEffect(() => {
-    const finalOffset = pendingSwipeResetOffsetRef.current;
-    if (finalOffset === null) return;
-
-    translateYCorrection.setValue(-finalOffset);
-    const frame = requestAnimationFrame(() => {
-      translateY.setValue(0);
-      translateYCorrection.setValue(0);
-      pendingSwipeResetOffsetRef.current = null;
-    });
-
-    return () => cancelAnimationFrame(frame);
-  }, [index, translateY, translateYCorrection]);
-
-  useEffect(() => {
-    if (!visible || !source) {
-      setProfileBufferingState({ source, loading: Boolean(source) });
-      setDelayedProfileLoadingSource(null);
-      return;
-    }
-
-    setProfileBufferingState({ source, loading: true });
-    setDelayedProfileLoadingSource(null);
-    const timer = setTimeout(() => {
-      setDelayedProfileLoadingSource(source);
-    }, 1000);
+    const timer = setTimeout(() => setShowWaitingSpinner(true), 1000);
     return () => clearTimeout(timer);
-  }, [source, visible]);
+  }, [isActive, paused, source, waitingForFirstPlay]);
+
+  const greyRevealedRef = useRef(false);
 
   useEffect(() => {
-    if (!visible || !showMessageBar) {
-      setKeyboardOffset(0);
-      return;
-    }
+    greyRevealedRef.current = false;
+  }, [video.id, source]);
 
-    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
-    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
-    const showSubscription = Keyboard.addListener(showEvent, (event) => {
-      setKeyboardOffset(Math.max(0, viewportHeight - event.endCoordinates.screenY));
-    });
-    const hideSubscription = Keyboard.addListener(hideEvent, () => {
-      setKeyboardOffset(0);
-    });
-
-    return () => {
-      showSubscription.remove();
-      hideSubscription.remove();
-    };
-  }, [showMessageBar, visible]);
-
-  function handleGestureStateChange(event: PanGestureHandlerStateChangeEvent) {
-    const state = event.nativeEvent.state;
-    if (state !== State.END && state !== State.CANCELLED && state !== State.FAILED) return;
-
-    const { translationX, translationY, velocityY } = event.nativeEvent;
-    const gestureDirection = gestureDirectionRef.current;
-    gestureDirectionRef.current = null;
-
-    if (state === State.CANCELLED || state === State.FAILED) {
-      translateYCorrection.setValue(0);
-      Animated.parallel([
-        Animated.spring(translateX, {
-          toValue: 0,
-          damping: 24,
-          stiffness: 230,
-          mass: 0.8,
-          useNativeDriver: true,
-        }),
-        Animated.spring(horizontalTranslateY, {
-          toValue: 0,
-          damping: 24,
-          stiffness: 230,
-          mass: 0.8,
-          useNativeDriver: true,
-        }),
-        Animated.spring(translateY, {
-          toValue: 0,
-          damping: 24,
-          stiffness: 230,
-          mass: 0.8,
-          useNativeDriver: true,
-        }),
-      ]).start();
-      return;
-    }
-
-    const isHorizontalBackGesture = gestureDirection === "horizontal" && translationX > 0;
-    if (isHorizontalBackGesture) {
-      if (translationX >= viewportWidth / 2) {
-        Animated.parallel([
-          Animated.timing(translateX, {
-            toValue: viewportWidth,
-            duration: 170,
-            easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
-          }),
-          Animated.timing(horizontalTranslateY, {
-            toValue: translationY,
-            duration: 170,
-            easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
-          }),
-        ]).start(onClose);
-        return;
-      }
-
-      translateYCorrection.setValue(0);
-      Animated.parallel([
-        Animated.spring(translateX, {
-          toValue: 0,
-          damping: 24,
-          stiffness: 230,
-          mass: 0.8,
-          useNativeDriver: true,
-        }),
-        Animated.spring(horizontalTranslateY, {
-          toValue: 0,
-          damping: 24,
-          stiffness: 230,
-          mass: 0.8,
-          useNativeDriver: true,
-        }),
-        Animated.spring(translateY, {
-          toValue: 0,
-          damping: 24,
-          stiffness: 230,
-          mass: 0.8,
-          useNativeDriver: true,
-        }),
-      ]).start();
-      return;
-    }
-
-    translateX.setValue(0);
-    horizontalTranslateY.setValue(0);
-
-    if (gestureDirection !== "vertical") {
-      translateYCorrection.setValue(0);
-      Animated.parallel([
-        Animated.spring(translateX, {
-          toValue: 0,
-          damping: 24,
-          stiffness: 230,
-          mass: 0.8,
-          useNativeDriver: true,
-        }),
-        Animated.spring(horizontalTranslateY, {
-          toValue: 0,
-          damping: 24,
-          stiffness: 230,
-          mass: 0.8,
-          useNativeDriver: true,
-        }),
-        Animated.spring(translateY, {
-          toValue: 0,
-          damping: 24,
-          stiffness: 230,
-          mass: 0.8,
-          useNativeDriver: true,
-        }),
-      ]).start();
-      return;
-    }
-
-    const shouldMove = Math.abs(translationY) > 70 || Math.abs(velocityY) > 520;
-    if (!shouldMove) {
-      translateYCorrection.setValue(0);
-      Animated.spring(translateY, {
-        toValue: 0,
-        damping: 24,
-        stiffness: 230,
-        mass: 0.8,
-        useNativeDriver: true,
-      }).start();
-      return;
-    }
-
-    const nextIndex = translationY < 0 || velocityY < -520
-      ? Math.min(index + 1, Math.max(activeVideos.length - 1, 0))
-      : Math.max(index - 1, 0);
-
-    if (nextIndex === index) {
-      translateYCorrection.setValue(0);
-      Animated.spring(translateY, {
-        toValue: 0,
-        damping: 24,
-        stiffness: 230,
-        mass: 0.8,
-        useNativeDriver: true,
-      }).start();
-      return;
-    }
-
-    const finalOffset = nextIndex > index ? -viewportHeight : viewportHeight;
-
-    Animated.timing(translateY, {
-      toValue: finalOffset,
-      duration: 180,
+  function revealFirstFrameFromGrey() {
+    if (greyRevealedRef.current) return;
+    greyRevealedRef.current = true;
+    setWaitingForFirstPlay(false);
+    setShowWaitingSpinner(false);
+    greyCoverOpacity.stopAnimation();
+    Animated.timing(greyCoverOpacity, {
+      toValue: 0,
+      duration: 200,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
-    }).start(() => {
-      pendingSwipeResetOffsetRef.current = finalOffset;
-      setIndex(nextIndex);
+    }).start(({ finished }) => {
+      if (finished) setShowGreyCover(false);
     });
   }
 
-  function pressSave() {
-    if (!video) return;
-    const nextSaved = !savedLocal;
-    setSavedLocal(nextSaved);
-    setSessionVideos((current) =>
-      current.map((entry) =>
-        entry.id === video.id
-          ? {
-              ...entry,
-              savedByMe: nextSaved,
-            }
-          : entry,
-      ),
-    );
-    if (nextSaved) runSaveAnimation();
-    onSave(video, nextSaved);
+  useEffect(() => {
+    chromeLockedRef.current = chromeLocked;
+  }, [chromeLocked]);
+
+  useEffect(() => {
+    return () => {
+      if (chromeHoldTimerRef.current) {
+        clearTimeout(chromeHoldTimerRef.current);
+        chromeHoldTimerRef.current = null;
+      }
+      if (chromeLockHudHideTimerRef.current) {
+        clearTimeout(chromeLockHudHideTimerRef.current);
+        chromeLockHudHideTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  function clearChromeHoldTimer() {
+    if (chromeHoldTimerRef.current) {
+      clearTimeout(chromeHoldTimerRef.current);
+      chromeHoldTimerRef.current = null;
+    }
   }
 
-  function dismissMessageInput() {
-    messageInputRef.current?.blur();
-    Keyboard.dismiss();
-    setMessageInputFocused(false);
+  function hideChromeLockHud() {
+    if (chromeLockHudHideTimerRef.current) {
+      clearTimeout(chromeLockHudHideTimerRef.current);
+      chromeLockHudHideTimerRef.current = null;
+    }
+    chromeLockHudOpacity.stopAnimation();
+    Animated.timing(chromeLockHudOpacity, {
+      toValue: 0,
+      duration: FEED_CHROME_FADE_MS,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (!finished) return;
+      setChromePullProgress(0);
+      setChromeLockHudSealed(false);
+      chromePullProgressRef.current = 0;
+    });
   }
 
-  function handleVideoBackgroundPress() {
-    if (showMessageBar && (keyboardOffset > 0 || messageInputFocused)) {
-      dismissMessageInput();
+  function showChromeLockHud() {
+    if (chromeLockHudHideTimerRef.current) {
+      clearTimeout(chromeLockHudHideTimerRef.current);
+      chromeLockHudHideTimerRef.current = null;
+    }
+    chromePullProgressRef.current = 0;
+    setChromePullProgress(0);
+    setChromeLockHudSealed(false);
+    chromeLockHudOpacity.stopAnimation();
+    chromeLockHudOpacity.setValue(0);
+    Animated.timing(chromeLockHudOpacity, {
+      toValue: 1,
+      duration: FEED_CHROME_FADE_MS,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }
+
+  function applySpeedIndex(nextIndex: number) {
+    const clamped = Math.max(0, Math.min(FEED_PLAYBACK_SPEEDS.length - 1, nextIndex));
+    speedIndexRef.current = clamped;
+    setSpeedIndex(clamped);
+    setPlaybackRate(FEED_PLAYBACK_SPEEDS[clamped]);
+  }
+
+  function showSpeedHud() {
+    speedHudOpacity.stopAnimation();
+    speedHudOpacity.setValue(0);
+    Animated.timing(speedHudOpacity, {
+      toValue: 1,
+      duration: FEED_CHROME_FADE_MS,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }
+
+  function hideSpeedHud() {
+    speedHudOpacity.stopAnimation();
+    Animated.timing(speedHudOpacity, {
+      toValue: 0,
+      duration: FEED_CHROME_FADE_MS,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }
+
+  function handleProfileTouchStart(locationX: number, pageY: number) {
+    clearChromeHoldTimer();
+    chromeTouchStartXRef.current = locationX;
+    chromeTouchStartYRef.current = pageY;
+    chromeTouchMovedRef.current = false;
+    chromePullProgressRef.current = 0;
+    chromeTouchInSpeedZoneRef.current = locationX >= viewportWidth * FEED_SPEED_ZONE_LEFT_RATIO;
+    if (menuOpen) return;
+    if (!chromeTouchInSpeedZoneRef.current && chromeLockedRef.current) return;
+
+    chromeHoldTimerRef.current = setTimeout(() => {
+      chromeHoldTimerRef.current = null;
+      if (chromeTouchMovedRef.current) return;
+
+      if (chromeTouchInSpeedZoneRef.current) {
+        speedHoldingRef.current = true;
+        speedDragBaseIndexRef.current = speedIndexRef.current;
+        applySpeedIndex(speedIndexRef.current);
+        showSpeedHud();
+        triggerHoldHaptic();
+        onSpeedHoldStart?.();
+        return;
+      }
+
+      if (chromeLockedRef.current) return;
+      chromeHoldingRef.current = true;
+      showChromeLockHud();
+      triggerHoldHaptic();
+      onChromeHoldStart?.();
+    }, FEED_CHROME_HOLD_MS);
+  }
+
+  function handleProfileTouchMove(pageY: number) {
+    const startY = chromeTouchStartYRef.current;
+    if (startY == null) return;
+    const dy = pageY - startY;
+
+    if (!chromeHoldingRef.current && !speedHoldingRef.current) {
+      if (Math.abs(dy) > 12) {
+        chromeTouchMovedRef.current = true;
+        clearChromeHoldTimer();
+      }
       return;
     }
 
-    togglePlayback();
+    if (speedHoldingRef.current) {
+      const nextIndex = Math.round(speedDragBaseIndexRef.current + dy / FEED_SPEED_SEGMENT_PX);
+      applySpeedIndex(nextIndex);
+      return;
+    }
+
+    const progress = Math.min(1, Math.max(0, dy / FEED_CHROME_LOCK_PULL_PX));
+    chromePullProgressRef.current = progress;
+    setChromePullProgress(progress);
+    setChromeLockHudSealed(progress >= 1);
+  }
+
+  function handleProfileTouchEnd() {
+    clearChromeHoldTimer();
+    const wasChromeHolding = chromeHoldingRef.current;
+    const wasSpeedHolding = speedHoldingRef.current;
+    chromeHoldingRef.current = false;
+    speedHoldingRef.current = false;
+    chromeTouchStartYRef.current = null;
+    chromeTouchStartXRef.current = null;
+
+    if (!wasChromeHolding && !wasSpeedHolding) return;
+
+    chromeSuppressPressRef.current = true;
+
+    if (wasSpeedHolding) {
+      hideSpeedHud();
+      onSpeedHoldEnd?.();
+      return;
+    }
+
+    hideChromeLockHud();
+
+    if (chromePullProgressRef.current >= 1 && !chromeLockedRef.current) {
+      onChromeLock?.();
+      return;
+    }
+
+    if (!chromeLockedRef.current) {
+      onChromeHoldEnd?.();
+    }
   }
 
   function togglePlayback() {
@@ -5442,19 +7048,17 @@ function ProfileVideoFullscreenModal({
     setPaused((current) => !current);
   }
 
-  function updateProfilePlaybackStatus(status: JamVideoPlaybackStatus) {
-    const hasStartedPlayback = status.isPlaying || status.positionMillis > 0;
-    const isReady = status.isLoaded || hasStartedPlayback;
-    setProfileBufferingState((current) => {
-      if (current.source !== source) {
-        return { source, loading: !isReady };
-      }
-      // Once this clip has started, keep the spinner off for rebuffers / app resume.
-      if (!current.loading || isReady) {
-        return current.loading ? { source, loading: false } : current;
-      }
-      return current;
-    });
+  function handleProfilePress() {
+    if (chromeSuppressPressRef.current) {
+      chromeSuppressPressRef.current = false;
+      return;
+    }
+    if (chromeLockedRef.current) {
+      onChromeUnlock?.();
+      return;
+    }
+    if (chromeHoldingRef.current || speedHoldingRef.current) return;
+    togglePlayback();
   }
 
   function runSaveAnimation() {
@@ -5508,21 +7112,659 @@ function ProfileVideoFullscreenModal({
     ]).start();
   }
 
-  function pressJam() {
-    if (!video) return;
+  function pressSave() {
+    const nextSaved = !saved;
+    setSaved(nextSaved);
+    if (nextSaved) runSaveAnimation();
+    onSave(video, nextSaved);
+  }
 
-    if (currentPendingSentJam) {
+  function pressJam() {
+    if (pendingJam) {
       runJamShakeAnimation();
       return;
     }
-
     onMessage(video);
   }
 
-  function runFullscreenMenuAction(action?: (video: ProfileVideo | FeedVideo) => void) {
-    if (!video || !action) return;
-    setMenuOpen(false);
-    action(video);
+  const videoFrameStyle = ownVideoActions
+    ? [styles.feedPreviewVideoClip, { bottom: ownProfileNavBarHeight }]
+    : [styles.feedVideoLayer, styles.feedVideoViewportClip, { bottom: videoBottomInset }];
+
+  return (
+    <Pressable
+      style={{ height, width: viewportWidth, backgroundColor: "#000" }}
+      onPress={handleProfilePress}
+      onPressIn={(event) =>
+        handleProfileTouchStart(event.nativeEvent.locationX, event.nativeEvent.pageY)
+      }
+      onTouchMove={(event) => handleProfileTouchMove(event.nativeEvent.pageY)}
+      onPressOut={handleProfileTouchEnd}
+      delayLongPress={FEED_CHROME_HOLD_MS + 400}
+    >
+      <View style={[videoFrameStyle, { backgroundColor: "#000" }]}>
+        {source ? (
+          <>
+            <JamVideoView
+              key={video.id}
+              source={source}
+              style={StyleSheet.absoluteFill}
+              contentFit={mediaContentFit}
+              knownWidth={rememberedAspect?.width ?? null}
+              knownHeight={rememberedAspect?.height ?? null}
+              shouldPlay={isActive && !paused}
+              isLooping
+              isMuted={!isActive}
+              volume={isActive ? 1 : 0}
+              playbackRate={playbackRate}
+              adoptPrewarmed={isActive}
+              onFirstFrameRender={revealFirstFrameFromGrey}
+              onContentFitChange={setMediaContentFit}
+            />
+            <VideoPresentationOverlays
+              filter={presentation.filter}
+              textOverlays={presentation.textOverlays}
+            />
+            {showGreyCover ? (
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  StyleSheet.absoluteFill,
+                  { backgroundColor: PROFILE_VIDEO_OPEN_GREY, opacity: greyCoverOpacity },
+                ]}
+              />
+            ) : null}
+          </>
+        ) : (
+          <View style={[StyleSheet.absoluteFill, styles.videoPlaceholder]}>
+            <Avatar uri={owner.avatarUrl} size={90} />
+            <Text style={styles.h2}>{owner.creatorName}</Text>
+            <Text style={styles.helper}>video unavailable</Text>
+          </View>
+        )}
+      </View>
+
+      {source && showWaitingSpinner ? (
+        <View pointerEvents="none" style={styles.videoBufferingIndicator}>
+          <ActivityIndicator color="#fff" />
+        </View>
+      ) : null}
+
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.feedChromeLockHud,
+          {
+            opacity: chromeLockHudOpacity,
+            bottom:
+              actionsBottom +
+              (56 + FEED_ACTION_GAP) * 2 +
+              56 / 2 -
+              (FEED_CHROME_LOCK_TRACK_TRAVEL + FEED_CHROME_LOCK_CIRCLE_SIZE / 2),
+          },
+        ]}
+      >
+        <View
+          style={[
+            styles.feedChromeLockTrack,
+            { height: FEED_CHROME_LOCK_TRACK_TRAVEL + FEED_CHROME_LOCK_CIRCLE_SIZE },
+          ]}
+        >
+          <View style={styles.feedChromeLockPath} />
+          <View
+            style={[
+              styles.feedChromeLockTarget,
+              {
+                opacity: 0.28 + chromePullProgress * 0.55,
+                transform: [{ scale: 0.92 + chromePullProgress * 0.08 }],
+              },
+            ]}
+          >
+            <FeedChromeLockIcon open={false} size={18} />
+          </View>
+          <View
+            style={[
+              styles.feedChromeLockKnob,
+              {
+                transform: [{ translateY: chromePullProgress * FEED_CHROME_LOCK_TRACK_TRAVEL }],
+              },
+            ]}
+          >
+            <FeedChromeLockIcon open={!chromeLockHudSealed && chromePullProgress < 0.92} size={20} />
+          </View>
+        </View>
+      </Animated.View>
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.feedSpeedHud,
+          {
+            opacity: speedHudOpacity,
+            top: viewportHeight / 2 - FEED_SPEED_PILL_HEIGHT / 2,
+            right: 18 + (56 - FEED_SPEED_PILL_WIDTH) / 2,
+          },
+        ]}
+      >
+        <View style={styles.feedSpeedPill}>
+          {FEED_PLAYBACK_SPEEDS.map((speed, index) => {
+            const selected = index === speedIndex;
+            return (
+              <View key={speed} style={styles.feedSpeedRow}>
+                <Text style={[styles.feedSpeedText, selected && styles.feedSpeedTextSelected]}>
+                  {speed}x
+                </Text>
+              </View>
+            );
+          })}
+        </View>
+      </Animated.View>
+
+      <Animated.View
+        pointerEvents={chromeInteractive ? "box-none" : "none"}
+        style={[styles.feedOverlayLayer, { opacity: overlayOpacity }]}
+      >
+        <LinearGradient
+          pointerEvents="none"
+          colors={["rgba(0,0,0,0.40)", "rgba(0,0,0,0)"]}
+          locations={[0, 1]}
+          style={styles.feedTopShade}
+        />
+        <LinearGradient
+          pointerEvents="none"
+          colors={["rgba(0,0,0,0)", "rgba(0,0,0,0.52)"]}
+          locations={[0.05, 1]}
+          style={[styles.feedBottomShade, { bottom: videoBottomInset }]}
+        />
+
+        <View style={[styles.feedMeta, { bottom: metaBottom }]} pointerEvents="box-none">
+          <View style={styles.row}>
+            <Avatar uri={owner.avatarUrl} size={52} />
+            <View style={styles.flex}>
+              <View style={styles.row}>
+                <Text style={styles.feedName}>{owner.creatorName}</Text>
+                {owner.proBadge ? <ProBadge kind={owner.proBadge} /> : null}
+                {connection ? <Text style={styles.badge}>{connection}</Text> : null}
+              </View>
+              <Text style={styles.feedRole}>
+                {owner.role} - {owner.location}
+              </Text>
+            </View>
+          </View>
+          {lookingFor || caption ? (
+            <View style={styles.feedCaptionRow}>
+              {lookingFor ? (
+                <View style={styles.feedLookingForIcon} accessibilityLabel="looking for collaborators">
+                  <LookingForIcon active size={19} shadow />
+                </View>
+              ) : null}
+              {caption ? <Text style={[styles.caption, styles.feedCaptionText]}>{caption}</Text> : null}
+            </View>
+          ) : null}
+          {tags.length > 0 ? (
+            <View style={styles.tags}>
+              {tags.map((tag, tagIndex) => (
+                <Text key={`${tag}-${tagIndex}`} style={styles.tag}>
+                  {tag}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+        </View>
+
+        <View style={[styles.actions, { bottom: actionsBottom }]} pointerEvents="box-none">
+          {ownVideoActions ? (
+            <View>
+              <Pressable onPress={() => setMenuOpen((current) => !current)} style={styles.actionButton}>
+                <Text style={styles.actionText}>⋯</Text>
+              </Pressable>
+              {menuOpen ? (
+                <View style={styles.videoMenu}>
+                  <Pressable
+                    style={styles.videoMenuItem}
+                    onPress={() => {
+                      setMenuOpen(false);
+                      ownVideoActions.onDelete(video);
+                    }}
+                  >
+                    <Text style={styles.videoMenuDangerText}>delete</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
+          ) : (
+            <>
+              <Pressable
+                onPress={pressJam}
+                style={styles.actionButton}
+                accessibilityLabel={
+                  feedItem?.mutual
+                    ? `Message ${owner.creatorName} about this video`
+                    : pendingJam
+                      ? `Jam already sent to ${owner.creatorName}`
+                      : `Jam with ${owner.creatorName}`
+                }
+                accessibilityRole="button"
+                accessibilityState={{ selected: hasJam }}
+              >
+                <Animated.View
+                  style={{
+                    transform: [
+                      {
+                        translateX: jamShake.interpolate({
+                          inputRange: [-1, 0, 1],
+                          outputRange: [-5, 0, 5],
+                        }),
+                      },
+                      {
+                        rotate: jamShake.interpolate({
+                          inputRange: [-1, 0, 1],
+                          outputRange: ["-7deg", "0deg", "7deg"],
+                        }),
+                      },
+                    ],
+                  }}
+                >
+                  <JamJarIcon filled={hasJam} />
+                </Animated.View>
+              </Pressable>
+              <Pressable
+                onPress={pressSave}
+                style={styles.actionButton}
+                accessibilityRole="button"
+                accessibilityLabel={saved ? "Remove from saved" : "Save video"}
+                accessibilityState={{ selected: saved }}
+              >
+                <Animated.View style={{ transform: [{ scale: heartScale }] }}>
+                  <BookmarkIcon filled={saved} />
+                </Animated.View>
+              </Pressable>
+              {showModerationMenu ? (
+                <Pressable
+                  onPress={() => setMenuOpen((current) => !current)}
+                  style={styles.actionButton}
+                  accessibilityLabel={`More options for ${owner.creatorName}`}
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: menuOpen }}
+                >
+                  <Text style={[styles.actionText, styles.actionDotsText]}>⋯</Text>
+                </Pressable>
+              ) : null}
+            </>
+          )}
+        </View>
+
+        {ownVideoActions ? (
+          <View
+            pointerEvents="none"
+            style={[styles.createPostPreviewNavBarPlaceholder, { height: ownProfileNavBarHeight }]}
+          />
+        ) : null}
+      </Animated.View>
+
+      <Modal
+        animationType="slide"
+        transparent
+        visible={Boolean(menuOpen && !ownVideoActions)}
+        onRequestClose={() => setMenuOpen(false)}
+      >
+        <View style={styles.feedMoreSheetWrap}>
+          <Pressable
+            style={styles.feedMoreSheetDismiss}
+            onPress={() => setMenuOpen(false)}
+            accessibilityLabel="Close video options"
+          />
+          <View style={styles.feedMoreSheetCard}>
+            <Pressable
+              style={styles.feedMoreMenuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                onNotInterested?.(video);
+              }}
+            >
+              <Text style={styles.feedMoreMenuText}>Not interested</Text>
+            </Pressable>
+            <Pressable
+              style={styles.feedMoreMenuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                onBlock?.(video);
+              }}
+            >
+              <Text style={styles.feedMoreMenuDangerText}>Block</Text>
+            </Pressable>
+            <Pressable
+              style={styles.feedMoreMenuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                onReport?.(video);
+              }}
+            >
+              <Text style={styles.feedMoreMenuText}>Report</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+    </Pressable>
+  );
+}
+
+function ProfileVideoFullscreenModal({
+  visible,
+  videos,
+  initialIndex,
+  owner,
+  saved,
+  presentation = "modal",
+  onClose,
+  onSave,
+  onMessage,
+  getSavedForVideo,
+  getOwnerForVideo,
+  ownVideoActions,
+  onNotInterested,
+  onBlock,
+  onReport,
+  onSendMessage,
+}: {
+  visible: boolean;
+  videos: Array<ProfileVideo | FeedVideo>;
+  initialIndex: number;
+  owner: {
+    creatorName: string;
+    role: string;
+    location: string;
+    avatarUrl: string | null;
+    earlyAdopter: boolean;
+    proBadge?: ProBadgeKind | null;
+  };
+  saved: boolean;
+  presentation?: "modal" | "overlay";
+  onClose: () => void;
+  onSave: (video: ProfileVideo | FeedVideo, nextSaved: boolean) => void;
+  onMessage: (video: ProfileVideo | FeedVideo) => void;
+  getSavedForVideo?: (video: ProfileVideo | FeedVideo) => boolean;
+  ownVideoActions?: {
+    onDelete: (video: ProfileVideo | FeedVideo) => void;
+  };
+  onNotInterested?: (video: ProfileVideo | FeedVideo) => void;
+  onBlock?: (video: ProfileVideo | FeedVideo) => void;
+  onReport?: (video: ProfileVideo | FeedVideo) => void;
+  onSendMessage?: (video: ProfileVideo | FeedVideo, body: string) => Promise<void>;
+  getOwnerForVideo?: (video: ProfileVideo | FeedVideo) => {
+    creatorName: string;
+    role: string;
+    location: string;
+    avatarUrl: string | null;
+    earlyAdopter: boolean;
+    proBadge?: ProBadgeKind | null;
+  };
+}) {
+  const wasVisibleRef = useRef(false);
+  const listRef = useRef<FlatList<ProfileVideo | FeedVideo>>(null);
+  const [index, setIndex] = useState(initialIndex);
+  const [sessionVideos, setSessionVideos] = useState<Array<ProfileVideo | FeedVideo>>(videos);
+  const [activeVideoId, setActiveVideoId] = useState<string | null>(
+    videos[initialIndex]?.id ?? videos[0]?.id ?? null,
+  );
+  const [messageDraft, setMessageDraft] = useState("");
+  const [messageInputFocused, setMessageInputFocused] = useState(false);
+  const messageInputRef = useRef<TextInput>(null);
+  const [messageSending, setMessageSending] = useState(false);
+  const [messageSentTickVisible, setMessageSentTickVisible] = useState(false);
+  const [messageSentTickScale] = useState(() => new Animated.Value(0));
+  const [messageSendButtonWidth] = useState(() => new Animated.Value(FULLSCREEN_MESSAGE_SEND_WIDTH));
+  const [keyboardOffset, setKeyboardOffset] = useState(0);
+  const [translateX] = useState(() => new Animated.Value(0));
+  const [horizontalTranslateY] = useState(() => new Animated.Value(0));
+  const chromeOpacity = useRef(new Animated.Value(1)).current;
+  const chromeLockedRef = useRef(false);
+  const [chromeHolding, setChromeHolding] = useState(false);
+  const [chromeLocked, setChromeLocked] = useState(false);
+  const [speedHolding, setSpeedHolding] = useState(false);
+  const insets = useSafeAreaInsets();
+  const activeVideos = visible ? sessionVideos : videos;
+  const pageHeight = viewportHeight;
+  const video = activeVideos[index] ?? activeVideos[0] ?? null;
+  const showMessageBar = Boolean(onSendMessage && !ownVideoActions);
+  const messageBarHeight = getNavBarHeight(insets.bottom);
+  const messageBarInset = showMessageBar ? messageBarHeight + keyboardOffset : 0;
+  const ownProfileNavBarHeight = ownVideoActions ? messageBarHeight : 0;
+  // Always reserve bottom chrome on first paint (never mount full-bleed then inset).
+  const videoBottomInset = showMessageBar ? messageBarInset : ownProfileNavBarHeight;
+  const actionsBottom = videoBottomInset + FEED_ACTION_GAP;
+  const metaBottom = showMessageBar ? messageBarInset + 30 : 122;
+  const currentFeedItem = video ? profileVideoToFeedVideo(video) : null;
+  const currentPendingSentJam = Boolean(currentFeedItem && isPendingSentJam(currentFeedItem));
+  const chromeInteractive = !chromeHolding && !chromeLocked;
+  const safeInitialIndex = Math.min(
+    Math.max(initialIndex, 0),
+    Math.max(activeVideos.length - 1, 0),
+  );
+
+  // Keep nearby fullscreen pages aspect-warmed so swipe doesn't cover→contain flash.
+  useEffect(() => {
+    if (!visible) return;
+    for (const offset of [-1, 0, 1, 2]) {
+      const entry = activeVideos[index + offset] ?? activeVideos[safeInitialIndex + offset];
+      if (entry) void ensureVideoAspectCached(entry);
+    }
+  }, [activeVideos, index, safeInitialIndex, visible]);
+
+  const animateChrome = useCallback(
+    (nextVisible: boolean) => {
+      chromeOpacity.stopAnimation();
+      Animated.timing(chromeOpacity, {
+        toValue: nextVisible ? 1 : 0,
+        duration: FEED_CHROME_FADE_MS,
+        easing: Easing.inOut(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    },
+    [chromeOpacity],
+  );
+
+  const restoreChrome = useCallback(() => {
+    chromeLockedRef.current = false;
+    setChromeLocked(false);
+    setChromeHolding(false);
+    animateChrome(true);
+  }, [animateChrome]);
+
+  const handleChromeHoldStart = useCallback(() => {
+    if (chromeLockedRef.current) return;
+    setChromeHolding(true);
+    animateChrome(false);
+  }, [animateChrome]);
+
+  const handleChromeHoldEnd = useCallback(() => {
+    setChromeHolding(false);
+    if (chromeLockedRef.current) return;
+    animateChrome(true);
+  }, [animateChrome]);
+
+  const handleChromeLock = useCallback(() => {
+    chromeLockedRef.current = true;
+    setChromeLocked(true);
+    setChromeHolding(false);
+    animateChrome(false);
+  }, [animateChrome]);
+
+  const handleChromeUnlock = useCallback(() => {
+    restoreChrome();
+  }, [restoreChrome]);
+
+  const handleSpeedHoldStart = useCallback(() => {
+    setSpeedHolding(true);
+  }, []);
+
+  const handleSpeedHoldEnd = useCallback(() => {
+    setSpeedHolding(false);
+  }, []);
+
+  const clampedTranslateX = useMemo(
+    () =>
+      translateX.interpolate({
+        inputRange: [-1, 0, viewportWidth],
+        outputRange: [0, 0, viewportWidth],
+        extrapolate: "clamp",
+      }),
+    [translateX],
+  );
+
+  const onHorizontalGestureEvent = useMemo(
+    () =>
+      Animated.event(
+        [
+          {
+            nativeEvent: {
+              translationX: translateX,
+              translationY: horizontalTranslateY,
+            },
+          },
+        ],
+        { useNativeDriver: true },
+      ),
+    [horizontalTranslateY, translateX],
+  );
+
+  useEffect(() => {
+    if (!visible) {
+      wasVisibleRef.current = false;
+      return;
+    }
+    if (wasVisibleRef.current) return;
+
+    wasVisibleRef.current = true;
+    const nextIndex = Math.min(Math.max(initialIndex, 0), Math.max(videos.length - 1, 0));
+    const frame = requestAnimationFrame(() => {
+      setSessionVideos(
+        videos.map((entry) => ({
+          ...entry,
+          savedByMe: getSavedForVideo?.(entry) ?? entry.savedByMe ?? saved,
+        })),
+      );
+      setIndex(nextIndex);
+      setActiveVideoId(videos[nextIndex]?.id ?? videos[0]?.id ?? null);
+      setMessageDraft("");
+      setMessageInputFocused(false);
+      setMessageSentTickVisible(false);
+      messageSentTickScale.setValue(0);
+      messageSendButtonWidth.setValue(FULLSCREEN_MESSAGE_SEND_WIDTH);
+      translateX.setValue(0);
+      horizontalTranslateY.setValue(0);
+      restoreChrome();
+      listRef.current?.scrollToOffset({
+        offset: nextIndex * pageHeight,
+        animated: false,
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [
+    getSavedForVideo,
+    horizontalTranslateY,
+    initialIndex,
+    messageSendButtonWidth,
+    messageSentTickScale,
+    pageHeight,
+    restoreChrome,
+    saved,
+    translateX,
+    videos,
+    visible,
+  ]);
+
+  useEffect(() => {
+    if (!visible) return;
+    setMessageDraft("");
+    setMessageInputFocused(false);
+    setMessageSentTickVisible(false);
+    messageSentTickScale.setValue(0);
+    messageSendButtonWidth.setValue(FULLSCREEN_MESSAGE_SEND_WIDTH);
+    restoreChrome();
+  }, [activeVideoId, messageSendButtonWidth, messageSentTickScale, restoreChrome, visible]);
+
+  useEffect(() => {
+    if (!visible || !showMessageBar) {
+      setKeyboardOffset(0);
+      return;
+    }
+
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const showSubscription = Keyboard.addListener(showEvent, (event) => {
+      setKeyboardOffset(Math.max(0, viewportHeight - event.endCoordinates.screenY));
+    });
+    const hideSubscription = Keyboard.addListener(hideEvent, () => {
+      setKeyboardOffset(0);
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, [showMessageBar, visible]);
+
+  function updateActiveFromScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
+    const nextIndex = Math.round(event.nativeEvent.contentOffset.y / pageHeight);
+    const safeIndex = Math.max(0, Math.min(nextIndex, activeVideos.length - 1));
+    const nextVideo = activeVideos[safeIndex];
+    if (!nextVideo) return;
+    setIndex(safeIndex);
+    setActiveVideoId(nextVideo.id);
+  }
+
+  function handleHorizontalStateChange(event: PanGestureHandlerStateChangeEvent) {
+    const state = event.nativeEvent.state;
+    if (state !== State.END && state !== State.CANCELLED && state !== State.FAILED) return;
+
+    const { translationX, translationY, velocityX } = event.nativeEvent;
+    // Slightly eager dismiss so it's easier to swipe back off a video.
+    const shouldClose =
+      state === State.END &&
+      translationX > 28 &&
+      Math.abs(translationY) < 110 &&
+      (translationX > viewportWidth * 0.22 || velocityX > 480);
+
+    if (!shouldClose) {
+      Animated.parallel([
+        Animated.spring(translateX, {
+          toValue: 0,
+          damping: 24,
+          stiffness: 230,
+          mass: 0.8,
+          useNativeDriver: true,
+        }),
+        Animated.spring(horizontalTranslateY, {
+          toValue: 0,
+          damping: 24,
+          stiffness: 230,
+          mass: 0.8,
+          useNativeDriver: true,
+        }),
+      ]).start();
+      return;
+    }
+
+    Animated.parallel([
+      Animated.timing(translateX, {
+        toValue: viewportWidth,
+        duration: 170,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(horizontalTranslateY, {
+        toValue: translationY,
+        duration: 170,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(onClose);
+  }
+
+  function dismissMessageInput() {
+    messageInputRef.current?.blur();
+    Keyboard.dismiss();
+    setMessageInputFocused(false);
   }
 
   function runMessageSentAnimation() {
@@ -5561,10 +7803,7 @@ function ProfileVideoFullscreenModal({
     const body = messageDraft.trim();
     if (!video || !body || !onSendMessage || messageSending) return;
 
-    if (currentPendingSentJam) {
-      runJamShakeAnimation();
-      return;
-    }
+    if (currentPendingSentJam) return;
 
     setMessageSending(true);
     try {
@@ -5593,285 +7832,112 @@ function ProfileVideoFullscreenModal({
     }
   }
 
+  function handleSave(nextVideo: ProfileVideo | FeedVideo, nextSaved: boolean) {
+    setSessionVideos((current) =>
+      current.map((entry) =>
+        entry.id === nextVideo.id
+          ? {
+              ...entry,
+              savedByMe: nextSaved,
+            }
+          : entry,
+      ),
+    );
+    onSave(nextVideo, nextSaved);
+  }
+
   if (!visible) return null;
 
   const content = (
     <View style={styles.fullscreenMessageRoot}>
       <PanGestureHandler
-        minDist={20}
-        onGestureEvent={handleGestureEvent}
-        onHandlerStateChange={handleGestureStateChange}
+        activeOffsetX={14}
+        failOffsetY={[-22, 22]}
+        onGestureEvent={onHorizontalGestureEvent}
+        onHandlerStateChange={handleHorizontalStateChange}
       >
         <Animated.View
           style={[
             styles.fullscreenVideoRoot,
-            { transform: [{ translateY: animatedTranslateY }] },
+            {
+              transform: [
+                { translateX: clampedTranslateX },
+                { translateY: horizontalTranslateY },
+              ],
+            },
           ]}
         >
-          {fullscreenCells.map((cell) => {
-            const cellSource = getGridVideoSource(cell.video);
-            const isCurrentCell = cell.offset === 0;
-            const cellOwner = getOwnerForVideo ? getOwnerForVideo(cell.video) : owner;
-            const cellFeedItem = profileVideoToFeedVideo(cell.video);
-            const cellConnection = cellFeedItem?.mutual
-              ? "jamming"
-              : cellFeedItem?.jammedMe
-                ? "jammed you"
-                : null;
-            const cellHasSentJam = Boolean(cellFeedItem && hasSentJam(cellFeedItem));
-            const cellPendingSentJam = Boolean(cellFeedItem && isPendingSentJam(cellFeedItem));
-            const cellSaved = isCurrentCell
-              ? savedLocal
-              : getSavedForVideo?.(cell.video) ?? saved;
-            const cellCaption = getVideoCaption(cell.video);
-            const cellTags = getProfileFullscreenTags(cell.video);
-            const showModerationMenu = Boolean(onNotInterested && onBlock && onReport);
-            return (
-              <Animated.View
-                key={cell.video.id}
-                pointerEvents={isCurrentCell ? "auto" : "none"}
-                style={[
-                  styles.fullscreenAdjacentVideo,
-                  { top: cell.offset },
-                  isCurrentCell && styles.fullscreenCurrentVideo,
-                  isCurrentCell && {
-                    transform: [
-                      { translateX: animatedTranslateX },
-                      { translateY: animatedHorizontalTranslateY },
-                    ],
-                  },
-                ]}
-              >
-                {ownVideoActions ? (
-                  <View style={[styles.feedPreviewVideoClip, { bottom: ownProfileNavBarHeight }]}>
-                    {cellSource ? (
-                      <JamVideoView
-                        source={cellSource}
-                        style={StyleSheet.absoluteFill}
-                        contentFit="cover"
-                        shouldPlay={isCurrentCell && !paused}
-                        isLooping
-                        isMuted={!isCurrentCell}
-                        volume={isCurrentCell ? 1 : 0}
-                        onPlaybackStatusUpdate={isCurrentCell ? updateProfilePlaybackStatus : undefined}
-                      />
-                    ) : (
-                      <View style={[StyleSheet.absoluteFill, styles.videoPlaceholder]}>
-                        <Avatar uri={cellOwner.avatarUrl} size={90} />
-                        <Text style={styles.h2}>{cellOwner.creatorName}</Text>
-                        <Text style={styles.helper}>video unavailable</Text>
-                      </View>
-                    )}
-                    <VideoPresentationOverlays
-                      filter={getVideoPresentation(cell.video).filter}
-                      textOverlays={getVideoPresentation(cell.video).textOverlays}
-                    />
-                    <Pressable style={StyleSheet.absoluteFill} onPress={handleVideoBackgroundPress} />
-                    <View style={styles.feedShade} pointerEvents="none" />
-                  </View>
-                ) : (
-                  <>
-                    {cellSource ? (
-                      <JamVideoView
-                        source={cellSource}
-                        style={[StyleSheet.absoluteFill, videoBottomInset > 0 && { bottom: videoBottomInset }]}
-                        contentFit="cover"
-                        shouldPlay={isCurrentCell && !paused}
-                        isLooping
-                        isMuted={!isCurrentCell}
-                        volume={isCurrentCell ? 1 : 0}
-                        onPlaybackStatusUpdate={isCurrentCell ? updateProfilePlaybackStatus : undefined}
-                      />
-                    ) : (
-                      <View
-                        style={[
-                          StyleSheet.absoluteFill,
-                          videoBottomInset > 0 && { bottom: videoBottomInset },
-                          styles.videoPlaceholder,
-                        ]}
-                      >
-                        <Avatar uri={cellOwner.avatarUrl} size={90} />
-                        <Text style={styles.h2}>{cellOwner.creatorName}</Text>
-                        <Text style={styles.helper}>video unavailable</Text>
-                      </View>
-                    )}
-                    <VideoPresentationOverlays
-                      filter={getVideoPresentation(cell.video).filter}
-                      textOverlays={getVideoPresentation(cell.video).textOverlays}
-                      style={videoBottomInset > 0 ? { bottom: videoBottomInset } : undefined}
-                    />
-                    <Pressable
-                      style={[StyleSheet.absoluteFill, videoBottomInset > 0 && { bottom: videoBottomInset }]}
-                      onPress={handleVideoBackgroundPress}
-                    />
-                    <View
-                      style={[styles.feedShade, videoBottomInset > 0 && { bottom: videoBottomInset }]}
-                      pointerEvents="none"
-                    />
-                  </>
-                )}
-                <View style={[styles.feedMeta, { bottom: metaBottom }]}>
-                  <View style={styles.row}>
-                    <Avatar uri={cellOwner.avatarUrl} size={52} />
-                    <View style={styles.flex}>
-                      <View style={styles.row}>
-                        <Text style={styles.feedName}>{cellOwner.creatorName}</Text>
-                        {cellOwner.proBadge ? <ProBadge kind={cellOwner.proBadge} /> : null}
-                        {cellConnection && <Text style={styles.badge}>{cellConnection}</Text>}
-                      </View>
-                      <Text style={styles.feedRole}>{cellOwner.role} - {cellOwner.location}</Text>
-                    </View>
-                  </View>
-                  {cellCaption ? <Text style={styles.caption}>{cellCaption}</Text> : null}
-                  {cellTags.length > 0 ? (
-                    <View style={styles.tags}>
-                      {cellTags.map((tag, index) => (
-                        <Text key={`${tag}-${index}`} style={styles.tag}>{tag}</Text>
-                      ))}
-                    </View>
-                  ) : null}
-                </View>
-                <View style={[styles.actions, { bottom: actionsBottom }]}>
-                  {ownVideoActions ? (
-                    <View>
-                      <Pressable onPress={() => setMenuOpen((current) => !current)} style={styles.actionButton}>
-                        <Text style={styles.actionText}>⋯</Text>
-                      </Pressable>
-                      {isCurrentCell && menuOpen && (
-                        <View style={styles.videoMenu}>
-                          <Pressable
-                            style={styles.videoMenuItem}
-                            onPress={() => {
-                              setMenuOpen(false);
-                              ownVideoActions.onDelete(cell.video);
-                            }}
-                          >
-                            <Text style={styles.videoMenuDangerText}>delete</Text>
-                          </Pressable>
-                        </View>
-                      )}
-                    </View>
-                  ) : (
-                    <>
-                      <Pressable
-                        onPress={pressJam}
-                        style={styles.actionButton}
-                        accessibilityLabel={
-                          cellFeedItem?.mutual
-                            ? `Message ${cellOwner.creatorName} about this video`
-                            : cellPendingSentJam
-                              ? `Jam already sent to ${cellOwner.creatorName}`
-                              : `Jam with ${cellOwner.creatorName}`
-                        }
-                        accessibilityRole="button"
-                        accessibilityState={{ selected: cellHasSentJam }}
-                      >
-                        <Animated.View
-                          style={{
-                            transform: isCurrentCell
-                              ? [
-                                  {
-                                    translateX: jamShake.interpolate({
-                                      inputRange: [-1, 0, 1],
-                                      outputRange: [-5, 0, 5],
-                                    }),
-                                  },
-                                  {
-                                    rotate: jamShake.interpolate({
-                                      inputRange: [-1, 0, 1],
-                                      outputRange: ["-7deg", "0deg", "7deg"],
-                                    }),
-                                  },
-                                ]
-                              : [],
-                          }}
-                        >
-                          <JamJarIcon filled={cellHasSentJam} />
-                        </Animated.View>
-                      </Pressable>
-                      <Pressable
-                        onPress={pressSave}
-                        style={styles.actionButton}
-                        accessibilityRole="button"
-                        accessibilityLabel={cellSaved ? "Remove from saved" : "Save video"}
-                        accessibilityState={{ selected: cellSaved }}
-                      >
-                        <Animated.View
-                          style={isCurrentCell ? { transform: [{ scale: heartScale }] } : undefined}
-                        >
-                          <BookmarkIcon filled={cellSaved} />
-                        </Animated.View>
-                      </Pressable>
-                      {showModerationMenu && (
-                        <Pressable
-                          onPress={() => setMenuOpen((current) => !current)}
-                          style={styles.actionButton}
-                          accessibilityLabel={`More options for ${cellOwner.creatorName}`}
-                          accessibilityRole="button"
-                          accessibilityState={{ expanded: isCurrentCell && menuOpen }}
-                        >
-                          <Text style={[styles.actionText, styles.actionDotsText]}>⋯</Text>
-                        </Pressable>
-                      )}
-                    </>
-                  )}
-                </View>
-                {ownVideoActions ? (
-                  <View
-                    pointerEvents="none"
-                    style={[styles.createPostPreviewNavBarPlaceholder, { height: ownProfileNavBarHeight }]}
-                  />
-                ) : null}
-              </Animated.View>
-            );
-          })}
-          {source &&
-            profileBufferingState.source === source &&
-            profileBufferingState.loading &&
-            delayedProfileLoadingSource === source && (
-            <View pointerEvents="none" style={styles.videoBufferingIndicator}>
-              <ActivityIndicator color="#fff" />
-            </View>
-          )}
-          <Modal animationType="slide" transparent visible={Boolean(menuOpen && !ownVideoActions && video)} onRequestClose={() => setMenuOpen(false)}>
-            <View style={styles.feedMoreSheetWrap}>
-              <Pressable
-                style={styles.feedMoreSheetDismiss}
-                onPress={() => setMenuOpen(false)}
-                accessibilityLabel="Close video options"
+          <FlatList
+            ref={listRef}
+            data={activeVideos}
+            keyExtractor={(item) => item.id}
+            style={{ flex: 1 }}
+            pagingEnabled
+            scrollEnabled={!chromeHolding && !speedHolding}
+            decelerationRate="fast"
+            disableIntervalMomentum
+            showsVerticalScrollIndicator={false}
+            windowSize={5}
+            maxToRenderPerBatch={3}
+            initialNumToRender={2}
+            initialScrollIndex={safeInitialIndex}
+            getItemLayout={(_, itemIndex) => ({
+              length: pageHeight,
+              offset: pageHeight * itemIndex,
+              index: itemIndex,
+            })}
+            onScrollToIndexFailed={(info) => {
+              listRef.current?.scrollToOffset({
+                offset: info.index * pageHeight,
+                animated: false,
+              });
+            }}
+            onMomentumScrollEnd={updateActiveFromScroll}
+            onScrollBeginDrag={() => {
+              if (showMessageBar && (keyboardOffset > 0 || messageInputFocused)) {
+                dismissMessageInput();
+              }
+            }}
+            renderItem={({ item }) => (
+              <ProfileFullscreenFeedItem
+                video={item}
+                height={pageHeight}
+                owner={getOwnerForVideo ? getOwnerForVideo(item) : owner}
+                isActive={visible && item.id === activeVideoId}
+                videoBottomInset={videoBottomInset}
+                actionsBottom={actionsBottom}
+                metaBottom={metaBottom}
+                ownProfileNavBarHeight={ownProfileNavBarHeight}
+                ownVideoActions={ownVideoActions}
+                chromeOpacity={chromeOpacity}
+                chromeHolding={chromeHolding}
+                chromeLocked={chromeLocked}
+                onChromeHoldStart={handleChromeHoldStart}
+                onChromeHoldEnd={handleChromeHoldEnd}
+                onChromeLock={handleChromeLock}
+                onChromeUnlock={handleChromeUnlock}
+                onSpeedHoldStart={handleSpeedHoldStart}
+                onSpeedHoldEnd={handleSpeedHoldEnd}
+                onSave={handleSave}
+                onMessage={onMessage}
+                onNotInterested={onNotInterested}
+                onBlock={onBlock}
+                onReport={onReport}
               />
-              <View style={styles.feedMoreSheetCard}>
-                <Pressable
-                  style={styles.feedMoreMenuItem}
-                  onPress={() => runFullscreenMenuAction(onNotInterested)}
-                >
-                  <Text style={styles.feedMoreMenuText}>Not interested</Text>
-                </Pressable>
-                <Pressable
-                  style={styles.feedMoreMenuItem}
-                  onPress={() => runFullscreenMenuAction(onBlock)}
-                >
-                  <Text style={styles.feedMoreMenuDangerText}>Block</Text>
-                </Pressable>
-                <Pressable
-                  style={styles.feedMoreMenuItem}
-                  onPress={() => runFullscreenMenuAction(onReport)}
-                >
-                  <Text style={styles.feedMoreMenuText}>Report</Text>
-                </Pressable>
-              </View>
-            </View>
-          </Modal>
+            )}
+          />
         </Animated.View>
       </PanGestureHandler>
-      {showMessageBar && (
-        <View
+      {showMessageBar ? (
+        <Animated.View
+          pointerEvents={chromeInteractive ? "box-none" : "none"}
           style={[
             styles.fullscreenMessageBar,
             {
               height: messageBarHeight,
               bottom: keyboardOffset,
               paddingBottom: Math.max(insets.bottom, 12),
+              opacity: chromeOpacity,
             },
           ]}
         >
@@ -5914,8 +7980,8 @@ function ProfileVideoFullscreenModal({
               )}
             </Pressable>
           </Animated.View>
-        </View>
-      )}
+        </Animated.View>
+      ) : null}
     </View>
   );
 
@@ -6148,16 +8214,16 @@ function ConfirmModal({
 }) {
   return (
     <Modal animationType="fade" transparent visible={visible} onRequestClose={onCancel}>
-      <View style={styles.jamPromptOverlay}>
+      <View style={styles.confirmModalOverlay}>
         <Pressable style={styles.jamPromptShade} onPress={onCancel} />
-        <View style={styles.jamPromptCard}>
-          <Text style={styles.cardTitle}>{title}</Text>
-          {message ? <Text style={styles.helper}>{message}</Text> : null}
-          <View style={styles.twoCol}>
-            <Pressable style={styles.confirmOption} onPress={onCancel}>
+        <View style={styles.confirmModalCard}>
+          <Text style={styles.confirmModalTitle}>{title}</Text>
+          {message ? <Text style={styles.confirmModalMessage}>{message}</Text> : null}
+          <View style={styles.confirmModalActions}>
+            <Pressable style={styles.confirmModalOption} onPress={onCancel}>
               <Text style={styles.confirmOptionCancelText}>cancel</Text>
             </Pressable>
-            <Pressable style={styles.confirmOption} onPress={onConfirm}>
+            <Pressable style={styles.confirmModalOption} onPress={onConfirm}>
               <Text style={styles.confirmOptionDangerText}>{confirmLabel}</Text>
             </Pressable>
           </View>
@@ -6575,31 +8641,16 @@ function CreateTrimFilmstrip({
   );
 }
 
-function getCreatePostPreviewFilterStyle(filter: VideoFilter): ViewStyle {
-  switch (filter) {
-    case "warm":
-      return { backgroundColor: "rgba(251,146,60,0.11)" };
-    case "cool":
-      return { backgroundColor: "rgba(96,165,250,0.11)" };
-    case "fade":
-      return { backgroundColor: "rgba(255,255,255,0.08)" };
-    case "noir":
-      return { backgroundColor: "rgba(0,0,0,0.2)" };
-    case "vivid":
-      return { backgroundColor: "rgba(236,72,153,0.1)" };
-    case "none":
-    default:
-      return {};
-  }
-}
-
 function CreatePostPreviewModal({
   visible,
   onClose,
   videoUri,
+  videoWidth = null,
+  videoHeight = null,
   filter,
   textOverlays,
   caption,
+  lookingFor = false,
   profile,
   roles,
   genres,
@@ -6609,9 +8660,12 @@ function CreatePostPreviewModal({
   visible: boolean;
   onClose: () => void;
   videoUri: string | null;
+  videoWidth?: number | null;
+  videoHeight?: number | null;
   filter: VideoFilter;
   textOverlays: CreateTextOverlayItem[];
   caption: string;
+  lookingFor?: boolean;
   profile: Profile | null;
   roles: string[];
   genres: string[];
@@ -6654,7 +8708,8 @@ function CreatePostPreviewModal({
             <JamVideoView
               source={videoUri}
               style={styles.createPostPreviewVideo}
-              contentFit="cover"
+              knownWidth={videoWidth}
+              knownHeight={videoHeight}
               shouldPlay
               isLooping
               isMuted={false}
@@ -6665,7 +8720,7 @@ function CreatePostPreviewModal({
             {filter !== "none" && (
               <View
                 pointerEvents="none"
-                style={[styles.createPostPreviewFilter, getCreatePostPreviewFilterStyle(filter)]}
+                style={[styles.createPostPreviewFilter, getVideoFilterOverlayStyle(filter)]}
               />
             )}
             <View pointerEvents="none" style={styles.createPostPreviewShade} />
@@ -6674,6 +8729,21 @@ function CreatePostPreviewModal({
             const previewTextSize = previewTextSizes[overlay.id] ?? { width: 0, height: 0 };
             const previewTextLeft = previewFrameSize.width * overlay.centerRatio.x - previewTextSize.width / 2;
             const previewTextTop = previewVideoHeight * overlay.centerRatio.y - previewTextSize.height / 2;
+            const previewFontSize = getCreateTextOverlayFontSize(
+              clampTextOverlayFontScale(overlay.fontScale),
+            );
+            const previewLineHeight = getCreateTextOverlayLineHeight(previewFontSize);
+            const previewMaxWidth = Math.max(120, previewFrameSize.width * TEXT_OVERLAY_MAX_WIDTH_RATIO);
+            const previewFontFamily = getVideoTextOverlayFontFamily(overlay.fontId);
+            const previewFontWeight = getVideoTextOverlayFontWeight(overlay.fontId);
+            const previewChrome = getVideoTextEffectChrome(overlay.effectId, {
+              fontSize: previewFontSize,
+              density: "edit",
+            });
+            const previewTextMaxWidth = Math.max(
+              48,
+              previewMaxWidth - previewChrome.paddingHorizontal * 2,
+            );
 
             return (
               <View
@@ -6681,7 +8751,12 @@ function CreatePostPreviewModal({
                 pointerEvents="none"
                 style={[
                   styles.createPostPreviewTextOverlay,
-                  { left: previewTextLeft, top: previewTextTop },
+                  {
+                    left: previewTextLeft,
+                    top: previewTextTop,
+                    maxWidth: previewMaxWidth,
+                    overflow: "visible",
+                  },
                 ]}
                 onLayout={(event) => {
                   const { width, height } = event.nativeEvent.layout;
@@ -6692,7 +8767,23 @@ function CreatePostPreviewModal({
                   });
                 }}
               >
-                <Text style={styles.createPostPreviewTextOverlayText}>{overlay.text.trim()}</Text>
+                <VideoTextOverlayGlyph
+                  text={overlay.text.trim()}
+                  effectId={overlay.effectId}
+                  density="edit"
+                  textStyle={[
+                    styles.createPostPreviewTextOverlayText,
+                    {
+                      fontSize: previewFontSize,
+                      lineHeight: previewLineHeight,
+                      maxWidth: previewTextMaxWidth,
+                      fontFamily: previewFontFamily,
+                      ...(previewFontWeight
+                        ? { fontWeight: previewFontWeight }
+                        : { fontWeight: undefined }),
+                    },
+                  ]}
+                />
               </View>
             );
           })}
@@ -6709,7 +8800,18 @@ function CreatePostPreviewModal({
                 </Text>
               </View>
             </View>
-            {trimmedCaption ? <Text style={styles.caption}>{trimmedCaption}</Text> : null}
+            {lookingFor || trimmedCaption ? (
+              <View style={styles.feedCaptionRow}>
+                {lookingFor ? (
+                  <View style={styles.feedLookingForIcon} accessibilityLabel="looking for collaborators">
+                    <LookingForIcon active size={19} shadow />
+                  </View>
+                ) : null}
+                {trimmedCaption ? (
+                  <Text style={[styles.caption, styles.feedCaptionText]}>{trimmedCaption}</Text>
+                ) : null}
+              </View>
+            ) : null}
             {visibleTags.length > 0 ? (
               <View style={styles.tags}>
                 {visibleTags.map((tag) => (
@@ -6740,20 +8842,36 @@ function CreatePostPreviewModal({
 const CreateEditTextOverlayInput = memo(function CreateEditTextOverlayInput({
   initialText,
   inputRef,
+  fontSize,
+  lineHeight,
+  maxWidth,
+  fontFamily,
+  fontId,
+  effectId,
   onDraftChange,
 }: {
   initialText: string;
   inputRef: RefObject<TextInput | null>;
+  fontSize: number;
+  lineHeight: number;
+  maxWidth: number;
+  fontFamily: string;
+  fontId: VideoTextFontId;
+  effectId: VideoTextEffectId;
   onDraftChange: (text: string) => void;
 }) {
   const [draft, setDraft] = useState(initialText);
+  const chrome = getVideoTextEffectChrome(effectId, { fontSize, density: "edit" });
+  const fontWeight = getVideoTextOverlayFontWeight(fontId);
+  // Fixed width while typing — shrink-to-content width recenters the overlay every keystroke.
+  const textWidth = Math.max(48, maxWidth - chrome.paddingHorizontal * 2);
 
   useEffect(() => {
     setDraft(initialText);
     onDraftChange(initialText);
   }, [initialText, onDraftChange]);
 
-  return (
+  const input = (
     <TextInput
       ref={inputRef}
       value={draft}
@@ -6762,14 +8880,62 @@ const CreateEditTextOverlayInput = memo(function CreateEditTextOverlayInput({
         setDraft(next);
         onDraftChange(next);
       }}
-      style={styles.createTextOverlayInput}
+      style={[
+        styles.createTextOverlayInput,
+        {
+          fontSize,
+          lineHeight,
+          width: textWidth,
+          maxWidth: textWidth,
+          fontFamily,
+          ...(fontWeight ? { fontWeight } : null),
+          color: chrome.color,
+          textAlign: "center",
+          includeFontPadding: false,
+          ...(chrome.useSoftShadow
+            ? null
+            : {
+                textShadowColor: "transparent",
+                textShadowRadius: 0,
+                textShadowOffset: { width: 0, height: 0 },
+              }),
+          ...(chrome.useOutline
+            ? {
+                // Soft circular halo approximates the curved glyph stroke while typing.
+                textShadowColor: "#000",
+                textShadowRadius: Math.max(2.5, getVideoTextOutlineRadius(fontSize, "edit") * 1.15),
+                textShadowOffset: { width: 0, height: 0 },
+              }
+            : null),
+        },
+      ]}
       maxLength={60}
       multiline
+      textAlign="center"
       blurOnSubmit={false}
-      selectionColor="rgba(255,255,255,0.9)"
-      cursorColor="#ffffff"
+      selectionColor={chrome.color === "#111" ? "rgba(0,0,0,0.35)" : "rgba(255,255,255,0.9)"}
+      cursorColor={chrome.color}
       placeholder=""
     />
+  );
+
+  if (!chrome.backgroundColor && !chrome.useOutline) return input;
+
+  return (
+    <View
+      style={{
+        backgroundColor: chrome.backgroundColor,
+        paddingHorizontal: chrome.paddingHorizontal,
+        paddingVertical: chrome.paddingVertical,
+        borderRadius: chrome.borderRadius,
+        alignSelf: "center",
+        alignItems: "center",
+        justifyContent: "center",
+        overflow: "visible",
+      }}
+    >
+      {input}
+    </View>
   );
 });
 
@@ -6782,7 +8948,10 @@ const CreateEditTextOverlayItem = memo(function CreateEditTextOverlayItem({
   inputRef,
   onDraftChange,
   onOpenActions,
+  onEditText,
   onSizeChange,
+  onFontScaleChange,
+  onPinchActiveChange,
   onPanGesture,
   onPanStateChange,
 }: {
@@ -6794,63 +8963,257 @@ const CreateEditTextOverlayItem = memo(function CreateEditTextOverlayItem({
   inputRef: RefObject<TextInput | null>;
   onDraftChange: (text: string) => void;
   onOpenActions: () => void;
+  onEditText: () => void;
   onSizeChange: (size: { width: number; height: number }) => void;
+  onFontScaleChange: (fontScale: number) => void;
+  onPinchActiveChange: (active: boolean) => void;
   onPanGesture: (event: PanGestureHandlerGestureEvent) => void;
   onPanStateChange: (event: PanGestureHandlerStateChangeEvent) => void;
 }) {
+  const panRef = useRef<PanGestureHandler>(null);
+  const pinchRef = useRef<PinchGestureHandler>(null);
+  const pinchBaseScaleRef = useRef(overlay.fontScale);
+  const pinchFrameRef = useRef<number | null>(null);
+  const pendingPinchScaleRef = useRef<number | null>(null);
+  const lastTapRef = useRef(0);
+  const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [liveFontScale, setLiveFontScale] = useState(overlay.fontScale);
   const [liveSize, setLiveSize] = useState(committedSize);
+  // Freeze left/top after the first edit layout so typing doesn't re-center every keystroke.
+  const [editAnchor, setEditAnchor] = useState<{ left: number; top: number } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const showOverlay = isEditing || Boolean(overlay.text.trim());
+  const fontScale = isEditing ? overlay.fontScale : liveFontScale;
+  const fontSize = getCreateTextOverlayFontSize(fontScale);
+  const lineHeight = getCreateTextOverlayLineHeight(fontSize);
+  const fontFamily = getVideoTextOverlayFontFamily(overlay.fontId);
+  const maxTextWidth = Math.max(120, viewportWidth * TEXT_OVERLAY_MAX_WIDTH_RATIO);
   const size = isEditing ? liveSize : committedSize;
-  const overlayLeft = viewportWidth * overlay.centerRatio.x - size.width / 2;
-  const overlayTop = viewportHeight * overlay.centerRatio.y - size.height / 2;
+  const centeredLeft = viewportWidth * overlay.centerRatio.x - size.width / 2;
+  const centeredTop = viewportHeight * overlay.centerRatio.y - size.height / 2;
+  const overlayLeft = isEditing && editAnchor ? editAnchor.left : centeredLeft;
+  const overlayTop = isEditing && editAnchor ? editAnchor.top : centeredTop;
 
   useEffect(() => {
     if (!isEditing) {
       setLiveSize(committedSize);
+      setEditAnchor(null);
     }
   }, [committedSize, isEditing]);
 
+  useEffect(() => {
+    if (!isEditing) return;
+
+    // Seed a stable centered frame once when editing begins so typing doesn't
+    // re-center the overlay on every keystroke / layout pass.
+    const chrome = getVideoTextEffectChrome(overlay.effectId, {
+      fontSize: getCreateTextOverlayFontSize(overlay.fontScale),
+      density: "edit",
+    });
+    const seededWidth =
+      committedSize.width > 0
+        ? committedSize.width
+        : Math.max(120, viewportWidth * TEXT_OVERLAY_MAX_WIDTH_RATIO);
+    const seededHeight =
+      committedSize.height > 0
+        ? committedSize.height
+        : getCreateTextOverlayLineHeight(getCreateTextOverlayFontSize(overlay.fontScale)) +
+          chrome.paddingVertical * 2;
+    setLiveSize({ width: seededWidth, height: seededHeight });
+    setEditAnchor({
+      left: viewportWidth * overlay.centerRatio.x - seededWidth / 2,
+      top: viewportHeight * overlay.centerRatio.y - seededHeight / 2,
+    });
+    // Only re-run when entering edit for this overlay (isEditing edge), not on
+    // every size tick — that was causing jumpiness while typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing, overlay.id]);
+
+  useEffect(() => {
+    setLiveFontScale(overlay.fontScale);
+  }, [overlay.fontScale]);
+
+  useEffect(() => {
+    if (isEditing) setIsDragging(false);
+  }, [isEditing]);
+
+  useEffect(() => {
+    return () => {
+      if (pinchFrameRef.current !== null) {
+        cancelAnimationFrame(pinchFrameRef.current);
+        pinchFrameRef.current = null;
+      }
+      if (singleTapTimerRef.current) {
+        clearTimeout(singleTapTimerRef.current);
+        singleTapTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  function scheduleLiveFontScale(nextScale: number) {
+    pendingPinchScaleRef.current = nextScale;
+    if (pinchFrameRef.current !== null) return;
+    pinchFrameRef.current = requestAnimationFrame(() => {
+      pinchFrameRef.current = null;
+      if (pendingPinchScaleRef.current == null) return;
+      setLiveFontScale(pendingPinchScaleRef.current);
+    });
+  }
+
+  const handlePinchGesture = useCallback((event: PinchGestureHandlerGestureEvent) => {
+    if (event.nativeEvent.state !== State.ACTIVE) return;
+    scheduleLiveFontScale(
+      clampTextOverlayFontScale(pinchBaseScaleRef.current * event.nativeEvent.scale),
+    );
+  }, []);
+
+  const handlePinchStateChange = useCallback(
+    (event: PinchGestureHandlerStateChangeEvent) => {
+      const { state, scale } = event.nativeEvent;
+
+      if (state === State.BEGAN) {
+        pinchBaseScaleRef.current = overlay.fontScale;
+        onPinchActiveChange(true);
+        return;
+      }
+
+      if (state === State.ACTIVE) {
+        scheduleLiveFontScale(clampTextOverlayFontScale(pinchBaseScaleRef.current * scale));
+        return;
+      }
+
+      if (state === State.END || state === State.CANCELLED || state === State.FAILED) {
+        if (pinchFrameRef.current !== null) {
+          cancelAnimationFrame(pinchFrameRef.current);
+          pinchFrameRef.current = null;
+        }
+        const nextScale = clampTextOverlayFontScale(pinchBaseScaleRef.current * scale);
+        setLiveFontScale(nextScale);
+        onFontScaleChange(nextScale);
+        onPinchActiveChange(false);
+      }
+    },
+    [onFontScaleChange, onPinchActiveChange, overlay.fontScale],
+  );
+
+  function handlePanStateChange(event: PanGestureHandlerStateChangeEvent) {
+    const { state } = event.nativeEvent;
+    if (state === State.ACTIVE) {
+      setIsDragging(true);
+    } else if (state === State.END || state === State.CANCELLED || state === State.FAILED) {
+      setIsDragging(false);
+    }
+    onPanStateChange(event);
+  }
+
+  function handleTextPress() {
+    const now = Date.now();
+    if (now - lastTapRef.current < 280) {
+      if (singleTapTimerRef.current) {
+        clearTimeout(singleTapTimerRef.current);
+        singleTapTimerRef.current = null;
+      }
+      lastTapRef.current = 0;
+      onEditText();
+      return;
+    }
+
+    lastTapRef.current = now;
+    if (singleTapTimerRef.current) clearTimeout(singleTapTimerRef.current);
+    singleTapTimerRef.current = setTimeout(() => {
+      singleTapTimerRef.current = null;
+      onOpenActions();
+    }, 280);
+  }
+
   if (!showOverlay) return null;
 
+  const effectChrome = getVideoTextEffectChrome(overlay.effectId, { fontSize, density: "edit" });
+  const fontWeight = getVideoTextOverlayFontWeight(overlay.fontId);
+  const textMaxWidth = Math.max(48, maxTextWidth - effectChrome.paddingHorizontal * 2);
+  const textStyle = [
+    styles.createTextOverlayPreviewText,
+    {
+      fontSize,
+      lineHeight,
+      maxWidth: textMaxWidth,
+      fontFamily,
+      ...(fontWeight ? { fontWeight } : null),
+    },
+  ];
+
   return (
-    <PanGestureHandler
+    <PinchGestureHandler
+      ref={pinchRef}
       enabled={!isEditing}
-      activeOffsetX={[-12, 12]}
-      activeOffsetY={[-12, 12]}
-      onGestureEvent={onPanGesture}
-      onHandlerStateChange={onPanStateChange}
+      simultaneousHandlers={panRef}
+      onGestureEvent={handlePinchGesture}
+      onHandlerStateChange={handlePinchStateChange}
     >
       <Animated.View
-        style={[
-          styles.createTextOverlayDraggable,
-          {
-            left: overlayLeft,
-            top: overlayTop,
-          },
-        ]}
-        onLayout={(event) => {
-          const { width, height } = event.nativeEvent.layout;
-          if (width === size.width && height === size.height) return;
-          if (isEditing) {
-            setLiveSize({ width, height });
-            return;
-          }
-          onSizeChange({ width, height });
-        }}
+        collapsable={false}
+        pointerEvents={isDragging ? "auto" : "box-none"}
+        style={[styles.createTextOverlayPinchCapture, isDragging && { zIndex: 20 }]}
       >
-        {isEditing ? (
-          <CreateEditTextOverlayInput
-            initialText={overlay.text}
-            inputRef={inputRef}
-            onDraftChange={onDraftChange}
-          />
-        ) : (
-          <Pressable onPress={onOpenActions} accessibilityLabel="text overlay options">
-            <Text style={styles.createTextOverlayPreviewText}>{overlay.text.trim()}</Text>
-          </Pressable>
-        )}
+        <PanGestureHandler
+          ref={panRef}
+          enabled={!isEditing}
+          simultaneousHandlers={pinchRef}
+          activeOffsetX={[-12, 12]}
+          activeOffsetY={[-12, 12]}
+          onGestureEvent={onPanGesture}
+          onHandlerStateChange={handlePanStateChange}
+        >
+          <Animated.View
+            style={[
+              styles.createTextOverlayDraggable,
+              {
+                left: overlayLeft,
+                top: overlayTop,
+                maxWidth: maxTextWidth,
+                overflow: "visible",
+              },
+            ]}
+            onLayout={(event) => {
+              const { width, height } = event.nativeEvent.layout;
+              if (width === size.width && height === size.height) return;
+              if (isEditing) {
+                // Keep left/top frozen (editAnchor); only track size for later commit.
+                setLiveSize({ width, height });
+                return;
+              }
+              onSizeChange({ width, height });
+            }}
+          >
+            {isEditing ? (
+              <CreateEditTextOverlayInput
+                initialText={overlay.text}
+                inputRef={inputRef}
+                fontSize={fontSize}
+                lineHeight={lineHeight}
+                maxWidth={maxTextWidth}
+                fontFamily={fontFamily}
+                fontId={overlay.fontId}
+                effectId={overlay.effectId}
+                onDraftChange={onDraftChange}
+              />
+            ) : (
+              <Pressable
+                onPress={handleTextPress}
+                accessibilityLabel="text overlay options. double tap to edit"
+              >
+                <VideoTextOverlayGlyph
+                  text={overlay.text.trim()}
+                  effectId={overlay.effectId}
+                  density="edit"
+                  textStyle={textStyle}
+                />
+              </Pressable>
+            )}
+          </Animated.View>
+        </PanGestureHandler>
       </Animated.View>
-    </PanGestureHandler>
+    </PinchGestureHandler>
   );
 });
 
@@ -6884,9 +9247,12 @@ function CreateScreen({
   const [timelineWidth, setTimelineWidth] = useState(0);
   const [activeEditTool, setActiveEditTool] = useState<"trim" | "filters" | "text" | null>(null);
   const [selectedFilter, setSelectedFilter] = useState<VideoFilter>("none");
+  const [lookingForCollaborators, setLookingForCollaborators] = useState(false);
   const [textOverlays, setTextOverlays] = useState<CreateTextOverlayItem[]>([]);
   const [editingTextOverlayId, setEditingTextOverlayId] = useState<string | null>(null);
   const [textOverlayActionId, setTextOverlayActionId] = useState<string | null>(null);
+  const [textOverlayActionRenderId, setTextOverlayActionRenderId] = useState<string | null>(null);
+  const [textFontPickerOverlayId, setTextFontPickerOverlayId] = useState<string | null>(null);
   const [textOverlaySizes, setTextOverlaySizes] = useState<Record<string, { width: number; height: number }>>({});
   const [editViewportSize, setEditViewportSize] = useState({
     width: viewportWidth,
@@ -6894,34 +9260,77 @@ function CreateScreen({
   });
   const [postPreviewOpen, setPostPreviewOpen] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
+  /** Composed export for details preview / thumbs / upload (trim + filter + text). */
+  const [exportBakedAsset, setExportBakedAsset] = useState<NativeVideoAsset | null>(null);
+  const [exportBakedDurationMs, setExportBakedDurationMs] = useState(0);
+  const [exportBakeStatus, setExportBakeStatus] = useState<"idle" | "baking" | "ready" | "failed">("idle");
+  /** Front-camera selfie mirror still needs to be applied (file not flipped yet). */
+  const [needsSelfieMirror, setNeedsSelfieMirror] = useState(false);
+  const exportBakeSessionRef = useRef(0);
   const [cameraPermissionGranted, setCameraPermissionGranted] = useState<boolean | null>(null);
   const [microphonePermissionGranted, setMicrophonePermissionGranted] = useState<boolean | null>(null);
   const [cameraReady, setCameraReady] = useState(false);
-  const [cameraFacing, setCameraFacing] = useState<CameraType>("back");
-  const [cameraFacingKey, setCameraFacingKey] = useState<CameraType>("back");
+  // Don't mount CameraView until feed AVPlayer / thumb decode have released —
+  // starting the capture session in that window freezes the preview until remount.
+  const [cameraSessionArmed, setCameraSessionArmed] = useState(false);
+  const [cameraFacing, setCameraFacing] = useState<CameraType>("front");
+  const [cameraFacingKey, setCameraFacingKey] = useState<CameraType>("front");
+  const [cameraSessionKey, setCameraSessionKey] = useState(0);
   const [cameraZoom, setCameraZoom] = useState(0);
   const [flashEnabled, setFlashEnabled] = useState(false);
   const [recordingTimerSeconds, setRecordingTimerSeconds] = useState<RecordingTimerSeconds>(0);
   const [cameraFiltersOpen, setCameraFiltersOpen] = useState(false);
   const [cameraFilterPickerMounted, setCameraFilterPickerMounted] = useState(false);
+  const [editFilterPickerMounted, setEditFilterPickerMounted] = useState(false);
   const [recordingCountdown, setRecordingCountdown] = useState<number | null>(null);
   const [recording, setRecording] = useState(false);
-  const [recentVideoThumbnailUri, setRecentVideoThumbnailUri] = useState<string | null>(null);
-  const cameraRef = useRef<CameraView>(null);
-  const cameraFacingRef = useRef<CameraType>("back");
+  const [recentVideoThumbnailUri, setRecentVideoThumbnailUri] = useState<string | null>(
+    () => cachedRecentVideoThumbnailUri,
+  );
+  // Patched onto CameraView by patches/expo-camera+17.0.10.patch (dev client).
+  // Keep optional so Next/Vercel typecheck still passes when the patch is skipped.
+  type FocusableCameraView = CameraView & {
+    focusAtPoint?: (x: number, y: number) => Promise<void>;
+    setExposureBias?: (bias: number) => Promise<void>;
+  };
+  const cameraRef = useRef<FocusableCameraView>(null);
+  const cameraFacingRef = useRef<CameraType>("front");
   const lastCameraTapRef = useRef(0);
+  const cameraViewportSizeRef = useRef({ width: viewportWidth, height: viewportHeight });
+  const cameraExposureBiasRef = useRef(0);
+  const cameraExposureDragBaseRef = useRef(0);
+  const cameraExposureFrameRef = useRef<number | null>(null);
+  const focusReticleHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [focusReticle, setFocusReticle] = useState<{ x: number; y: number; key: number } | null>(null);
+  const [exposureAdjusting, setExposureAdjusting] = useState(false);
+  const [exposureBiasUi, setExposureBiasUi] = useState(0);
+  const focusReticleScale = useRef(new Animated.Value(1.15)).current;
+  const focusReticleOpacity = useRef(new Animated.Value(0)).current;
   const recordingCountdownCancelRef = useRef(false);
   const cameraFilterSlideY = useRef(new Animated.Value(0)).current;
+  const libraryButtonSlideY = useRef(new Animated.Value(0)).current;
+  const editFilterSlideY = useRef(new Animated.Value(0)).current;
+  const editNextButtonSlideY = useRef(new Animated.Value(0)).current;
+  const recordPressScale = useRef(new Animated.Value(1)).current;
   const cameraFilterPickerOpenRef = useRef(false);
+  const editFilterPickerOpenRef = useRef(false);
   const cameraZoomRef = useRef(0);
   const pinchBaseZoomRef = useRef(0);
+  const cameraFocusGenerationRef = useRef(0);
+  const createStageRef = useRef<CreateStage>("camera");
   const textInputRef = useRef<TextInput>(null);
   const editingTextDraftRef = useRef("");
   const editingTextOverlayIdRef = useRef<string | null>(null);
   const textOverlayDragStartRatioRef = useRef({ x: 0.5, y: 0.5 });
   const textOverlayDragActiveRef = useRef(false);
+  const textOverlayPinchActiveRef = useRef(false);
+  const textOverlayActionClosingRef = useRef(false);
+  const textOverlayActionScale = useRef(new Animated.Value(0)).current;
+  const textOverlayActionOpacity = useRef(new Animated.Value(0)).current;
+  const textOverlayActionTranslateY = useRef(new Animated.Value(-8)).current;
   const textOverlayVerticalGuideOpacity = useRef(new Animated.Value(0)).current;
   const textOverlayHorizontalGuideOpacity = useRef(new Animated.Value(0)).current;
+  const editNextButtonOpacity = useRef(new Animated.Value(1)).current;
   const textOverlayVerticalGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textOverlayHorizontalGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textOverlayVerticalGuideVisibleRef = useRef(false);
@@ -6946,13 +9355,36 @@ function CreateScreen({
     void fetchProfile(userId).then(setProfile);
   }, [userId]);
 
+  useEffect(() => {
+    Animated.timing(editNextButtonOpacity, {
+      toValue: textFontPickerOverlayId ? 0 : 1,
+      duration: 180,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [editNextButtonOpacity, textFontPickerOverlayId]);
+
   useFocusEffect(
     useCallback(() => {
       let active = true;
+      const focusGeneration = ++cameraFocusGenerationRef.current;
+      const openingOnCamera = createStageRef.current === "camera";
+
+      // Block library thumb decode immediately when the live camera will run —
+      // don't wait for useEffect, or a decode can overlap the first session.
+      setCameraPreviewActive(openingOnCamera);
+      setCameraReady(false);
+      // Disarm so the arming effect below waits out feed/thumb AV work first.
+      setCameraSessionArmed(false);
+      if (cachedRecentVideoThumbnailUri) {
+        setRecentVideoThumbnailUri(cachedRecentVideoThumbnailUri);
+      }
 
       void fetchProfile(userId).then((nextProfile) => {
         if (active) setProfile(nextProfile);
       });
+
+      void ensureFilterCatalogLoaded();
 
       void (async () => {
         const [cameraPermission, microphonePermission] = await Promise.all([
@@ -6965,10 +9397,11 @@ function CreateScreen({
         setMicrophonePermissionGranted(microphonePermission.granted);
       })();
 
-      void loadRecentVideoThumbnail();
-
       return () => {
         active = false;
+        setCameraPreviewActive(false);
+        setCameraSessionArmed(false);
+        setCameraReady(false);
         if (pinchZoomFrameRef.current !== null) {
           cancelAnimationFrame(pinchZoomFrameRef.current);
           pinchZoomFrameRef.current = null;
@@ -6976,9 +9409,75 @@ function CreateScreen({
         cameraZoomRef.current = 0;
         pinchBaseZoomRef.current = 0;
         setCameraZoom(0);
+        // Refresh the library thumb only after the capture session is released.
+        setTimeout(() => {
+          if (cameraFocusGenerationRef.current !== focusGeneration) return;
+          void preloadRecentVideoThumbnail({ force: true }).then((uri) => {
+            if (cameraFocusGenerationRef.current !== focusGeneration) return;
+            setRecentVideoThumbnailUri(uri);
+          });
+        }, 450);
       };
     }, [userId]),
   );
+
+  useEffect(() => {
+    createStageRef.current = createStage;
+  }, [createStage]);
+
+  useEffect(() => {
+    if (!isFocused) return;
+    setCameraPreviewActive(createStage === "camera");
+  }, [createStage, isFocused]);
+
+  useEffect(() => {
+    return () => {
+      if (focusReticleHideTimerRef.current) {
+        clearTimeout(focusReticleHideTimerRef.current);
+        focusReticleHideTimerRef.current = null;
+      }
+      if (cameraExposureFrameRef.current !== null) {
+        cancelAnimationFrame(cameraExposureFrameRef.current);
+        cameraExposureFrameRef.current = null;
+      }
+    };
+  }, []);
+
+  // Mount CameraView only after feed AVPlayer / in-flight thumb decode settle.
+  // Starting AVCaptureSession in that window freezes the preview until remount
+  // (which is why double-tap flip appeared to "fix" it).
+  useEffect(() => {
+    if (!isFocused || createStage !== "camera") {
+      if (createStage !== "camera") {
+        setCameraSessionArmed(false);
+        setCameraReady(false);
+      }
+      return;
+    }
+    if (cameraSessionArmed) return;
+
+    let cancelled = false;
+
+    void (async () => {
+      const pendingThumbnailLoad = recentVideoThumbnailLoadPromise;
+      if (pendingThumbnailLoad) {
+        await pendingThumbnailLoad.catch(() => null);
+      }
+      if (cancelled) return;
+
+      await waitMs(300);
+      if (cancelled) return;
+      if (createStageRef.current !== "camera") return;
+
+      setCameraReady(false);
+      setCameraSessionKey((key) => key + 1);
+      setCameraSessionArmed(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cameraSessionArmed, createStage, isFocused]);
 
   useEffect(() => {
     cameraFacingRef.current = cameraFacing;
@@ -7021,46 +9520,146 @@ function CreateScreen({
       cameraFilterPickerOpenRef.current = false;
       setCameraFilterPickerMounted(false);
       cameraFilterSlideY.setValue(0);
+      libraryButtonSlideY.setValue(0);
       return;
     }
 
     const navBarHeight = getNavBarHeight(insets.bottom);
     const filterSlideDistance = getCreateCameraFilterSlideDistance(navBarHeight);
+    // Slide the camera-roll thumb down out of the nav band while filters are up.
+    const librarySlideDistance = (navBarHeight - 58) / 2 + 58 + 10;
 
     if (cameraFiltersOpen) {
       cameraFilterPickerOpenRef.current = true;
       setCameraFilterPickerMounted(true);
       cameraFilterSlideY.stopAnimation();
+      libraryButtonSlideY.stopAnimation();
       cameraFilterSlideY.setValue(filterSlideDistance);
-      Animated.spring(cameraFilterSlideY, {
-        toValue: 0,
-        damping: 28,
-        stiffness: 240,
-        mass: 0.9,
-        overshootClamping: true,
-        useNativeDriver: true,
-      }).start();
+      Animated.parallel([
+        Animated.spring(cameraFilterSlideY, {
+          toValue: 0,
+          damping: 28,
+          stiffness: 240,
+          mass: 0.9,
+          overshootClamping: true,
+          useNativeDriver: true,
+        }),
+        Animated.spring(libraryButtonSlideY, {
+          toValue: librarySlideDistance,
+          damping: 28,
+          stiffness: 240,
+          mass: 0.9,
+          overshootClamping: true,
+          useNativeDriver: true,
+        }),
+      ]).start();
       return;
     }
 
     if (!cameraFilterPickerOpenRef.current) return;
 
     cameraFilterPickerOpenRef.current = false;
-    Animated.timing(cameraFilterSlideY, {
-      toValue: filterSlideDistance,
-      duration: 210,
-      easing: Easing.in(Easing.cubic),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
+    Animated.parallel([
+      Animated.timing(cameraFilterSlideY, {
+        toValue: filterSlideDistance,
+        duration: 210,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(libraryButtonSlideY, {
+        toValue: 0,
+        duration: 210,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
       if (finished) setCameraFilterPickerMounted(false);
     });
-  }, [cameraFilterSlideY, cameraFiltersOpen, createStage, insets.bottom]);
+  }, [cameraFilterSlideY, cameraFiltersOpen, createStage, insets.bottom, libraryButtonSlideY]);
 
   useEffect(() => {
-    if (createStage !== "details" || !asset?.uri || !selectedVideoDurationMs) return;
+    if (createStage !== "edit") {
+      editFilterPickerOpenRef.current = false;
+      setEditFilterPickerMounted(false);
+      editFilterSlideY.setValue(0);
+      editNextButtonSlideY.setValue(0);
+      return;
+    }
 
-    void loadThumbnailFrameOptions(asset.uri, selectedVideoDurationMs);
-  }, [asset?.uri, createStage, selectedVideoDurationMs]);
+    const navBarHeight = getNavBarHeight(insets.bottom);
+    const filterSlideDistance = getCreateCameraFilterSlideDistance(navBarHeight);
+    // Sink the next pill out of the nav band while filters are up.
+    const nextSlideDistance = (navBarHeight - 48) / 2 + 48 + 10;
+    const filtersOpen = activeEditTool === "filters";
+
+    if (filtersOpen) {
+      editFilterPickerOpenRef.current = true;
+      setEditFilterPickerMounted(true);
+      editFilterSlideY.stopAnimation();
+      editNextButtonSlideY.stopAnimation();
+      editFilterSlideY.setValue(filterSlideDistance);
+      Animated.parallel([
+        Animated.spring(editFilterSlideY, {
+          toValue: 0,
+          damping: 28,
+          stiffness: 240,
+          mass: 0.9,
+          overshootClamping: true,
+          useNativeDriver: true,
+        }),
+        Animated.spring(editNextButtonSlideY, {
+          toValue: nextSlideDistance,
+          damping: 28,
+          stiffness: 240,
+          mass: 0.9,
+          overshootClamping: true,
+          useNativeDriver: true,
+        }),
+      ]).start();
+      return;
+    }
+
+    if (!editFilterPickerOpenRef.current) return;
+
+    editFilterPickerOpenRef.current = false;
+    Animated.parallel([
+      Animated.timing(editFilterSlideY, {
+        toValue: filterSlideDistance,
+        duration: 210,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(editNextButtonSlideY, {
+        toValue: 0,
+        duration: 210,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (finished) setEditFilterPickerMounted(false);
+    });
+  }, [activeEditTool, createStage, editFilterSlideY, editNextButtonSlideY, insets.bottom]);
+
+  useEffect(() => {
+    if (createStage !== "details") return;
+    if (exportBakeStatus === "baking") return;
+
+    const previewUri = exportBakedAsset?.uri ?? asset?.uri;
+    const previewDurationMs =
+      exportBakedAsset && exportBakedDurationMs > 0
+        ? exportBakedDurationMs
+        : selectedVideoDurationMs;
+    if (!previewUri || !previewDurationMs) return;
+
+    void loadThumbnailFrameOptions(previewUri, previewDurationMs);
+  }, [
+    asset?.uri,
+    createStage,
+    exportBakeStatus,
+    exportBakedAsset?.uri,
+    exportBakedDurationMs,
+    selectedVideoDurationMs,
+  ]);
 
   useEffect(() => {
     if (createStage !== "edit" || !asset?.uri || !selectedVideoDurationMs) return;
@@ -7105,9 +9704,12 @@ function CreateScreen({
     setTimelineWidth(0);
     setActiveEditTool(null);
     setSelectedFilter("none");
+    setLookingForCollaborators(false);
     setTextOverlays([]);
     setEditingTextOverlayId(null);
     setTextOverlayActionId(null);
+    setTextOverlayActionRenderId(null);
+    setTextFontPickerOverlayId(null);
     setTextOverlaySizes({});
     hideTextOverlaySnapGuides(true);
     setRecording(false);
@@ -7117,6 +9719,11 @@ function CreateScreen({
     setCameraFiltersOpen(false);
     setRecordingCountdown(null);
     recordingCountdownCancelRef.current = false;
+    exportBakeSessionRef.current += 1;
+    setExportBakedAsset(null);
+    setExportBakedDurationMs(0);
+    setExportBakeStatus("idle");
+    setNeedsSelfieMirror(false);
   }
 
   function resetCameraZoom() {
@@ -7169,35 +9776,8 @@ function CreateScreen({
   }
 
   async function loadRecentVideoThumbnail() {
-    try {
-      const permission = await MediaLibrary.getPermissionsAsync();
-      if (!permission.granted) return;
-
-      const assets = await MediaLibrary.getAssetsAsync({
-        first: 1,
-        mediaType: MediaLibrary.MediaType.video,
-        sortBy: [[MediaLibrary.SortBy.creationTime, false]],
-      });
-      const latestVideo = assets.assets[0];
-      if (!latestVideo) return;
-
-      const assetInfo = await MediaLibrary.getAssetInfoAsync(latestVideo, {
-        shouldDownloadFromNetwork: true,
-      });
-      const videoUri = assetInfo.localUri ?? assetInfo.uri;
-      if (!videoUri || videoUri.startsWith("ph://")) {
-        setRecentVideoThumbnailUri(null);
-        return;
-      }
-
-      const thumbnail = await getThumbnailAsync(videoUri, {
-        time: 0,
-        quality: 1,
-      });
-      setRecentVideoThumbnailUri(thumbnail.uri);
-    } catch {
-      setRecentVideoThumbnailUri(null);
-    }
+    const uri = await preloadRecentVideoThumbnail({ force: true, requestPermission: true });
+    setRecentVideoThumbnailUri(uri);
   }
 
   async function pickVideo(source: "library") {
@@ -7246,11 +9826,13 @@ function CreateScreen({
       return;
     }
 
-    const nextAsset = {
+    const nextAsset: NativeVideoAsset = {
       uri: picked.uri,
       fileName: picked.fileName ?? picked.uri.split("/").pop() ?? "jam-video.mp4",
       mimeType: picked.mimeType ?? "video/mp4",
       fileSize: picked.fileSize ?? null,
+      width: picked.width ?? null,
+      height: picked.height ?? null,
     };
     logVideoUploadStep("picker asset selected", {
       source,
@@ -7259,10 +9841,11 @@ function CreateScreen({
       mimeType: nextAsset.mimeType,
       uriScheme: nextAsset.uri.split(":")[0] || "unknown",
       duration: picked.duration ?? null,
-      width: picked.width ?? null,
-      height: picked.height ?? null,
+      width: nextAsset.width ?? null,
+      height: nextAsset.height ?? null,
     });
     await startVideoUpload(nextAsset, picked.duration ?? 0);
+    void loadRecentVideoThumbnail();
   }
 
   async function recordVideo() {
@@ -7274,7 +9857,8 @@ function CreateScreen({
     }
 
     setRecording(true);
-    logVideoUploadStep("in-app camera recording start", { maxDuration });
+    const recordedFacing = cameraFacingRef.current;
+    logVideoUploadStep("in-app camera recording start", { maxDuration, facing: recordedFacing });
     try {
       const recorded = await cameraRef.current.recordAsync({
         maxDuration,
@@ -7284,17 +9868,74 @@ function CreateScreen({
         return;
       }
 
-      const nextAsset = {
+      setRecording(false);
+
+      let nextAsset: NativeVideoAsset = {
         uri: recorded.uri,
         fileName: recorded.uri.split("/").pop() ?? "jam-video.mp4",
         mimeType: "video/mp4",
         fileSize: null,
       };
+      let durationMs = 0;
+      let selfieMirrorPending = recordedFacing === "front";
+
       logVideoUploadStep("in-app camera recording selected", {
         fileName: nextAsset.fileName,
         uriScheme: nextAsset.uri.split(":")[0] || "unknown",
+        facing: recordedFacing,
       });
-      await startVideoUpload(nextAsset, 0);
+
+      // Remux onto an orientation-correct canvas so edit/feed match the tall
+      // camera preview. Front also bakes the selfie mirror; back only orients
+      // (raw expo-camera files are often landscape-coded + rotation metadata).
+      if (isVideoBakeAvailable()) {
+        try {
+          const normalized = await normalizeCameraRecording(nextAsset, {
+            uploadId: `${recordedFacing === "front" ? "selfie" : "orient"}-${Date.now()}`,
+            mirrorHorizontal: recordedFacing === "front",
+          });
+          nextAsset = normalized.asset;
+          durationMs = Math.max(0, Math.round(normalized.outputDurationSeconds * 1000));
+          selfieMirrorPending = false;
+          logVideoUploadStep(
+            recordedFacing === "front"
+              ? "in-app camera selfie mirror baked"
+              : "in-app camera orientation normalized",
+            {
+              uriScheme: nextAsset.uri.split(":")[0] || "unknown",
+              durationMs,
+              width: nextAsset.width ?? null,
+              height: nextAsset.height ?? null,
+            },
+          );
+        } catch (normalizeError) {
+          logVideoUploadStep(
+            recordedFacing === "front"
+              ? "in-app camera selfie mirror failed — will retry on export"
+              : "in-app camera orientation normalize failed — probing display size",
+            getVideoUploadErrorDetails(normalizeError),
+          );
+        }
+      }
+
+      // If remux was skipped/failed, still attach oriented display size so
+      // JamVideoView doesn't letterbox portrait phone recordings as landscape.
+      if (!(typeof nextAsset.width === "number" && typeof nextAsset.height === "number")) {
+        try {
+          const probe = await getThumbnailAsync(nextAsset.uri, { time: 0, quality: 1 });
+          if (probe.width > 0 && probe.height > 0) {
+            nextAsset = { ...nextAsset, width: probe.width, height: probe.height };
+            logVideoUploadStep("in-app camera size probed", {
+              width: probe.width,
+              height: probe.height,
+            });
+          }
+        } catch (probeError) {
+          logVideoUploadStep("in-app camera size probe failed", getVideoUploadErrorDetails(probeError));
+        }
+      }
+
+      await startVideoUpload(nextAsset, durationMs, { selfieMirrorPending });
       void loadRecentVideoThumbnail();
     } catch (err) {
       logVideoUploadStep("in-app camera recording failed", getVideoUploadErrorDetails(err));
@@ -7358,6 +9999,29 @@ function CreateScreen({
     await recordVideo();
   }
 
+  function handleRecordPressIn() {
+    if (!cameraPermissionGranted || !microphonePermissionGranted || !cameraReady) return;
+    recordPressScale.stopAnimation();
+    Animated.spring(recordPressScale, {
+      toValue: 1.12,
+      damping: 16,
+      stiffness: 320,
+      mass: 0.7,
+      useNativeDriver: true,
+    }).start();
+  }
+
+  function handleRecordPressOut() {
+    recordPressScale.stopAnimation();
+    Animated.spring(recordPressScale, {
+      toValue: 1,
+      damping: 18,
+      stiffness: 280,
+      mass: 0.75,
+      useNativeDriver: true,
+    }).start();
+  }
+
   function flipCameraFacing() {
     const nextFacing: CameraType = cameraFacingRef.current === "back" ? "front" : "back";
     cameraFacingRef.current = nextFacing;
@@ -7368,16 +10032,126 @@ function CreateScreen({
     }
 
     resetCameraZoom();
+    cameraExposureBiasRef.current = 0;
+    setExposureBiasUi(0);
+    setFocusReticle(null);
+    setExposureAdjusting(false);
     setCameraFacing(nextFacing);
   }
 
-  function handleCameraTap() {
+  function showFocusReticleAt(x: number, y: number) {
+    if (focusReticleHideTimerRef.current) {
+      clearTimeout(focusReticleHideTimerRef.current);
+      focusReticleHideTimerRef.current = null;
+    }
+    setFocusReticle({ x, y, key: Date.now() });
+    focusReticleOpacity.setValue(1);
+    focusReticleScale.setValue(1.2);
+    Animated.spring(focusReticleScale, {
+      toValue: 1,
+      damping: 14,
+      stiffness: 220,
+      mass: 0.55,
+      useNativeDriver: true,
+    }).start();
+    focusReticleHideTimerRef.current = setTimeout(() => {
+      Animated.timing(focusReticleOpacity, {
+        toValue: 0,
+        duration: 220,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (finished) setFocusReticle(null);
+      });
+      focusReticleHideTimerRef.current = null;
+    }, 1400);
+  }
+
+  async function focusCameraAt(locationX: number, locationY: number) {
+    const camera = cameraRef.current;
+    const { width, height } = cameraViewportSizeRef.current;
+    if (!camera || !cameraReady || width <= 0 || height <= 0) return;
+
+    const normalizedX = Math.min(1, Math.max(0, locationX / width));
+    const normalizedY = Math.min(1, Math.max(0, locationY / height));
+    // Front preview is mirrored — flip X so focus matches the tapped spot.
+    const focusX = cameraFacingRef.current === "front" ? 1 - normalizedX : normalizedX;
+
+    cameraExposureBiasRef.current = 0;
+    setExposureBiasUi(0);
+    showFocusReticleAt(locationX, locationY);
+
+    try {
+      await camera.focusAtPoint?.(focusX, normalizedY);
+      await camera.setExposureBias?.(0);
+    } catch {
+      // Native focus/exposure unavailable (simulator / older binary).
+    }
+  }
+
+  function scheduleExposureBias(nextBias: number) {
+    const clamped = Math.min(1, Math.max(-1, nextBias));
+    cameraExposureBiasRef.current = clamped;
+    setExposureBiasUi(clamped);
+    if (cameraExposureFrameRef.current !== null) return;
+    cameraExposureFrameRef.current = requestAnimationFrame(() => {
+      cameraExposureFrameRef.current = null;
+      void cameraRef.current?.setExposureBias?.(cameraExposureBiasRef.current)?.catch(() => undefined);
+    });
+  }
+
+  const handleCameraExposureGesture = useCallback((event: PanGestureHandlerGestureEvent) => {
+    if (event.nativeEvent.state !== State.ACTIVE) return;
+    // Pull up (negative Y) → brighter; pull down → darker.
+    const nextBias =
+      cameraExposureDragBaseRef.current - event.nativeEvent.translationY / CREATE_CAMERA_EXPOSURE_DRAG_RANGE_PX;
+    scheduleExposureBias(nextBias);
+  }, []);
+
+  const handleCameraExposureStateChange = useCallback((event: PanGestureHandlerStateChangeEvent) => {
+    const { state, x, y } = event.nativeEvent;
+    if (state === State.BEGAN) {
+      cameraExposureDragBaseRef.current = cameraExposureBiasRef.current;
+      setExposureAdjusting(true);
+      if (focusReticleHideTimerRef.current) {
+        clearTimeout(focusReticleHideTimerRef.current);
+        focusReticleHideTimerRef.current = null;
+      }
+      setFocusReticle((current) => current ?? { x, y, key: Date.now() });
+      focusReticleOpacity.setValue(1);
+      return;
+    }
+    if (state === State.END || state === State.CANCELLED || state === State.FAILED) {
+      if (cameraExposureFrameRef.current !== null) {
+        cancelAnimationFrame(cameraExposureFrameRef.current);
+        cameraExposureFrameRef.current = null;
+      }
+      void cameraRef.current?.setExposureBias?.(cameraExposureBiasRef.current)?.catch(() => undefined);
+      setExposureAdjusting(false);
+      focusReticleHideTimerRef.current = setTimeout(() => {
+        Animated.timing(focusReticleOpacity, {
+          toValue: 0,
+          duration: 220,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }).start(({ finished }) => {
+          if (finished) setFocusReticle(null);
+        });
+        focusReticleHideTimerRef.current = null;
+      }, 900);
+    }
+  }, [focusReticleOpacity]);
+
+  function handleCameraTap(event: { nativeEvent: { locationX: number; locationY: number } }) {
+    const { locationX, locationY } = event.nativeEvent;
     const now = Date.now();
     const isDoubleTap = now - lastCameraTapRef.current < 280;
     lastCameraTapRef.current = now;
 
-    if (!isDoubleTap || recordingCountdown !== null) return;
-    flipCameraFacing();
+    void focusCameraAt(locationX, locationY);
+    if (isDoubleTap && recordingCountdown === null) {
+      flipCameraFacing();
+    }
   }
 
   async function prepareVideoThumbnail(videoUri: string, timeMs = 0) {
@@ -7450,10 +10224,15 @@ function CreateScreen({
     }
   }
 
-  function startVideoUpload(nextAsset: NativeVideoAsset, durationMs = 0) {
+  function startVideoUpload(
+    nextAsset: NativeVideoAsset,
+    durationMs = 0,
+    options?: { selfieMirrorPending?: boolean },
+  ) {
     uploadSessionRef.current += 1;
     setAsset(nextAsset);
     setSelectedVideoDurationMs(durationMs);
+    setNeedsSelfieMirror(Boolean(options?.selfieMirrorPending));
     setTrimStartRatio(0);
     setTrimEndRatio(1);
     setActiveEditTool(null);
@@ -7461,6 +10240,8 @@ function CreateScreen({
     setTextOverlays([]);
     setEditingTextOverlayId(null);
     setTextOverlayActionId(null);
+    setTextOverlayActionRenderId(null);
+    setTextFontPickerOverlayId(null);
     setTextOverlaySizes({});
     hideTextOverlaySnapGuides(true);
     setCreateStage("edit");
@@ -7485,12 +10266,20 @@ function CreateScreen({
 
   function addNewTextOverlay() {
     const id = createTextOverlayId();
-    setTextOverlayActionId(null);
+    closeTextOverlayActions(false);
     setTextOverlays((current) => [
       ...current.filter((overlay) => overlay.text.trim()),
-      { id, text: "", centerRatio: { x: 0.5, y: 0.5 } },
+      {
+        id,
+        text: "",
+        centerRatio: { x: 0.5, y: 0.5 },
+        fontScale: TEXT_OVERLAY_DEFAULT_FONT_SCALE,
+        fontId: TEXT_OVERLAY_DEFAULT_FONT_ID,
+        effectId: TEXT_OVERLAY_DEFAULT_EFFECT_ID,
+      },
     ]);
     editingTextDraftRef.current = "";
+    setTextFontPickerOverlayId(null);
     setEditingTextOverlayId(id);
     setActiveEditTool("text");
     textInputRef.current?.blur();
@@ -7499,15 +10288,117 @@ function CreateScreen({
   }
 
   function openTextOverlayActions(id: string) {
-    if (textOverlayDragActiveRef.current) return;
+    if (textOverlayDragActiveRef.current || textOverlayPinchActiveRef.current) return;
     dismissEditTextKeyboard();
+    setTextFontPickerOverlayId(null);
+    textOverlayActionClosingRef.current = false;
+    textOverlayActionScale.stopAnimation();
+    textOverlayActionOpacity.stopAnimation();
+    textOverlayActionTranslateY.stopAnimation();
     setTextOverlayActionId(id);
+    setTextOverlayActionRenderId(id);
+    textOverlayActionScale.setValue(0.72);
+    textOverlayActionOpacity.setValue(0);
+    textOverlayActionTranslateY.setValue(-8);
+    Animated.parallel([
+      Animated.spring(textOverlayActionScale, {
+        toValue: 1,
+        friction: 6,
+        tension: 420,
+        useNativeDriver: true,
+      }),
+      Animated.timing(textOverlayActionOpacity, {
+        toValue: 1,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.spring(textOverlayActionTranslateY, {
+        toValue: 0,
+        friction: 7,
+        tension: 400,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }
+
+  function closeTextOverlayActions(animated = true) {
+    if (!textOverlayActionId && !textOverlayActionRenderId) return;
+    setTextOverlayActionId(null);
+
+    if (!animated) {
+      textOverlayActionClosingRef.current = false;
+      textOverlayActionScale.stopAnimation();
+      textOverlayActionOpacity.stopAnimation();
+      textOverlayActionTranslateY.stopAnimation();
+      textOverlayActionScale.setValue(0);
+      textOverlayActionOpacity.setValue(0);
+      textOverlayActionTranslateY.setValue(-8);
+      setTextOverlayActionRenderId(null);
+      return;
+    }
+
+    if (textOverlayActionClosingRef.current) return;
+    textOverlayActionClosingRef.current = true;
+    Animated.parallel([
+      Animated.timing(textOverlayActionScale, {
+        toValue: 0.72,
+        duration: 140,
+        useNativeDriver: true,
+      }),
+      Animated.timing(textOverlayActionOpacity, {
+        toValue: 0,
+        duration: 120,
+        useNativeDriver: true,
+      }),
+      Animated.timing(textOverlayActionTranslateY, {
+        toValue: -8,
+        duration: 140,
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      textOverlayActionClosingRef.current = false;
+      if (!finished) return;
+      setTextOverlayActionRenderId(null);
+    });
+  }
+
+  function openTextFontPicker(id: string) {
+    dismissEditTextKeyboard();
+    closeTextOverlayActions(false);
+    setActiveEditTool(null);
+    setTextFontPickerOverlayId(id);
+  }
+
+  function updateTextOverlayFontScale(id: string, fontScale: number) {
+    const nextScale = clampTextOverlayFontScale(fontScale);
+    setTextOverlays((current) =>
+      current.map((overlay) => (overlay.id === id ? { ...overlay, fontScale: nextScale } : overlay)),
+    );
+  }
+
+  function updateTextOverlayFontId(id: string, fontId: VideoTextFontId) {
+    const nextFontId = normalizeVideoTextFontId(fontId);
+    setTextOverlays((current) =>
+      current.map((overlay) => (overlay.id === id ? { ...overlay, fontId: nextFontId } : overlay)),
+    );
+  }
+
+  function cycleTextOverlayEffect(id: string) {
+    setTextOverlays((current) =>
+      current.map((overlay) =>
+        overlay.id === id
+          ? { ...overlay, effectId: cycleVideoTextEffectId(overlay.effectId) }
+          : overlay,
+      ),
+    );
   }
 
   function startEditingTextOverlay(id: string) {
+    if (textOverlayDragActiveRef.current || textOverlayPinchActiveRef.current) return;
     const overlay = textOverlaysRef.current.find((item) => item.id === id);
     editingTextDraftRef.current = overlay?.text ?? "";
-    setTextOverlayActionId(null);
+    closeTextOverlayActions(false);
+    setTextFontPickerOverlayId(null);
     setEditingTextOverlayId(id);
     setActiveEditTool("text");
     setTimeout(() => textInputRef.current?.focus(), 60);
@@ -7515,7 +10406,8 @@ function CreateScreen({
 
   function deleteTextOverlay(id: string) {
     setTextOverlays((current) => current.filter((overlay) => overlay.id !== id));
-    setTextOverlayActionId(null);
+    closeTextOverlayActions(false);
+    setTextFontPickerOverlayId((current) => (current === id ? null : current));
     setTextOverlaySizes((current) => {
       if (!(id in current)) return current;
       const next = { ...current };
@@ -7545,7 +10437,8 @@ function CreateScreen({
     }
 
     dismissEditTextKeyboard();
-    setTextOverlayActionId(null);
+    closeTextOverlayActions(false);
+    setTextFontPickerOverlayId(null);
     setActiveEditTool((current) => (current === tool ? null : tool));
   }
 
@@ -7661,7 +10554,8 @@ function CreateScreen({
     if (state === State.ACTIVE) {
       if (!textOverlayDragActiveRef.current) {
         textOverlayDragActiveRef.current = true;
-        setTextOverlayActionId(null);
+        closeTextOverlayActions(false);
+        setTextFontPickerOverlayId(null);
         dismissEditTextKeyboard();
       }
       return;
@@ -7691,6 +10585,10 @@ function CreateScreen({
 
   function goBackToEditStage() {
     setPostPreviewOpen(false);
+    exportBakeSessionRef.current += 1;
+    setExportBakedAsset(null);
+    setExportBakedDurationMs(0);
+    setExportBakeStatus("idle");
     setCreateStage("edit");
   }
 
@@ -7711,10 +10609,14 @@ function CreateScreen({
     goBackToCameraStage();
   }
 
-  function goToDetailsStage() {
+  async function goToDetailsStage() {
     dismissEditTextKeyboard();
-    setTextOverlayActionId(null);
-    setTextOverlays((current) => current.filter((overlay) => overlay.text.trim()));
+    closeTextOverlayActions(false);
+    setActiveEditTool(null);
+
+    const cleanedOverlays = textOverlays.filter((overlay) => overlay.text.trim());
+    setTextOverlays(cleanedOverlays);
+
     if (selectedVideoDurationMs > 0) {
       const trimStartMs = Math.round(trimStartRatio * selectedVideoDurationMs);
       const trimEndMs = Math.round(trimEndRatio * selectedVideoDurationMs);
@@ -7722,7 +10624,106 @@ function CreateScreen({
         setSelectedThumbnailTimeMs(trimStartMs);
       }
     }
+
+    if (!asset) {
+      setCreateStage("details");
+      return;
+    }
+
+    const sourceDurationSeconds =
+      selectedVideoDurationMs > 0 ? selectedVideoDurationMs / 1000 : maxDuration;
+    const trimStartSeconds = Math.max(0, trimStartRatio * sourceDurationSeconds);
+    const trimEndSeconds = Math.min(
+      sourceDurationSeconds,
+      Math.max(trimStartSeconds + 0.1, trimEndRatio * sourceDurationSeconds),
+    );
+    // Trim-only skips local bake — upload the original and let Cloudflare Stream
+    // clip apply the trim. Landscape remux previously fell through to ~540p.
+    const shouldCompose = needsPresentationBake({
+      videoFilter: selectedFilter,
+      textOverlays: cleanedOverlays,
+      mirrorHorizontal: needsSelfieMirror,
+    });
+
+    if (!shouldCompose || !isVideoBakeAvailable()) {
+      exportBakeSessionRef.current += 1;
+      setExportBakedAsset(null);
+      setExportBakedDurationMs(0);
+      setExportBakeStatus(needsSelfieMirror && !isVideoBakeAvailable() ? "failed" : "idle");
+      setCreateStage("details");
+      if (needsSelfieMirror && !isVideoBakeAvailable()) {
+        Alert.alert(
+          "could not mirror selfie",
+          "rebuild the Jam app to save front-camera videos the way they look while filming.",
+        );
+      }
+      return;
+    }
+
+    const bakeSession = exportBakeSessionRef.current + 1;
+    exportBakeSessionRef.current = bakeSession;
+    setExportBakedAsset(null);
+    setExportBakedDurationMs(0);
+    setExportBakeStatus("baking");
+    setThumbnailFrameOptions([]);
+    setSelectedVideoThumbnailUri(null);
     setCreateStage("details");
+
+    try {
+      // Let the edit JamVideoView unmount and release the source file first.
+      await new Promise<void>((resolve) => setTimeout(resolve, 320));
+      if (exportBakeSessionRef.current !== bakeSession) return;
+
+      const baked = await bakeVideoPresentation({
+        asset,
+        trimStartSeconds,
+        trimEndSeconds,
+        videoFilter: selectedFilter,
+        textOverlays: cleanedOverlays.map((overlay) => ({
+          id: overlay.id,
+          text: overlay.text.trim(),
+          centerRatio: overlay.centerRatio,
+          fontScale: clampTextOverlayFontScale(overlay.fontScale),
+          fontId: normalizeVideoTextFontId(overlay.fontId),
+          effectId: normalizeVideoTextEffectId(overlay.effectId),
+        })),
+        thumbnailTimeMs: selectedThumbnailTimeMs,
+        uploadId: `details-${bakeSession}`,
+        mirrorHorizontal: needsSelfieMirror,
+      });
+      if (exportBakeSessionRef.current !== bakeSession) return;
+
+      const bakedDurationMs = Math.max(100, Math.round(baked.outputDurationSeconds * 1000));
+      setExportBakedAsset(baked.asset);
+      setExportBakedDurationMs(bakedDurationMs);
+      setExportBakeStatus("ready");
+      setNeedsSelfieMirror(false);
+      logVideoUploadStep("details export bake ready", {
+        uri: baked.asset.uri,
+        fileSize: baked.asset.fileSize,
+        durationMs: bakedDurationMs,
+        presentationBaked: baked.presentationBaked,
+        hasThumbnail: Boolean(baked.thumbnailUri),
+        mirroredSelfie: needsSelfieMirror,
+      });
+      if (baked.thumbnailUri) {
+        setSelectedVideoThumbnailUri(baked.thumbnailUri);
+        setSelectedThumbnailTimeMs(0);
+      }
+    } catch (error) {
+      if (exportBakeSessionRef.current !== bakeSession) return;
+      logVideoUploadStep("details export bake failed — using overlay preview", {
+        ...getVideoUploadErrorDetails(error),
+      });
+      setExportBakedAsset(null);
+      setExportBakedDurationMs(0);
+      setExportBakeStatus("failed");
+      // Don't block posting — overlays still preview, trim/filter retry on upload bake.
+      Alert.alert(
+        "could not pre-render edits",
+        "you can still post — edits will be applied while uploading.",
+      );
+    }
   }
 
   function beginTrimDrag() {
@@ -7810,34 +10811,54 @@ function CreateScreen({
   async function post() {
     const postRoles = getUniqueStrings(selectedRoles).slice(0, MAX_VIDEO_ROLES);
     const postGenres = getUniqueStrings(selectedGenres).slice(0, MAX_VIDEO_GENRES);
-    const sourceDurationSeconds =
-      selectedVideoDurationMs > 0 ? selectedVideoDurationMs / 1000 : maxDuration;
-    const trimStartSeconds = Math.max(0, trimStartRatio * sourceDurationSeconds);
-    const trimEndSeconds = Math.min(
-      sourceDurationSeconds,
-      Math.max(trimStartSeconds + 0.1, trimEndRatio * sourceDurationSeconds),
-    );
+    const useBakedExport = exportBakeStatus === "ready" && Boolean(exportBakedAsset?.uri);
+    const sourceDurationSeconds = useBakedExport
+      ? Math.max(0.1, exportBakedDurationMs / 1000)
+      : selectedVideoDurationMs > 0
+        ? selectedVideoDurationMs / 1000
+        : maxDuration;
+    const trimStartSeconds = useBakedExport
+      ? 0
+      : Math.max(0, trimStartRatio * sourceDurationSeconds);
+    const trimEndSeconds = useBakedExport
+      ? sourceDurationSeconds
+      : Math.min(
+          sourceDurationSeconds,
+          Math.max(trimStartSeconds + 0.1, trimEndRatio * sourceDurationSeconds),
+        );
     const trimmedSeconds = trimEndSeconds - trimStartSeconds;
-    const postedTextOverlays = textOverlays
-      .filter((overlay) => overlay.text.trim())
-      .map((overlay) => ({
-        id: overlay.id,
-        text: overlay.text.trim(),
-        centerRatio: overlay.centerRatio,
-      }));
+    const postedTextOverlays = useBakedExport
+      ? []
+      : textOverlays
+          .filter((overlay) => overlay.text.trim())
+          .map((overlay) => ({
+            id: overlay.id,
+            text: overlay.text.trim(),
+            centerRatio: overlay.centerRatio,
+            fontScale: clampTextOverlayFontScale(overlay.fontScale),
+            fontId: normalizeVideoTextFontId(overlay.fontId),
+            effectId: normalizeVideoTextEffectId(overlay.effectId),
+          }));
+    const publishFilter = useBakedExport ? "none" : selectedFilter;
+    const uploadAsset = useBakedExport && exportBakedAsset ? exportBakedAsset : asset;
     logVideoUploadStep("post submission start", {
-      hasAsset: Boolean(asset),
+      hasAsset: Boolean(uploadAsset),
       captionLength: caption.trim().length,
       roleCount: postRoles.length,
       genreCount: postGenres.length,
       trimStartSeconds,
       trimEndSeconds,
-      videoFilter: selectedFilter,
+      videoFilter: publishFilter,
       textOverlayCount: postedTextOverlays.length,
+      presentationBaked: useBakedExport,
     });
-    if (!asset) {
+    if (!uploadAsset) {
       logVideoUploadStep("post submission blocked", { reason: "missing-asset" });
       Alert.alert("missing video", "record or select a video first.");
+      return;
+    }
+    if (exportBakeStatus === "baking") {
+      Alert.alert("still rendering", "wait for your edits to finish rendering before posting.");
       return;
     }
     if (postRoles.length === 0 && postGenres.length === 0) {
@@ -7845,16 +10866,16 @@ function CreateScreen({
       Alert.alert("choose tags", "select at least one role or genre for this video.");
       return;
     }
-    if (trimmedSeconds > maxDuration + 0.5) {
+    if (!useBakedExport && trimmedSeconds > maxDuration + 0.5) {
       logVideoUploadStep("post submission blocked", { reason: "trim-too-long", trimmedSeconds, maxDuration });
       Alert.alert("clip too long", `trim this video to ${maxDuration}s or less before posting.`);
       return;
     }
 
     let localThumbnailUri = selectedVideoThumbnailUri;
-    if (!localThumbnailUri && asset.uri) {
+    if (!localThumbnailUri && uploadAsset.uri) {
       try {
-        const thumbnail = await getThumbnailAsync(asset.uri, {
+        const thumbnail = await getThumbnailAsync(uploadAsset.uri, {
           time: Math.max(0, selectedThumbnailTimeMs),
           quality: 0.6,
         });
@@ -7866,7 +10887,7 @@ function CreateScreen({
 
     const uploadPayload = {
       userId,
-      asset,
+      asset: uploadAsset,
       localThumbnailUri,
       caption: caption.trim(),
       roles: postRoles,
@@ -7876,8 +10897,11 @@ function CreateScreen({
       sourceDurationSeconds,
       trimStartSeconds,
       trimEndSeconds,
-      videoFilter: selectedFilter,
+      videoFilter: publishFilter,
       textOverlays: postedTextOverlays,
+      lookingFor: lookingForCollaborators,
+      presentationBaked: useBakedExport,
+      bakedAsset: useBakedExport ? uploadAsset : null,
     };
 
     // Queue first so progress/profile tiles appear as soon as we leave create.
@@ -7887,9 +10911,10 @@ function CreateScreen({
       roleCount: postRoles.length,
       genreCount: postGenres.length,
       trimmed: trimStartSeconds > 0.05 || trimEndSeconds < sourceDurationSeconds - 0.05,
-      videoFilter: selectedFilter,
+      videoFilter: publishFilter,
       textOverlayCount: postedTextOverlays.length,
       hasThumbnail: Boolean(localThumbnailUri),
+      presentationBaked: useBakedExport,
     });
     onPosted();
   }
@@ -7913,7 +10938,13 @@ function CreateScreen({
 
     return (
       <View style={styles.createCameraRoot}>
-        <View style={[styles.createCameraViewport, { bottom: feedViewport.navBarHeight }]}>
+        <View
+          style={[styles.createCameraViewport, { bottom: feedViewport.navBarHeight }]}
+          onLayout={(event) => {
+            const { width, height } = event.nativeEvent.layout;
+            cameraViewportSizeRef.current = { width, height };
+          }}
+        >
           {cameraPermissionGranted === null || microphonePermissionGranted === null ? (
             <View style={styles.createCameraPermission}>
               <ActivityIndicator color="#fff" />
@@ -7921,24 +10952,31 @@ function CreateScreen({
             </View>
           ) : cameraPermissionReady ? (
             <>
-              <CameraView
-                key={cameraFacingKey}
-                ref={cameraRef}
-                style={StyleSheet.absoluteFill}
-                facing={cameraFacing}
-                mode="video"
-                mute={false}
-                videoQuality="1080p"
-                active={isFocused}
-                animateShutter={false}
-                zoom={cameraZoom}
-                enableTorch={flashEnabled && cameraFacing === "back"}
-                onCameraReady={() => setCameraReady(true)}
-              />
+              {cameraSessionArmed ? (
+                <CameraView
+                  key={`${cameraSessionKey}-${cameraFacingKey}`}
+                  ref={cameraRef}
+                  style={StyleSheet.absoluteFill}
+                  facing={cameraFacing}
+                  mode="video"
+                  mute={false}
+                  videoQuality="1080p"
+                  // Front preview is mirrored by the system. Selfie flip is baked
+                  // into the file after recording (and during export if needed).
+                  mirror={false}
+                  active={isFocused}
+                  animateShutter={false}
+                  zoom={cameraZoom}
+                  enableTorch={flashEnabled && cameraFacing === "back"}
+                  onCameraReady={() => setCameraReady(true)}
+                />
+              ) : (
+                <View style={[StyleSheet.absoluteFill, { backgroundColor: "#000" }]} />
+              )}
               {selectedFilter !== "none" ? (
                 <View
                   pointerEvents="none"
-                  style={[StyleSheet.absoluteFill, styles.createCameraFilterPreview, getCreateFilterOverlayStyle(selectedFilter)]}
+                  style={[StyleSheet.absoluteFill, styles.createCameraFilterPreview, getVideoFilterOverlayStyle(selectedFilter)]}
                 />
               ) : null}
               {frontScreenFlashActive ? (
@@ -7957,17 +10995,63 @@ function CreateScreen({
                 </View>
               ) : null}
               <PinchGestureHandler
-                enabled={isFocused && recordingCountdown === null}
+                enabled={isFocused && cameraSessionArmed && recordingCountdown === null}
                 onGestureEvent={handleCameraPinchGesture}
                 onHandlerStateChange={handleCameraPinchStateChange}
               >
                 <Animated.View style={styles.createCameraTapLayer} collapsable={false}>
-                  <Pressable
-                    style={StyleSheet.absoluteFill}
-                    onPress={handleCameraTap}
-                    disabled={recordingCountdown !== null}
-                    accessibilityLabel="double tap to flip camera"
-                  />
+                  <PanGestureHandler
+                    enabled={isFocused && cameraSessionArmed && recordingCountdown === null && cameraReady}
+                    activeOffsetY={[-2, 2]}
+                    failOffsetX={[-28, 28]}
+                    maxPointers={1}
+                    onGestureEvent={handleCameraExposureGesture}
+                    onHandlerStateChange={handleCameraExposureStateChange}
+                  >
+                    <Animated.View style={StyleSheet.absoluteFill} collapsable={false}>
+                      <Pressable
+                        style={StyleSheet.absoluteFill}
+                        onPress={handleCameraTap}
+                        disabled={recordingCountdown !== null || !cameraSessionArmed || !cameraReady}
+                        accessibilityLabel="tap to focus, drag vertically for exposure, double tap to flip"
+                      />
+                      {focusReticle ? (
+                        <Animated.View
+                          pointerEvents="none"
+                          key={focusReticle.key}
+                          style={[
+                            styles.createCameraFocusReticle,
+                            {
+                              left: focusReticle.x - CREATE_CAMERA_FOCUS_RETICLE_SIZE / 2,
+                              top: focusReticle.y - CREATE_CAMERA_FOCUS_RETICLE_SIZE / 2,
+                              opacity: focusReticleOpacity,
+                              transform: [{ scale: focusReticleScale }],
+                            },
+                          ]}
+                        >
+                          <View style={styles.createCameraFocusReticleCircle} />
+                          {exposureAdjusting || Math.abs(exposureBiasUi) > 0.02 ? (
+                            <View style={styles.createCameraExposureRail}>
+                              <View style={styles.createCameraExposureLine} />
+                              <View
+                                style={[
+                                  styles.createCameraExposureDot,
+                                  {
+                                    transform: [
+                                      {
+                                        translateY:
+                                          (-exposureBiasUi) * (CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.42),
+                                      },
+                                    ],
+                                  },
+                                ]}
+                              />
+                            </View>
+                          ) : null}
+                        </Animated.View>
+                      ) : null}
+                    </Animated.View>
+                  </PanGestureHandler>
                 </Animated.View>
               </PinchGestureHandler>
             </>
@@ -8001,6 +11085,14 @@ function CreateScreen({
             <Pressable
               style={[styles.createCameraControlButton, cameraControlsDisabled && styles.disabled]}
               disabled={cameraControlsDisabled}
+              onPress={flipCameraFacing}
+              accessibilityLabel="flip camera"
+            >
+              <CreateCameraFlipIcon />
+            </Pressable>
+            <Pressable
+              style={[styles.createCameraControlButton, cameraControlsDisabled && styles.disabled]}
+              disabled={cameraControlsDisabled}
               onPress={toggleFlash}
               accessibilityLabel={flashEnabled ? "turn flash off" : "turn flash on"}
             >
@@ -8029,49 +11121,68 @@ function CreateScreen({
           </View>
         ) : null}
         <View style={[styles.createCameraBottomBar, { bottom: controlsBottom }]}>
+          <Animated.View style={{ transform: [{ scale: recordPressScale }] }}>
+            <Pressable
+              onPress={() => {
+                void handleRecordPress();
+              }}
+              onPressIn={handleRecordPressIn}
+              onPressOut={handleRecordPressOut}
+              disabled={!cameraPermissionReady || !cameraReady}
+              style={[
+                styles.createRecordButton,
+                (!cameraPermissionReady || !cameraReady) && styles.disabled,
+              ]}
+              accessibilityLabel={
+                recording
+                  ? "stop recording"
+                  : recordingCountdown !== null
+                    ? "cancel countdown"
+                    : "start recording"
+              }
+            >
+              <RecordButtonCore active={recording || recordingCountdown !== null} />
+              <RecordProgressRing
+                active={recording}
+                durationSeconds={maxDuration}
+                // Sized so the stroke sits exactly on top of the button's 4px white border.
+                size={79}
+                strokeWidth={5}
+                centerOffset={
+                  (CREATE_CAMERA_RECORD_BUTTON_SIZE -
+                    2 * CREATE_CAMERA_RECORD_BUTTON_BORDER_WIDTH -
+                    79) /
+                  2
+                }
+              />
+            </Pressable>
+          </Animated.View>
+        </View>
+        <Animated.View
+          style={[
+            styles.createLibraryButton,
+            {
+              bottom: (feedViewport.navBarHeight - 58) / 2,
+              transform: [{ translateY: libraryButtonSlideY }],
+            },
+          ]}
+        >
           <Pressable
             onPress={() => void pickVideo("library")}
-            style={styles.createLibraryButton}
-            disabled={recording || recordingCountdown !== null}
+            style={StyleSheet.absoluteFill}
+            disabled={recording || recordingCountdown !== null || cameraFiltersOpen}
             accessibilityLabel="choose video from camera roll"
           >
             {recentVideoThumbnailUri ? (
               <Image source={{ uri: recentVideoThumbnailUri }} style={styles.createLibraryThumbnail as ImageStyle} />
             ) : (
-              <View style={styles.createLibraryPlaceholder}>
-                <Text style={styles.createLibraryPlaceholderText}>▦</Text>
-              </View>
+              <Image
+                source={require("./assets/camera-roll-placeholder.png")}
+                style={styles.createLibraryThumbnail as ImageStyle}
+              />
             )}
           </Pressable>
-          <Pressable
-            onPress={() => {
-              void handleRecordPress();
-            }}
-            disabled={!cameraPermissionReady || !cameraReady}
-            style={[
-              styles.createRecordButton,
-              (!cameraPermissionReady || !cameraReady) && styles.disabled,
-            ]}
-            accessibilityLabel={
-              recording
-                ? "stop recording"
-                : recordingCountdown !== null
-                  ? "cancel countdown"
-                  : "start recording"
-            }
-          >
-            <RecordButtonCore active={recording || recordingCountdown !== null} />
-            <RecordProgressRing
-              active={recording}
-              durationSeconds={maxDuration}
-              // Sized so the stroke sits exactly on top of the button's 4px white border.
-              size={79}
-              strokeWidth={5}
-              centerOffset={(78 - 2 * 4 - 79) / 2}
-            />
-          </Pressable>
-          <View style={styles.createCameraSpacer} />
-        </View>
+        </Animated.View>
         {recording ? (
           <RecordingElapsedTimer
             active={recording}
@@ -8115,16 +11226,34 @@ function CreateScreen({
 
   if (asset && createStage === "edit") {
     const feedViewport = getFeedVideoViewport(insets.bottom);
-    const actionOverlay = textOverlayActionId
-      ? textOverlays.find((overlay) => overlay.id === textOverlayActionId)
+    const actionMenuOverlayId = textOverlayActionRenderId ?? textOverlayActionId;
+    const actionOverlay = actionMenuOverlayId
+      ? textOverlays.find((overlay) => overlay.id === actionMenuOverlayId)
       : null;
     const actionOverlaySize = actionOverlay ? textOverlaySizes[actionOverlay.id] ?? { width: 0, height: 0 } : { width: 0, height: 0 };
-    const actionOverlayLeft = actionOverlay
-      ? editViewportSize.width * actionOverlay.centerRatio.x - actionOverlaySize.width / 2
+    const actionOverlayCenterX = actionOverlay
+      ? editViewportSize.width * actionOverlay.centerRatio.x
       : 0;
-    const actionOverlayTop = actionOverlay
-      ? editViewportSize.height * actionOverlay.centerRatio.y - actionOverlaySize.height / 2
+    const actionOverlayBottom = actionOverlay
+      ? editViewportSize.height * actionOverlay.centerRatio.y + actionOverlaySize.height / 2
       : 0;
+    const actionBubbleWidth = 210;
+    const actionBubbleLeft = clamp(
+      actionOverlayCenterX - actionBubbleWidth / 2,
+      12,
+      Math.max(12, editViewportSize.width - actionBubbleWidth - 12),
+    );
+    const actionBubbleTop = clamp(
+      actionOverlayBottom + 8,
+      12,
+      Math.max(12, editViewportSize.height - 56),
+    );
+    const actionCaretLeft = clamp(
+      actionOverlayCenterX - actionBubbleLeft - 8,
+      14,
+      actionBubbleWidth - 30,
+    );
+    const filterRestBottom = getCreateCameraFilterRestBottom(feedViewport.navBarHeight);
 
     return (
       <View style={styles.createCameraRoot}>
@@ -8135,8 +11264,13 @@ function CreateScreen({
           >
             <JamVideoView
               source={asset.uri}
-              style={StyleSheet.absoluteFill}
-              contentFit="cover"
+              style={[
+                StyleSheet.absoluteFill,
+                // Fallback if post-record mirror bake failed — keep edit preview selfie-flipped.
+                needsSelfieMirror ? { transform: [{ scaleX: -1 }] } : null,
+              ]}
+              knownWidth={asset.width}
+              knownHeight={asset.height}
               shouldPlay
               isLooping
               isMuted={false}
@@ -8152,7 +11286,7 @@ function CreateScreen({
             {selectedFilter !== "none" && (
               <View
                 pointerEvents="none"
-                style={[StyleSheet.absoluteFill, styles.createCameraFilterPreview, getCreateFilterOverlayStyle(selectedFilter)]}
+                style={[StyleSheet.absoluteFill, styles.createCameraFilterPreview, getVideoFilterOverlayStyle(selectedFilter)]}
               />
             )}
             {editingTextOverlayId ? (
@@ -8162,10 +11296,13 @@ function CreateScreen({
                 accessibilityLabel="dismiss keyboard"
               />
             ) : null}
-            {textOverlayActionId ? (
+            {textOverlayActionRenderId || textFontPickerOverlayId ? (
               <Pressable
                 style={styles.createEditKeyboardDismissLayer}
-                onPress={() => setTextOverlayActionId(null)}
+                onPress={() => {
+                  if (textOverlayActionRenderId) closeTextOverlayActions(true);
+                  setTextFontPickerOverlayId(null);
+                }}
                 accessibilityLabel="dismiss text actions"
               />
             ) : null}
@@ -8194,46 +11331,71 @@ function CreateScreen({
                 inputRef={textInputRef}
                 onDraftChange={syncEditingTextDraft}
                 onOpenActions={() => openTextOverlayActions(overlay.id)}
+                onEditText={() => startEditingTextOverlay(overlay.id)}
                 onSizeChange={(size) => updateTextOverlaySize(overlay.id, size)}
+                onFontScaleChange={(fontScale) => updateTextOverlayFontScale(overlay.id, fontScale)}
+                onPinchActiveChange={(active) => {
+                  textOverlayPinchActiveRef.current = active;
+                  if (active) {
+                    closeTextOverlayActions(false);
+                    setTextFontPickerOverlayId(null);
+                    dismissEditTextKeyboard();
+                  }
+                }}
                 onPanGesture={(event) => handleTextOverlayPanGesture(overlay.id, event)}
                 onPanStateChange={(event) => handleTextOverlayPanStateChange(overlay.id, event)}
               />
             ))}
             {actionOverlay ? (
-              <View
-                pointerEvents="box-none"
+              <Animated.View
+                pointerEvents={textOverlayActionId ? "box-none" : "none"}
                 style={[
                   styles.createTextOverlayActionMenu,
                   {
-                    left: clamp(
-                      actionOverlayLeft + actionOverlaySize.width / 2 - 72,
-                      12,
-                      Math.max(12, editViewportSize.width - 156),
-                    ),
-                    top: clamp(
-                      actionOverlayTop + actionOverlaySize.height + 10,
-                      12,
-                      Math.max(12, editViewportSize.height - 52),
-                    ),
+                    left: actionBubbleLeft,
+                    top: actionBubbleTop,
+                    width: actionBubbleWidth,
+                    opacity: textOverlayActionOpacity,
+                    transform: [
+                      { translateY: textOverlayActionTranslateY },
+                      { scale: textOverlayActionScale },
+                    ],
                   },
                 ]}
               >
-                <Pressable
-                  style={styles.createTextOverlayActionButton}
-                  onPress={() => startEditingTextOverlay(actionOverlay.id)}
-                  accessibilityLabel="edit text overlay"
-                >
-                  <Text style={styles.createTextOverlayActionButtonText}>edit</Text>
-                </Pressable>
-                <View style={styles.createTextOverlayActionDivider} />
-                <Pressable
-                  style={styles.createTextOverlayActionButton}
-                  onPress={() => deleteTextOverlay(actionOverlay.id)}
-                  accessibilityLabel="delete text overlay"
-                >
-                  <Text style={styles.createTextOverlayActionDeleteText}>delete</Text>
-                </Pressable>
-              </View>
+                <View
+                  pointerEvents="none"
+                  style={[styles.createTextOverlayActionCaret, { left: actionCaretLeft }]}
+                />
+                <View style={styles.createTextOverlayActionBubble}>
+                  <Pressable
+                    style={styles.createTextOverlayActionButton}
+                    onPress={() => openTextFontPicker(actionOverlay.id)}
+                    accessibilityLabel="change text font"
+                  >
+                    <Text style={styles.createTextOverlayActionButtonText}>font</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.createTextOverlayActionEffectButton}
+                    onPress={() => cycleTextOverlayEffect(actionOverlay.id)}
+                    accessibilityLabel="cycle text style"
+                  >
+                    <VideoTextOverlayGlyph
+                      text="A"
+                      effectId={actionOverlay.effectId}
+                      density="menu"
+                      textStyle={styles.createTextOverlayActionEffectGlyph}
+                    />
+                  </Pressable>
+                  <Pressable
+                    style={styles.createTextOverlayActionButton}
+                    onPress={() => deleteTextOverlay(actionOverlay.id)}
+                    accessibilityLabel="delete text overlay"
+                  >
+                    <Text style={styles.createTextOverlayActionDeleteText}>delete</Text>
+                  </Pressable>
+                </View>
+              </Animated.View>
             ) : null}
           </View>
 
@@ -8271,7 +11433,17 @@ function CreateScreen({
             </Pressable>
           </View>
 
-          <View pointerEvents="box-none" style={[styles.createEditNextBand, { height: feedViewport.navBarHeight }]}>
+          <Animated.View
+            pointerEvents={textFontPickerOverlayId ? "none" : "box-none"}
+            style={[
+              styles.createEditNextBand,
+              {
+                height: feedViewport.navBarHeight,
+                opacity: editNextButtonOpacity,
+                transform: [{ translateY: editNextButtonSlideY }],
+              },
+            ]}
+          >
             {editingTextOverlayId ? (
               <Pressable
                 style={styles.createEditKeyboardDismissBand}
@@ -8279,10 +11451,16 @@ function CreateScreen({
                 accessibilityLabel="dismiss keyboard"
               />
             ) : null}
-            <Pressable onPress={goToDetailsStage} style={styles.createEditNextPill} accessibilityLabel="continue to post details">
+            <Pressable
+              onPress={() => {
+                void goToDetailsStage();
+              }}
+              style={styles.createEditNextPill}
+              accessibilityLabel="continue to post details"
+            >
               <Text style={styles.createEditNextText}>next</Text>
             </Pressable>
-          </View>
+          </Animated.View>
 
           {activeEditTool === "trim" ? (
             <View
@@ -8309,17 +11487,45 @@ function CreateScreen({
             </View>
           ) : null}
 
-          {activeEditTool === "filters" ? (
+          {editFilterPickerMounted ? (
             <View
               pointerEvents="box-none"
               style={[styles.createCameraFilterBand, { height: feedViewport.navBarHeight }]}
             >
-              <CreateFilterPickerRow
-                compact
-                selectedFilter={selectedFilter}
-                thumbnailUri={selectedVideoThumbnailUri}
-                textOverlays={textOverlays}
-                onSelect={setSelectedFilter}
+              <Animated.View
+                pointerEvents={activeEditTool === "filters" ? "auto" : "none"}
+                style={[
+                  styles.createCameraFilterFloat,
+                  { bottom: filterRestBottom },
+                  { transform: [{ translateY: editFilterSlideY }] },
+                ]}
+              >
+                <CreateFilterPickerRow
+                  compact
+                  selectedFilter={selectedFilter}
+                  thumbnailUri={selectedVideoThumbnailUri}
+                  textOverlays={textOverlays}
+                  onSelect={setSelectedFilter}
+                />
+              </Animated.View>
+            </View>
+          ) : null}
+
+          {textFontPickerOverlayId ? (
+            <View
+              pointerEvents="box-none"
+              style={[
+                styles.createCameraFilterBand,
+                styles.createTextFontPickerBand,
+                { height: feedViewport.navBarHeight },
+              ]}
+            >
+              <CreateTextFontPickerRow
+                selectedFontId={
+                  textOverlays.find((overlay) => overlay.id === textFontPickerOverlayId)?.fontId ??
+                  TEXT_OVERLAY_DEFAULT_FONT_ID
+                }
+                onSelect={(fontId) => updateTextOverlayFontId(textFontPickerOverlayId, fontId)}
               />
             </View>
           ) : null}
@@ -8347,10 +11553,23 @@ function CreateScreen({
           </Pressable>
         </View>
         <Text style={styles.h1}>create</Text>
-        <Text style={styles.copy}>finish your post details.</Text>
-        <Text style={styles.helper}>{maxDuration}s max for this account</Text>
         {asset && (
           <>
+            <Pressable
+              onPress={() => setLookingForCollaborators((current) => !current)}
+              style={styles.createLookingForToggle}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: lookingForCollaborators }}
+              accessibilityLabel="looking for collaborators"
+            >
+              <LookingForIcon active={lookingForCollaborators} size={28} />
+              <View style={styles.createLookingForToggleCopy}>
+                <Text style={styles.createLookingForToggleTitle}>looking for?</Text>
+                <Text style={styles.createLookingForToggleHelper}>
+                  tag your video to show you're looking to collab
+                </Text>
+              </View>
+            </Pressable>
             <View style={styles.createDetailsComposerRow}>
               <TextInput
                 value={caption}
@@ -8363,35 +11582,58 @@ function CreateScreen({
                 textAlignVertical="top"
               />
               <Pressable
-                onPress={() => setPostPreviewOpen(true)}
+                onPress={() => {
+                  if (exportBakeStatus === "baking") return;
+                  setPostPreviewOpen(true);
+                }}
                 style={styles.createDetailsVideoTap}
                 accessibilityLabel="preview post"
               >
-                {selectedVideoThumbnailUri ? (
+                {exportBakeStatus === "baking" ? (
+                  <View style={styles.createDetailsVideoTapFallback}>
+                    <ActivityIndicator color="#fff" />
+                  </View>
+                ) : selectedVideoThumbnailUri ? (
                   <Image
                     source={{ uri: selectedVideoThumbnailUri }}
                     style={styles.createDetailsVideoTapImage as ImageStyle}
+                    resizeMode={
+                      exportBakeStatus === "ready"
+                        ? "cover"
+                        : contentFitForVideoSize(asset.width, asset.height) === "contain"
+                          ? "contain"
+                          : "cover"
+                    }
                   />
                 ) : (
                   <View style={styles.createDetailsVideoTapFallback} />
                 )}
-                <VideoPresentationOverlays
-                  filter={selectedFilter}
-                  textOverlays={textOverlays}
-                  density="thumb"
-                />
+                {exportBakeStatus !== "ready" ? (
+                  <VideoPresentationOverlays
+                    filter={selectedFilter}
+                    textOverlays={textOverlays}
+                    density="thumb"
+                  />
+                ) : null}
                 <View style={styles.createDetailsVideoTapBadge}>
-                  <Text style={styles.createDetailsVideoTapBadgeText}>preview</Text>
+                  <Text style={styles.createDetailsVideoTapBadgeText}>
+                    {exportBakeStatus === "baking" ? "rendering" : "preview"}
+                  </Text>
                 </View>
               </Pressable>
             </View>
-            {loadingThumbnailFrames ? (
+            {exportBakeStatus === "baking" ? (
+              <View style={styles.createThumbnailLoader}>
+                <ActivityIndicator color={getActivityIndicatorColor()} />
+                <Text style={styles.helper}>rendering your edits…</Text>
+              </View>
+            ) : loadingThumbnailFrames ? (
               <ActivityIndicator color={getActivityIndicatorColor()} style={styles.createThumbnailLoader} />
             ) : thumbnailFrameOptions.length > 0 ? (
               <VideoThumbnailFilmstrip
                 frames={thumbnailFrameOptions}
-                filter={selectedFilter}
-                textOverlays={textOverlays}
+                filter={exportBakeStatus === "ready" ? "none" : selectedFilter}
+                textOverlays={exportBakeStatus === "ready" ? [] : textOverlays}
                 onSelect={(timeMs, uri) => selectThumbnailTime(timeMs, uri)}
               />
             ) : (
@@ -8414,8 +11656,12 @@ function CreateScreen({
           onToggle={(genre) => toggleLimitedTag(genre, selectedGenres, setSelectedGenres, "genre", MAX_VIDEO_GENRES)}
         />
         <PrimaryButton
-          label="post"
-          disabled={!asset || (selectedRoles.length === 0 && selectedGenres.length === 0)}
+          label={exportBakeStatus === "baking" ? "rendering..." : "post"}
+          disabled={
+            !asset ||
+            exportBakeStatus === "baking" ||
+            (selectedRoles.length === 0 && selectedGenres.length === 0)
+          }
           onPress={() => {
             void post();
           }}
@@ -8424,15 +11670,20 @@ function CreateScreen({
       <CreatePostPreviewModal
         visible={postPreviewOpen}
         onClose={() => setPostPreviewOpen(false)}
-        videoUri={asset?.uri ?? null}
-        filter={selectedFilter}
-        textOverlays={textOverlays.filter((overlay) => overlay.text.trim())}
+        videoUri={exportBakedAsset?.uri ?? asset?.uri ?? null}
+        videoWidth={exportBakedAsset?.width ?? asset?.width ?? null}
+        videoHeight={exportBakedAsset?.height ?? asset?.height ?? null}
+        filter={exportBakeStatus === "ready" ? "none" : selectedFilter}
+        textOverlays={
+          exportBakeStatus === "ready" ? [] : textOverlays.filter((overlay) => overlay.text.trim())
+        }
         caption={caption}
+        lookingFor={lookingForCollaborators}
         profile={profile}
         roles={selectedRoles}
         genres={selectedGenres}
-        trimStartRatio={trimStartRatio}
-        trimEndRatio={trimEndRatio}
+        trimStartRatio={exportBakeStatus === "ready" ? 0 : trimStartRatio}
+        trimEndRatio={exportBakeStatus === "ready" ? 1 : trimEndRatio}
       />
     </SafeAreaView>
   );
@@ -8440,14 +11691,18 @@ function CreateScreen({
 
 function InboxScreen({
   userId,
+  viewerProfile,
   refreshSignal,
   savedVideoController,
   onUnreadCountChanged,
+  onViewerProfileUpdated,
 }: {
   userId: string;
+  viewerProfile: Profile | null;
   refreshSignal: number;
   savedVideoController: SavedVideoController;
   onUnreadCountChanged: (count: number) => void;
+  onViewerProfileUpdated?: (profile: Profile) => void;
 }) {
   const [tab, setTab] = useState<InboxTab>("requests");
   const [loading, setLoading] = useState(true);
@@ -8455,44 +11710,56 @@ function InboxScreen({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filterRoles, setFilterRoles] = useState<string[]>([]);
   const [filterLocation, setFilterLocation] = useState("");
+  const [nearMeActive, setNearMeActive] = useState(false);
+  const [nearMeLoading, setNearMeLoading] = useState(false);
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [nearbyUserIds, setNearbyUserIds] = useState<Set<string> | null>(null);
   const [requests, setRequests] = useState<InboxRequest[]>([]);
   const [jams, setJams] = useState<Conversation[]>([]);
   const [sent, setSent] = useState<Conversation[]>([]);
   const [system, setSystem] = useState<InboxMessage[]>([]);
   const [removedInboxUserIds, setRemovedInboxUserIds] = useState<Set<string>>(() => new Set());
   const [activeChat, setActiveChat] = useState<Conversation | InboxMessage | null>(null);
-  const [activeRequest, setActiveRequest] = useState<InboxRequest | null>(null);
   const [profileUserId, setProfileUserId] = useState<string | null>(null);
   const [preloadedProfile, setPreloadedProfile] = useState<PreloadedUserProfile | null>(null);
   const [activeDm, setActiveDm] = useState<FeedVideo | null>(null);
   const profilePreloadCacheRef = useRef(new Map<string, PreloadedUserProfile>());
   const profileNavigationRequestRef = useRef(0);
   const insets = useSafeAreaInsets();
+  const nearMeRadiusMiles = normalizeNearMeRadius(viewerProfile?.near_me_radius_miles);
 
   const matchesInboxFilters = useCallback(
-    (role: string, location: string) => {
+    (role: string, location: string, otherUserId: string) => {
       const roleMatch =
         filterRoles.length === 0 ||
         filterRoles.some((selectedRole) => selectedRole.toLowerCase() === role.toLowerCase());
       const locationMatch = !filterLocation || locationFilterMatches(location, filterLocation);
-      return roleMatch && locationMatch;
+      const nearMeMatch = !nearMeActive || (nearbyUserIds?.has(otherUserId) ?? false);
+      return roleMatch && locationMatch && nearMeMatch;
     },
-    [filterLocation, filterRoles],
+    [filterLocation, filterRoles, nearMeActive, nearbyUserIds],
   );
 
   const filteredRequests = useMemo(
-    () => requests.filter((request) => matchesInboxFilters(request.role, request.location)),
+    () =>
+      requests.filter((request) => matchesInboxFilters(request.role, request.location, request.userId)),
     [matchesInboxFilters, requests],
   );
   const filteredJams = useMemo(
-    () => jams.filter((conversation) => matchesInboxFilters(conversation.role, conversation.location)),
+    () =>
+      jams.filter((conversation) =>
+        matchesInboxFilters(conversation.role, conversation.location, conversation.userId),
+      ),
     [jams, matchesInboxFilters],
   );
   const filteredSent = useMemo(
-    () => sent.filter((conversation) => matchesInboxFilters(conversation.role, conversation.location)),
+    () =>
+      sent.filter((conversation) =>
+        matchesInboxFilters(conversation.role, conversation.location, conversation.userId),
+      ),
     [matchesInboxFilters, sent],
   );
-  const filtersActive = filterRoles.length > 0 || Boolean(filterLocation);
+  const filtersActive = filterRoles.length > 0 || Boolean(filterLocation) || nearMeActive;
   const jamTabItems = useMemo(() => {
     const conversationItems = filteredJams.map((conversation) => ({
       type: "conversation" as const,
@@ -8500,6 +11767,7 @@ function InboxScreen({
       sortAt: conversation.lastActivityAt,
       conversation,
     }));
+    // Hide system messages while role/location/near-me filters are on.
     const systemItems = filtersActive
       ? []
       : system.map((message) => ({
@@ -8512,18 +11780,107 @@ function InboxScreen({
     return [...conversationItems, ...systemItems].sort((a, b) => b.sortAt.localeCompare(a.sortAt));
   }, [filteredJams, filtersActive, system]);
 
+  const refreshNearbyUserIds = useCallback(
+    async (location: { latitude: number; longitude: number }) => {
+      const ids = await fetchNearbyUserIds({
+        latitude: location.latitude,
+        longitude: location.longitude,
+        radiusMiles: nearMeRadiusMiles,
+      });
+      setNearbyUserIds(ids);
+      return ids;
+    },
+    [nearMeRadiusMiles],
+  );
+
+  async function refreshViewerGpsLocation() {
+    const position = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.Balanced,
+    });
+    const nextLocation = {
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+    };
+    setUserLocation(nextLocation);
+    return nextLocation;
+  }
+
+  async function toggleNearMe() {
+    if (nearMeLoading) return;
+
+    if (nearMeActive) {
+      setNearMeActive(false);
+      setNearbyUserIds(null);
+      return;
+    }
+
+    const confirmed = await confirmNearMeLiveLocationSharing(userId);
+    if (!confirmed) return;
+
+    setNearMeActive(true);
+    setNearMeLoading(true);
+
+    try {
+      // Near-me also turns on live location sharing so Settings stays in sync.
+      const alreadySharing = await isLiveLocationSharingEnabled(userId);
+      if (!alreadySharing) {
+        const result = await enableLiveLocationSharing(userId);
+        if ("error" in result) {
+          setNearMeActive(false);
+          Alert.alert("location needed", result.error, [
+            { text: "cancel", style: "cancel" },
+            { text: "open settings", onPress: () => void Linking.openSettings() },
+          ]);
+          return;
+        }
+
+        onViewerProfileUpdated?.(result.profile);
+        let nextLocation: { latitude: number; longitude: number } | null = null;
+        if (result.profile.live_latitude != null && result.profile.live_longitude != null) {
+          nextLocation = {
+            latitude: result.profile.live_latitude,
+            longitude: result.profile.live_longitude,
+          };
+          setUserLocation(nextLocation);
+        } else {
+          nextLocation = await refreshViewerGpsLocation();
+        }
+        await refreshNearbyUserIds(nextLocation);
+        return;
+      }
+
+      const nextLocation = await refreshViewerGpsLocation();
+      await refreshNearbyUserIds(nextLocation);
+    } catch (err) {
+      setNearMeActive(false);
+      setNearbyUserIds(null);
+      Alert.alert(
+        "could not get location",
+        err instanceof Error ? err.message : "try again in a moment.",
+      );
+    } finally {
+      setNearMeLoading(false);
+    }
+  }
+
+  // Refresh nearby IDs when radius changes while near-me is on.
+  useEffect(() => {
+    if (!nearMeActive || !userLocation || nearMeLoading) return;
+    void refreshNearbyUserIds(userLocation).catch(() => undefined);
+  }, [nearMeActive, nearMeLoading, nearMeRadiusMiles, refreshNearbyUserIds, userLocation]);
+
   useEffect(() => {
     const chatUserId =
       activeChat && !("sender_name" in activeChat)
         ? activeChat.userId
-        : activeRequest?.userId ?? activeDm?.userId ?? null;
+        : activeDm?.userId ?? null;
     setActiveInboxChatUserId(chatUserId);
     return () => {
       if (getActiveInboxChatUserId() === chatUserId) {
         setActiveInboxChatUserId(null);
       }
     };
-  }, [activeChat, activeDm, activeRequest]);
+  }, [activeChat, activeDm]);
 
   const load = useCallback(async () => {
     const data = await fetchInbox(userId);
@@ -8543,6 +11900,9 @@ function InboxScreen({
   }, [onUnreadCountChanged, removedInboxUserIds, userId]);
 
   function removeUserFromInbox(removedUserId: string) {
+    const hadUnreadPerson =
+      requests.some((request) => request.userId === removedUserId && request.unreadCount > 0) ||
+      jams.some((conversation) => conversation.userId === removedUserId && conversation.unreadCount > 0);
     setRemovedInboxUserIds((current) => new Set(current).add(removedUserId));
     setRequests((current) => current.filter((request) => request.userId !== removedUserId));
     setJams((current) => current.filter((conversation) => conversation.userId !== removedUserId));
@@ -8554,6 +11914,9 @@ function InboxScreen({
     setProfileUserId(null);
     setPreloadedProfile(null);
     profilePreloadCacheRef.current.delete(removedUserId);
+    if (hadUnreadPerson) {
+      onUnreadCountChanged(Math.max(0, getUnreadLocalInboxCount(requests, jams, sent, system) - 1));
+    }
   }
 
   useEffect(() => {
@@ -8567,6 +11930,9 @@ function InboxScreen({
     setRefreshing(true);
     try {
       await load();
+      if (nearMeActive && userLocation) {
+        await refreshNearbyUserIds(userLocation);
+      }
     } catch (err) {
       Alert.alert("could not refresh inbox", err instanceof Error ? err.message : "try again");
     } finally {
@@ -8611,7 +11977,6 @@ function InboxScreen({
       const requestId = profileNavigationRequestRef.current + 1;
       profileNavigationRequestRef.current = requestId;
 
-      setActiveRequest(null);
       setActiveDm(null);
       setPreloadedProfile(profilePreloadCacheRef.current.get(targetUserId) ?? null);
       setProfileUserId(targetUserId);
@@ -8631,10 +11996,42 @@ function InboxScreen({
     setActiveDm(profileFeedItem);
   }
 
+  function openRequest(request: InboxRequest) {
+    const conversation = conversationFromRequest(request);
+    setActiveChat(conversation);
+    setRequests((current) =>
+      current.map((item) =>
+        item.userId === request.userId ? { ...item, unreadCount: 0 } : item,
+      ),
+    );
+    onUnreadCountChanged(
+      Math.max(
+        0,
+        getUnreadLocalInboxCount(requests, jams, sent, system) - (request.unreadCount > 0 ? 1 : 0),
+      ),
+    );
+    void markConversationRead(userId, request.userId).catch(() => undefined);
+    void fetchConversationMessages(userId, request.userId)
+      .then((page) => {
+        setActiveChat((current) => {
+          if (!current || "sender_name" in current || current.userId !== request.userId) {
+            return current;
+          }
+          return {
+            ...current,
+            messages: page.messages.length > 0 ? page.messages : current.messages,
+            hasMoreMessages: Boolean(page.nextCursor),
+            olderMessagesCursor: page.nextCursor,
+          };
+        });
+      })
+      .catch(() => undefined);
+  }
+
   function openConversation(conversation: Conversation) {
-    const removedUnreadCount = jams.some((item) => item.userId === conversation.userId)
-      ? conversation.unreadCount
-      : 0;
+    const hadUnreadPerson = jams.some((item) => item.userId === conversation.userId)
+      ? conversation.unreadCount > 0
+      : false;
     const nextConversation = { ...conversation, unread: false, unreadCount: 0 };
     setActiveChat(nextConversation);
     setJams((current) =>
@@ -8647,7 +12044,9 @@ function InboxScreen({
         item.userId === conversation.userId ? { ...item, unread: false, unreadCount: 0 } : item,
       ),
     );
-    onUnreadCountChanged(Math.max(0, getUnreadLocalInboxCount(requests, jams, sent, system) - removedUnreadCount));
+    onUnreadCountChanged(
+      Math.max(0, getUnreadLocalInboxCount(requests, jams, sent, system) - (hadUnreadPerson ? 1 : 0)),
+    );
     void markConversationRead(userId, conversation.userId).catch(() => undefined);
     void fetchConversationMessages(userId, conversation.userId)
       .then((page) => {
@@ -8687,20 +12086,29 @@ function InboxScreen({
   }
 
   function openSystemMessage(message: InboxMessage) {
-    const removedUnreadCount = message.read ? 0 : 1;
+    const hadUnreadSystem = system.some((item) => !item.read);
     const nextMessage = { ...message, read: true };
     setActiveChat(nextMessage);
     setSystem((current) =>
       current.map((item) => (item.id === message.id ? { ...item, read: true } : item)),
     );
-    onUnreadCountChanged(Math.max(0, getUnreadLocalInboxCount(requests, jams, sent, system) - removedUnreadCount));
+    const stillHasUnreadSystem = system.some(
+      (item) => item.id !== message.id && !item.read,
+    );
+    if (hadUnreadSystem && !stillHasUnreadSystem) {
+      onUnreadCountChanged(Math.max(0, getUnreadLocalInboxCount(requests, jams, sent, system) - 1));
+    }
     void markInboxMessageRead(message.id).catch(() => undefined);
   }
 
   return (
     <View style={styles.safeWithNav}>
       <ScrollView
-        contentContainerStyle={getTabScreenContentStyle(insets.top)}
+        contentContainerStyle={[
+          getTabScreenContentStyle(insets.top),
+          // Match discover feedTopBar vertical inset (insets.top + 12).
+          { paddingTop: insets.top + 12 },
+        ]}
         refreshControl={
           <RefreshControl
             tintColor={getActivityIndicatorColor()}
@@ -8709,26 +12117,42 @@ function InboxScreen({
           />
         }
       >
-        <TabLogoHeader
-          right={
-            <Pressable
-              onPress={() => setFiltersOpen(true)}
-              style={[styles.filterButton, filtersActive && styles.inboxFilterButtonActive]}
-              accessibilityLabel="filter inbox"
-              accessibilityRole="button"
-              accessibilityState={{ selected: filtersActive }}
-            >
-              <FeedFilterIcon />
-            </Pressable>
-          }
-        />
+        <View style={styles.inboxTopBar}>
+          <Pressable
+            style={[styles.feedNearMeButton, nearMeActive && styles.feedNearMeButtonActive]}
+            accessibilityLabel={nearMeActive ? "near me on, sharing live location" : "near me"}
+            accessibilityHint="turns on share live location to find creators nearby"
+            accessibilityRole="button"
+            accessibilityState={{ selected: nearMeActive, busy: nearMeLoading }}
+            onPress={() => void toggleNearMe()}
+          >
+            {nearMeLoading ? (
+              <ActivityIndicator color={getActivityIndicatorColor()} size="small" />
+            ) : (
+              <NearMeIcon active={nearMeActive} />
+            )}
+          </Pressable>
+          <View style={styles.feedRecentFiltersArea} pointerEvents="none" />
+          <Pressable
+            onPress={() => setFiltersOpen(true)}
+            style={[
+              styles.feedFilterButton,
+              (filterRoles.length > 0 || Boolean(filterLocation)) && styles.inboxFilterButtonActive,
+            ]}
+            accessibilityLabel="filter inbox"
+            accessibilityRole="button"
+            accessibilityState={{ selected: filterRoles.length > 0 || Boolean(filterLocation) }}
+          >
+            <FeedFilterIcon color={getActivityIndicatorColor()} />
+          </Pressable>
+        </View>
         <SegmentedTabs tabs={["requests", "jams", "sent"]} active={tab} onChange={(value) => setTab(value as InboxTab)} />
-        {loading ? (
+        {loading || (nearMeActive && nearMeLoading && !nearbyUserIds) ? (
           <ActivityIndicator color={getActivityIndicatorColor()} style={styles.loader} />
         ) : tab === "requests" ? (
           <View style={styles.list}>
             {filteredRequests.map((request) => (
-              <Pressable key={request.id} style={styles.listCard} onPress={() => setActiveRequest(request)}>
+              <Pressable key={request.id} style={styles.listCard} onPress={() => openRequest(request)}>
                 <Pressable onPress={() => openProfile(request.userId)} accessibilityLabel={`open ${request.creatorName}'s profile`}>
                   <Avatar uri={request.avatarUrl} size={52} />
                 </Pressable>
@@ -8746,7 +12170,13 @@ function InboxScreen({
               </Pressable>
             ))}
             {filteredRequests.length === 0 && (
-              <EmptyCard text={filtersActive ? "no requests match these filters." : "no requests right now."} />
+              <Text style={styles.inboxEmptyText}>
+                {getInboxEmptyCopy({
+                  tab: "requests",
+                  filtersActive: filterRoles.length > 0 || Boolean(filterLocation),
+                  nearMeActive,
+                })}
+              </Text>
             )}
           </View>
         ) : tab === "jams" ? (
@@ -8768,7 +12198,13 @@ function InboxScreen({
               ),
             )}
             {jamTabItems.length === 0 && (
-              <EmptyCard text={filtersActive ? "no jams match these filters." : "no jams yet. mutual jams will appear here."} />
+              <Text style={styles.inboxEmptyText}>
+                {getInboxEmptyCopy({
+                  tab: "jams",
+                  filtersActive: filterRoles.length > 0 || Boolean(filterLocation),
+                  nearMeActive,
+                })}
+              </Text>
             )}
           </View>
         ) : (
@@ -8783,7 +12219,13 @@ function InboxScreen({
               />
             ))}
             {filteredSent.length === 0 && (
-              <EmptyCard text={filtersActive ? "no sent jams match these filters." : "no sent jams waiting right now."} />
+              <Text style={styles.inboxEmptyText}>
+                {getInboxEmptyCopy({
+                  tab: "sent",
+                  filtersActive: filterRoles.length > 0 || Boolean(filterLocation),
+                  nearMeActive,
+                })}
+              </Text>
             )}
           </View>
         )}
@@ -8799,38 +12241,6 @@ function InboxScreen({
           setFilterRoles(nextRoles);
           setFilterLocation(nextLocation);
           setFiltersOpen(false);
-        }}
-      />
-      <RequestModal
-        request={activeRequest}
-        onClose={() => setActiveRequest(null)}
-        onOpenProfile={(request) => openProfile(request.userId)}
-        onMessage={(request) => {
-          setActiveRequest(null);
-          const conversation = conversationFromRequest(request);
-          setActiveChat(conversation);
-          setRequests((current) =>
-            current.map((item) =>
-              item.userId === request.userId ? { ...item, unreadCount: 0 } : item,
-            ),
-          );
-          onUnreadCountChanged(Math.max(0, getUnreadLocalInboxCount(requests, jams, sent, system) - request.unreadCount));
-          void markConversationRead(userId, request.userId).catch(() => undefined);
-          void fetchConversationMessages(userId, request.userId)
-            .then((page) => {
-              setActiveChat((current) => {
-                if (!current || "sender_name" in current || current.userId !== request.userId) {
-                  return current;
-                }
-                return {
-                  ...current,
-                  messages: page.messages.length > 0 ? page.messages : current.messages,
-                  hasMoreMessages: Boolean(page.nextCursor),
-                  olderMessagesCursor: page.nextCursor,
-                };
-              });
-            })
-            .catch(() => undefined);
         }}
       />
       <ChatModal
@@ -9015,6 +12425,7 @@ function MyProfileScreen({
   onThemeModeChange,
   refreshSignal,
   savedVideoController,
+  initialProfile = null,
   onInboxChanged,
   onProfileChanged,
   onLoggedOut,
@@ -9024,11 +12435,13 @@ function MyProfileScreen({
   onThemeModeChange: (mode: ThemeMode) => void;
   refreshSignal: number;
   savedVideoController: SavedVideoController;
+  /** Cached profile from app shell so the header can paint before videos load. */
+  initialProfile?: Profile | null;
   onInboxChanged: () => void;
   onProfileChanged: (profile: Profile) => void;
   onLoggedOut: () => void;
 }) {
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(initialProfile);
   const [videos, setVideos] = useState<ProfileVideo[]>([]);
   const [saved, setSaved] = useState<ProfileVideo[]>([]);
   const [activeTab, setActiveTab] = useState<"videos" | "saved">("videos");
@@ -9044,8 +12457,12 @@ function MyProfileScreen({
   const [profileHeaderCollapsed, setProfileHeaderCollapsed] = useState(false);
   const [reportItem, setReportItem] = useState<FeedVideo | null>(null);
   const [reportSubmitting, setReportSubmitting] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [postedToastVisible, setPostedToastVisible] = useState(false);
+  const [videosLoading, setVideosLoading] = useState(true);
+  const [pinPreviewActive, setPinPreviewActive] = useState(false);
+  const hasLoadedVideosRef = useRef(false);
+  /** Local pin ranks that must win over in-flight profile reloads. */
+  const pendingPinRanksRef = useRef(new Map<string, number | null>());
+  const profileScrollRef = useRef<ProfileScrollFadeHandle>(null);
   const insets = useSafeAreaInsets();
   const { savedVideoIds, setVideoSaved, refreshSavedVideos } = savedVideoController;
   const pendingUploads = usePendingVideoUploads();
@@ -9057,26 +12474,69 @@ function MyProfileScreen({
     [pendingUploads, userId],
   );
   const displayVideos = useMemo(
-    () => (activeTab === "videos" ? [...pendingProfileVideos, ...videos] : saved),
-    [activeTab, pendingProfileVideos, saved, videos],
+    () =>
+      filterOutLocallyDeletedVideos([
+        ...pendingProfileVideos,
+        ...sortProfileVideos(videos),
+      ]),
+    [pendingProfileVideos, videos],
   );
+  const sortedOwnVideos = useMemo(() => sortProfileVideos(videos), [videos]);
+  const visibleProfile = profile ?? initialProfile;
+
+  useEffect(() => {
+    if (!initialProfile) return;
+    setProfile((current) => current ?? initialProfile);
+  }, [initialProfile]);
 
   const load = useCallback(async () => {
-    const [nextProfile, ownVideos, savedVideos] = await Promise.all([
-      fetchProfile(userId),
-      fetchMyVideos(userId),
-      fetchSavedVideos(userId),
-      refreshSavedVideos(),
-    ]);
-    setProfile(nextProfile);
-    if (nextProfile) onProfileChanged(nextProfile);
-    setVideos(ownVideos);
-    setSaved(savedVideos);
+    // Only show grid placeholders on the first fetch — later focus refreshes keep the grid.
+    if (!hasLoadedVideosRef.current) setVideosLoading(true);
+    // Paint/refresh the header as soon as profile returns — don't wait on videos.
+    const profilePromise = fetchProfile(userId).then((nextProfile) => {
+      setProfile(nextProfile);
+      if (nextProfile) onProfileChanged(nextProfile);
+      return nextProfile;
+    });
+    try {
+      const [, ownVideos, savedVideos] = await Promise.all([
+        profilePromise,
+        fetchMyVideos(userId),
+        fetchSavedVideos(userId),
+        refreshSavedVideos(),
+      ]);
+      pruneLocallyDeletedProfileVideoIds(ownVideos);
+      setVideos((current) => {
+        const next = filterOutLocallyDeletedVideos(ownVideos).map((video) => {
+          if (!pendingPinRanksRef.current.has(video.id)) return video;
+          const rank = pendingPinRanksRef.current.get(video.id) ?? null;
+          return { ...video, pinnedRank: rank, pinned_rank: rank };
+        });
+        // Compare by id (not index) — pin reorder must not look like a full reload.
+        if (current.length !== next.length) return next;
+        const nextById = new Map(next.map((video) => [video.id, video]));
+        const same = current.every((video) => {
+          const other = nextById.get(video.id);
+          if (!other) return false;
+          const lookingFor =
+            Boolean(video.lookingFor ?? ("looking_for" in video ? video.looking_for : false)) ===
+            Boolean(other.lookingFor ?? ("looking_for" in other ? other.looking_for : false));
+          const pinned =
+            getProfileVideoPinnedRank(video) === getProfileVideoPinnedRank(other);
+          return lookingFor && pinned;
+        });
+        return same ? current : next;
+      });
+      setSaved(savedVideos);
+      hasLoadedVideosRef.current = true;
+    } finally {
+      setVideosLoading(false);
+    }
   }, [onProfileChanged, refreshSavedVideos, userId]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      void load().finally(() => setLoading(false));
+      void load().catch(() => setVideosLoading(false));
     }, 0);
     return () => clearTimeout(timer);
   }, [load, refreshSignal]);
@@ -9092,11 +12552,12 @@ function MyProfileScreen({
   useFocusEffect(
     useCallback(() => {
       let active = true;
+      // Defer refresh until after the tab switch paints so navigation stays snappy.
       const timer = setTimeout(() => {
-        void load().finally(() => {
-          if (active) setLoading(false);
+        void load().catch(() => {
+          if (active) setVideosLoading(false);
         });
-      }, 0);
+      }, 280);
 
       return () => {
         active = false;
@@ -9106,16 +12567,9 @@ function MyProfileScreen({
   );
 
   useEffect(() => {
-    let toastTimer: ReturnType<typeof setTimeout> | null = null;
-
     return subscribePendingUploadPosted((event) => {
       if (event.userId !== userId) return;
-
-      setPostedToastVisible(true);
       void load();
-
-      if (toastTimer) clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => setPostedToastVisible(false), 2400);
     });
   }, [load, userId]);
 
@@ -9127,12 +12581,11 @@ function MyProfileScreen({
   function changeProfileTab(nextTab: "videos" | "saved") {
     if (nextTab === activeTab) return;
 
-    const direction = nextTab === "saved" ? 1 : -1;
+    const toValue = nextTab === "saved" ? -viewportWidth : 0;
     tabSlide.stopAnimation();
-    tabSlide.setValue(direction * viewportWidth);
     setActiveTab(nextTab);
     Animated.timing(tabSlide, {
-      toValue: 0,
+      toValue,
       duration: 260,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
@@ -9193,16 +12646,21 @@ function MyProfileScreen({
       .finally(() => setReportSubmitting(false));
   }
 
-  if (loading) return <LoadingScreen label="loading profile..." />;
+  // Only block the whole tab when we have nothing to paint for the header yet.
+  if (!visibleProfile && videosLoading) {
+    return <LoadingScreen label="loading profile..." />;
+  }
 
-  const postedVideoCount = Math.max(videos.length, profile?.video_count ?? 0);
+  const postedVideoCount = Math.max(videos.length, visibleProfile?.video_count ?? 0);
   const proEntitlement = {
-    earlyAdopter: profile?.early_adopter,
+    earlyAdopter: visibleProfile?.early_adopter,
     videoCount: postedVideoCount,
-    proSubscriptionActive: profile?.pro_subscription_active,
+    proSubscriptionActive: visibleProfile?.pro_subscription_active,
   };
   const proBadge = getProBadgeKind(proEntitlement);
-  const showProProgress = Boolean(profile) && shouldShowProProgress(proEntitlement);
+  const showProProgress = Boolean(visibleProfile) && shouldShowProProgress(proEntitlement);
+  const showVideosGridLoading = videosLoading && displayVideos.length === 0;
+  const showSavedGridLoading = videosLoading && saved.length === 0;
 
   const settingsButton = (
     <Pressable
@@ -9210,20 +12668,22 @@ function MyProfileScreen({
       onPress={() => setSettingsOpen(true)}
       accessibilityLabel="settings"
     >
-      <MenuIcon />
+      <MenuIcon color={getActivityIndicatorColor()} />
     </Pressable>
   );
 
   return (
     <View style={styles.safeWithNav}>
       <ProfileTopScrollFade
+        ref={profileScrollRef}
         topInset={insets.top}
         contentContainerStyle={getTabScreenContentStyle(insets.top)}
+        scrollEnabled={!pinPreviewActive}
         onCollapseChange={setProfileHeaderCollapsed}
         collapsedHeader={
-          profile
+          visibleProfile
             ? {
-                title: profile.display_name ?? "your profile",
+                title: visibleProfile.display_name ?? "your profile",
                 right: settingsButton,
               }
             : undefined
@@ -9237,58 +12697,99 @@ function MyProfileScreen({
           }
           right={profileHeaderCollapsed ? <View style={styles.headerSpacer} /> : settingsButton}
         />
-        {profile ? (
+        {visibleProfile ? (
           <>
             <View style={styles.profileCentered}>
-              <Avatar uri={profile.avatar_url} size={78} />
+              <Avatar uri={visibleProfile.avatar_url} size={78} />
               <ProfileNameAnchor>
                 <View style={styles.centerRow}>
-                  <Text style={styles.h2}>{profile.display_name ?? "your profile"}</Text>
+                  <Text style={styles.h2}>{visibleProfile.display_name ?? "your profile"}</Text>
                   {proBadge ? <ProBadge kind={proBadge} /> : null}
                 </View>
               </ProfileNameAnchor>
-              <Text style={styles.subtitle}>{profile.creator_types?.join(", ") || "creator"}</Text>
-              {formatProfileLocation(getProfileLocationParts(profile).country, getProfileLocationParts(profile).city) && (
-                <Text style={styles.subtitle}>{formatProfileLocation(getProfileLocationParts(profile).country, getProfileLocationParts(profile).city)}</Text>
+              <Text style={styles.subtitle}>{visibleProfile.creator_types?.join(", ") || "creator"}</Text>
+              {formatProfileLocation(
+                getProfileLocationParts(visibleProfile).country,
+                getProfileLocationParts(visibleProfile).city,
+              ) && (
+                <Text style={styles.subtitle}>
+                  {formatProfileLocation(
+                    getProfileLocationParts(visibleProfile).country,
+                    getProfileLocationParts(visibleProfile).city,
+                  )}
+                </Text>
               )}
-              <Text style={styles.profileBio}>{profile.bio || "no bio yet."}</Text>
+              <Text style={styles.profileBio}>{visibleProfile.bio || "no bio yet."}</Text>
             </View>
-            <Pressable style={styles.secondaryButton} onPress={() => setEditing(true)}>
-              <Text style={styles.secondaryButtonText}>edit profile</Text>
+            <Pressable style={styles.profileActionPill} onPress={() => setEditing(true)}>
+              <Text style={styles.profileActionPillText}>edit profile</Text>
             </Pressable>
           </>
         ) : (
           <EmptyCard text="no profile found." />
         )}
         <View style={styles.profileVideoDivider} />
-        <SegmentedTabs tabs={["videos", "saved"]} active={activeTab} onChange={(value) => changeProfileTab(value as "videos" | "saved")} />
-        <Animated.View style={[styles.profileTabSlider, { transform: [{ translateX: tabSlide }] }]}>
-          <VideoGrid
-            videos={displayVideos}
-            privateCopy={activeTab === "saved"}
-            showPendingUploadState={activeTab === "videos"}
-            onRetryPendingUpload={retryPendingVideoUpload}
-            onVideoPress={(video, index) => {
-              if (activeTab === "saved") {
-                setFullscreenIndex(index);
-                return;
-              }
-              if (isPendingProfileVideoId(video.id)) return;
-              const realIndex = videos.findIndex((entry) => entry.id === video.id);
-              if (realIndex >= 0) setOwnFullscreenIndex(realIndex);
-            }}
-          />
-        </Animated.View>
-      </ProfileTopScrollFade>
-      {postedToastVisible ? (
-        <View pointerEvents="none" style={[styles.profilePostedToast, { top: insets.top + 56 }]}>
-          <Text style={styles.profilePostedToastText}>Posted!</Text>
+        <ProfileLibraryTabs
+          active={activeTab}
+          onChange={(value) => changeProfileTab(value)}
+        />
+        <View style={styles.profileTabSliderViewport}>
+          <Animated.View
+            style={[
+              styles.profileTabSliderTrack,
+              {
+                width: viewportWidth * 2,
+                transform: [{ translateX: tabSlide }],
+              },
+            ]}
+          >
+            <View style={styles.profileTabPane}>
+              {showVideosGridLoading ? (
+                <ProfileGridLoadingPlaceholder />
+              ) : (
+                <VideoGrid
+                  videos={displayVideos}
+                  showPendingUploadState
+                  prewarmVisibleVideos={activeTab === "videos"}
+                  allowPinning
+                  onRetryPendingUpload={retryPendingVideoUpload}
+                  onPinPreviewChange={setPinPreviewActive}
+                  ensurePinItemVisible={(rect) =>
+                    profileScrollRef.current?.ensureWindowRectVisible(rect) ?? Promise.resolve()
+                  }
+                  onTogglePin={(video) => {
+                    void toggleOwnProfileVideoPin(userId, video, setVideos, pendingPinRanksRef);
+                  }}
+                  onVideoPress={(video, index) => {
+                    if (isPendingProfileVideoId(video.id)) return;
+                    const realIndex = sortedOwnVideos.findIndex((entry) => entry.id === video.id);
+                    if (realIndex < 0) return;
+                    openProfileVideoFullscreen(video, () => setOwnFullscreenIndex(realIndex));
+                  }}
+                />
+              )}
+            </View>
+            <View style={styles.profileTabPane}>
+              {showSavedGridLoading ? (
+                <ProfileGridLoadingPlaceholder />
+              ) : (
+                <VideoGrid
+                  videos={saved}
+                  privateCopy
+                  prewarmVisibleVideos={activeTab === "saved"}
+                  onVideoPress={(video, index) => {
+                    openProfileVideoFullscreen(video, () => setFullscreenIndex(index));
+                  }}
+                />
+              )}
+            </View>
+          </Animated.View>
         </View>
-      ) : null}
+      </ProfileTopScrollFade>
       {profile && (
         <ProfileVideoFullscreenModal
           visible={ownFullscreenIndex !== null}
-          videos={videos}
+          videos={sortedOwnVideos}
           initialIndex={ownFullscreenIndex ?? 0}
           owner={{
             creatorName: profile.display_name ?? "you",
@@ -9520,7 +13021,7 @@ function MyProfileScreen({
       />
       <EditProfileModal
         visible={editing}
-        profile={profile}
+        profile={visibleProfile}
         onClose={() => setEditing(false)}
         onSaved={(nextProfile) => {
           setProfile(nextProfile);
@@ -9825,6 +13326,7 @@ function SettingsDrawerModal({
   const insets = useSafeAreaInsets();
   const drawerWidth = viewportWidth * 0.8;
   const [mounted, setMounted] = useState(visible);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [blockedUsersOpen, setBlockedUsersOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [termsAndPoliciesOpen, setTermsAndPoliciesOpen] = useState(false);
@@ -9872,8 +13374,34 @@ function SettingsDrawerModal({
   useEffect(() => {
     if (!visible || !profile) return;
 
-    void isLiveLocationSharingEnabled(profile.id).then(setShareLiveLocation);
+    let active = true;
+    void isLiveLocationSharingEnabled(profile.id).then((enabled) => {
+      if (!active) return;
+      setShareLiveLocation(enabled);
+    });
+
+    return () => {
+      active = false;
+    };
   }, [profile?.id, visible]);
+
+  function animateNearMeRadiusReveal(show: boolean) {
+    LayoutAnimation.configureNext({
+      duration: 280,
+      create: {
+        type: LayoutAnimation.Types.easeInEaseOut,
+        property: LayoutAnimation.Properties.opacity,
+      },
+      update: {
+        type: LayoutAnimation.Types.easeInEaseOut,
+      },
+      delete: {
+        type: LayoutAnimation.Types.easeInEaseOut,
+        property: LayoutAnimation.Properties.opacity,
+      },
+    });
+    setShareLiveLocation(show);
+  }
 
   function animateClosed(afterClose?: () => void) {
     if (closingRef.current) return;
@@ -9919,34 +13447,34 @@ function SettingsDrawerModal({
   async function toggleShareLiveLocation(enabled: boolean) {
     if (!profile || savingShareLiveLocation) return;
 
+    // Reveal/hide immediately so the pills track the switch, then persist.
+    animateNearMeRadiusReveal(enabled);
     setSavingShareLiveLocation(true);
     try {
       if (enabled) {
         const result = await enableLiveLocationSharing(profile.id);
         if ("error" in result) {
+          animateNearMeRadiusReveal(false);
           Alert.alert("location needed", result.error, [
             { text: "cancel", style: "cancel" },
             { text: "open settings", onPress: () => void Linking.openSettings() },
           ]);
-          setShareLiveLocation(false);
           return;
         }
 
         onProfileUpdated(result.profile);
-        setShareLiveLocation(true);
         return;
       }
 
       const updatedProfile = await disableLiveLocationSharing(profile.id);
       onProfileUpdated(updatedProfile);
-      setShareLiveLocation(false);
     } catch (err) {
       Alert.alert(
         "could not update live location",
         err instanceof Error ? err.message : "try again in a moment.",
       );
       const current = profile ? await isLiveLocationSharingEnabled(profile.id) : false;
-      setShareLiveLocation(current);
+      animateNearMeRadiusReveal(current);
     } finally {
       setSavingShareLiveLocation(false);
     }
@@ -10048,34 +13576,39 @@ function SettingsDrawerModal({
                         style={styles.settingsSwitch}
                       />
                     </View>
-                    <View style={styles.settingsNearMeSection}>
-                      <Text style={styles.settingsText}>near me radius</Text>
-                      <View style={styles.nearMeRadiusRow}>
-                        {NEAR_ME_RADIUS_OPTIONS.map((miles) => {
-                          const isSelected = selectedNearMeRadius === miles;
-                          return (
-                            <Pressable
-                              key={miles}
-                              style={[
-                                styles.nearMeRadiusOption,
-                                isSelected && styles.nearMeRadiusOptionActive,
-                              ]}
-                              disabled={savingNearMeRadius}
-                              onPress={() => void updateNearMeRadius(miles)}
-                            >
-                              <Text
+                    <Text style={styles.settingsLiveLocationCopy}>
+                      near me uses this to find creators around you. turning on near me also turns this on.
+                    </Text>
+                    {shareLiveLocation ? (
+                      <View style={styles.settingsNearMeSection}>
+                        <Text style={styles.settingsText}>near me radius</Text>
+                        <View style={styles.nearMeRadiusRow}>
+                          {NEAR_ME_RADIUS_OPTIONS.map((miles) => {
+                            const isSelected = selectedNearMeRadius === miles;
+                            return (
+                              <Pressable
+                                key={miles}
                                 style={[
-                                  styles.nearMeRadiusOptionText,
-                                  isSelected && styles.nearMeRadiusOptionTextActive,
+                                  styles.nearMeRadiusOption,
+                                  isSelected && styles.nearMeRadiusOptionActive,
                                 ]}
+                                disabled={savingNearMeRadius}
+                                onPress={() => void updateNearMeRadius(miles)}
                               >
-                                {miles} mi
-                              </Text>
-                            </Pressable>
-                          );
-                        })}
+                                <Text
+                                  style={[
+                                    styles.nearMeRadiusOptionText,
+                                    isSelected && styles.nearMeRadiusOptionTextActive,
+                                  ]}
+                                >
+                                  {miles} mi
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
                       </View>
-                    </View>
+                    ) : null}
                   </View>
                 </View>
                 <SettingsButton label="account" onPress={openAccount} />
@@ -10086,18 +13619,7 @@ function SettingsDrawerModal({
               </ScrollView>
               <Pressable
                 style={styles.logoutButton}
-                onPress={() => {
-                  void (async () => {
-                    try {
-                      await Promise.resolve(onLoggedOut());
-                    } catch (err) {
-                      Alert.alert(
-                        "could not log out",
-                        err instanceof Error ? err.message : "try again",
-                      );
-                    }
-                  })();
-                }}
+                onPress={() => setLogoutConfirmOpen(true)}
                 accessibilityRole="button"
                 accessibilityLabel="log out"
               >
@@ -10106,6 +13628,25 @@ function SettingsDrawerModal({
             </View>
           </Animated.View>
         </PanGestureHandler>
+        <ConfirmModal
+          visible={logoutConfirmOpen}
+          title="log out?"
+          confirmLabel="log out"
+          onCancel={() => setLogoutConfirmOpen(false)}
+          onConfirm={() => {
+            setLogoutConfirmOpen(false);
+            void (async () => {
+              try {
+                await Promise.resolve(onLoggedOut());
+              } catch (err) {
+                Alert.alert(
+                  "could not log out",
+                  err instanceof Error ? err.message : "try again",
+                );
+              }
+            })();
+          }}
+        />
         <BlockedUsersModal
           visible={blockedUsersOpen}
           currentUserId={currentUserId}
@@ -10377,7 +13918,7 @@ function NotificationsSettingsModal({
                       keyboardShouldPersistTaps="handled"
                       style={[
                         styles.locationFilterList,
-                        { maxHeight: LOCATION_PICKER_MAX_VISIBLE_ROWS * LOCATION_PICKER_ROW_HEIGHT },
+                        { maxHeight: LOCATION_PICKER_VISIBLE_HEIGHT },
                       ]}
                     >
                       {roleMatches.map((role) => {
@@ -10840,6 +14381,7 @@ function ChatModal({
 
   function openMessageMenu(message: ChatMessage) {
     if (message.incoming) return;
+    triggerHoldHaptic();
     setContextMessageId((current) => (current === message.id ? null : message.id));
   }
 
@@ -11015,7 +14557,12 @@ function ChatModal({
       <View style={styles.safe}>
         <View style={styles.flex}>
           <View style={[styles.chatHeader, { paddingTop: Math.max(insets.top + 10, 18) }]}>
-            <Pressable onPress={onClose} style={styles.iconCircle}>
+            <Pressable
+              onPress={onClose}
+              style={styles.chatBackButton}
+              accessibilityLabel="back"
+              hitSlop={10}
+            >
               <Text style={styles.iconText}>‹</Text>
             </Pressable>
             {!isSystem ? (
@@ -11421,45 +14968,6 @@ function MessageVideoThumbnail({
   );
 }
 
-function RequestModal({
-  request,
-  onClose,
-  onOpenProfile,
-  onMessage,
-}: {
-  request: InboxRequest | null;
-  onClose: () => void;
-  onOpenProfile: (request: InboxRequest) => void;
-  onMessage: (request: InboxRequest) => void;
-}) {
-  if (!request) return null;
-  return (
-    <Modal animationType="none" transparent visible={Boolean(request)} onRequestClose={onClose}>
-      <SwipeBackSurface resetKey={request.id} onBack={onClose} style={styles.flex}>
-        <SafeAreaView style={styles.safe}>
-          <ScrollView contentContainerStyle={styles.screenContent}>
-            <Pressable onPress={onClose} style={styles.iconCircle}>
-              <Text style={styles.iconText}>‹</Text>
-            </Pressable>
-            <View style={styles.profileCentered}>
-            <Pressable onPress={() => onOpenProfile(request)} accessibilityLabel={`open ${request.creatorName}'s profile`}>
-              <Avatar uri={request.avatarUrl} size={78} />
-            </Pressable>
-              <View style={styles.centerRow}>
-                <Text style={styles.h2}>{request.creatorName}</Text>
-                {request.proBadge ? <ProBadge kind={request.proBadge} /> : null}
-              </View>
-              <Text style={styles.subtitle}>{request.role} - {request.location}</Text>
-              <Text style={styles.copyCentered}>{request.preview}</Text>
-            </View>
-            <PrimaryButton label="reply to jam" onPress={() => onMessage(request)} />
-          </ScrollView>
-        </SafeAreaView>
-      </SwipeBackSurface>
-    </Modal>
-  );
-}
-
 function JamTabBar({
   state,
   navigation,
@@ -11468,18 +14976,23 @@ function JamTabBar({
   unreadInboxCount,
   onShuffleDiscover,
   feedReady = true,
+  chromeOpacity,
+  chromeClear = false,
 }: BottomTabBarProps & {
   userId: string;
   currentUserProfile: Profile | null;
   unreadInboxCount: number;
   onShuffleDiscover: () => void;
   feedReady?: boolean;
+  chromeOpacity?: Animated.Value;
+  chromeClear?: boolean;
 }) {
   const insets = useSafeAreaInsets();
   const activeRoute = state.routes[state.index]?.name as Tab;
   const navBarHeight = getNavBarHeight(insets.bottom);
   const navStyles = activeRoute === "discover" ? darkStyles : styles;
   const postingStatus = usePendingUploadFeedProgress(userId);
+  const hideChromeOnDiscover = activeRoute === "discover" && Boolean(chromeOpacity);
 
   useEffect(() => {
     if (
@@ -11513,7 +15026,7 @@ function JamTabBar({
     }
 
     if (!isFocused) {
-      LayoutAnimation.configureNext(TAB_SWITCH_ANIMATION);
+      // Instant tab switch — LayoutAnimation here made every change feel laggy.
       navigation.navigate(route.name);
     }
   }
@@ -11523,21 +15036,34 @@ function JamTabBar({
   return (
     <View pointerEvents="box-none" style={styles.uploadProgressNavWrap}>
       {postingStatus && activeRoute === "discover" ? (
-        <View
+        <Animated.View
           pointerEvents="none"
-          style={[styles.uploadProgressLine, { bottom: navBarHeight }]}
+          style={[
+            styles.uploadProgressLine,
+            { bottom: navBarHeight },
+            hideChromeOnDiscover ? { opacity: chromeOpacity } : null,
+          ]}
           accessibilityLabel={
             postingStatus.phase === "uploading"
               ? "Uploading video"
               : postingStatus.phase === "processing"
-                ? "Processing video"
+                ? postingStatus.progress < 32
+                  ? "Rendering video edits"
+                  : "Processing video"
                 : "Finishing post"
           }
         >
           <View style={[styles.uploadProgressLineFill, { width: `${postingStatus.progress}%` }]} />
-        </View>
+        </Animated.View>
       ) : null}
-      <View style={[navStyles.nav, { height: navBarHeight, paddingBottom: Math.max(insets.bottom, 12) }]}>
+      <Animated.View
+        pointerEvents={hideChromeOnDiscover && chromeClear ? "none" : "box-none"}
+        style={[
+          navStyles.nav,
+          { height: navBarHeight, paddingBottom: Math.max(insets.bottom, 12) },
+          hideChromeOnDiscover ? { opacity: chromeOpacity } : null,
+        ]}
+      >
         <NavItem
           tab="discover"
           label="discover"
@@ -11565,7 +15091,7 @@ function JamTabBar({
           iconElement={<ProfileNavIcon profile={currentUserProfile} />}
           styleSet={navStyles}
         />
-      </View>
+      </Animated.View>
     </View>
   );
 }
@@ -11639,7 +15165,9 @@ function MailNavIcon({
       </Svg>
       {unreadCount > 0 && (
         <View style={styleSet.mailBadge}>
-          <Text style={styleSet.mailBadgeText}>{badgeText}</Text>
+          <View style={styleSet.mailBadgeInner}>
+            <Text style={styleSet.mailBadgeText}>{badgeText}</Text>
+          </View>
         </View>
       )}
     </View>
@@ -11665,6 +15193,7 @@ const JAM_JAR_LID_EMPTY_GAP = -1;
 const JAM_JAR_LID_FULL_GAP = 2;
 const JAM_JAR_JAM_COLOR = "#d63438";
 const UNJAM_POPOVER_WIDTH = 200;
+const NOTIFY_POPOVER_WIDTH = 240;
 const jamTint = { backgroundColor: JAM_JAR_JAM_COLOR } as const;
 const jamBorder = { borderColor: JAM_JAR_JAM_COLOR } as const;
 // Subtle drop shadow so overlay icons stay visible on bright videos (iOS shadows follow the icon's alpha).
@@ -11693,6 +15222,40 @@ function JamJarSmoothWaveSurface({ color = "#fff" }: { color?: string }) {
 }
 
 const BOOKMARK_CREAM = "#f6e7c1";
+
+function FeedChromeLockIcon({ open, size = 20 }: { open: boolean; size?: number }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      {open ? (
+        <Path
+          d="M8 11V8.2C8 5.9 9.7 4 12 4c1.4 0 2.6.7 3.3 1.7"
+          stroke="#fff"
+          strokeWidth={1.9}
+          strokeLinecap="round"
+        />
+      ) : (
+        <Path
+          d="M8 11V8.2C8 5.9 9.7 4 12 4s4 1.9 4 4.2V11"
+          stroke="#fff"
+          strokeWidth={1.9}
+          strokeLinecap="round"
+        />
+      )}
+      <Path
+        d="M6.5 11h11c.8 0 1.5.7 1.5 1.5v6c0 1.4-1.1 2.5-2.5 2.5h-9C6.1 21 5 19.9 5 18.5v-6C5 11.7 5.7 11 6.5 11Z"
+        stroke="#fff"
+        strokeWidth={1.9}
+        strokeLinejoin="round"
+      />
+      <Path
+        d="M12 14.2v2.4"
+        stroke="#fff"
+        strokeWidth={1.9}
+        strokeLinecap="round"
+      />
+    </Svg>
+  );
+}
 
 function BookmarkIcon({ filled = false }: { filled?: boolean }) {
   return (
@@ -11950,8 +15513,126 @@ function NearMeIcon({ active = false }: { active?: boolean }) {
           strokeLinecap="round"
           strokeLinejoin="round"
         />
-        <Circle cx={12} cy={10.5} r={2.35} stroke={stroke} strokeWidth={2} />
+        <Circle
+          cx={12}
+          cy={10.5}
+          r={2.35}
+          stroke={stroke}
+          strokeWidth={2}
+          fill={active ? stroke : "none"}
+        />
       </Svg>
+    </Animated.View>
+  );
+}
+
+const LOOKING_FOR_ICON_BLUE = "#3b82f6";
+
+const PIN_ICON_RED = "#ef4444";
+
+const PIN_ICON_PATH =
+  "M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z";
+
+const PIN_PREVIEW_EASE = Easing.bezier(0.22, 1, 0.36, 1);
+const PIN_PREVIEW_SCALE = 1.1;
+const PIN_MENU_CARD_WIDTH = 148;
+const PIN_MENU_CARD_HEIGHT = 52;
+
+/** Classic drawing / push pin — solid fill, angled diagonally. */
+function PinIcon({
+  size = 22,
+  color = PIN_ICON_RED,
+}: {
+  size?: number;
+  color?: string;
+}) {
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        alignItems: "center",
+        justifyContent: "center",
+        transform: [{ rotate: "35deg" }],
+      }}
+    >
+      <View
+        style={{
+          position: "absolute",
+          transform: [{ translateX: 0.8 }, { translateY: 1.1 }],
+        }}
+      >
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+          <Path d={PIN_ICON_PATH} fill="rgba(0,0,0,0.45)" />
+        </Svg>
+      </View>
+      <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+        <Path d={PIN_ICON_PATH} fill={color} />
+      </Svg>
+    </View>
+  );
+}
+
+function LookingForIcon({
+  active = false,
+  size = 24,
+  color,
+  shadow = false,
+}: {
+  active?: boolean;
+  size?: number;
+  color?: string;
+  /** Soft silhouette shadow for video overlays. */
+  shadow?: boolean;
+}) {
+  const tint = color ?? (active ? LOOKING_FOR_ICON_BLUE : "#d4d4d8");
+  const scale = useRef(new Animated.Value(1)).current;
+  const wasActiveRef = useRef(active);
+  // Asset is wider than tall (~640×350); size is the height.
+  const width = Math.round(size * 1.75);
+  const height = size;
+
+  useEffect(() => {
+    if (active && !wasActiveRef.current) {
+      scale.setValue(1);
+      Animated.sequence([
+        Animated.timing(scale, {
+          toValue: 1.22,
+          duration: 140,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(scale, {
+          toValue: 1,
+          duration: 200,
+          easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+    wasActiveRef.current = active;
+  }, [active, scale]);
+
+  return (
+    <Animated.View style={{ width, height, transform: [{ scale }] }}>
+      {shadow ? (
+        <Image
+          source={LOOKING_FOR_BINOCULARS_ICON}
+          style={{
+            position: "absolute",
+            width,
+            height,
+            tintColor: "rgba(0,0,0,0.55)",
+            transform: [{ translateX: 0.6 }, { translateY: 1.1 }],
+          }}
+          resizeMode="contain"
+        />
+      ) : null}
+      <Image
+        source={LOOKING_FOR_BINOCULARS_ICON}
+        style={{ width, height, tintColor: tint }}
+        resizeMode="contain"
+      />
     </Animated.View>
   );
 }
@@ -12016,7 +15697,7 @@ function filterIconArcPath(cx: number, cy: number, radius: number, startDeg: num
 
 function CreateCameraFilterIcon({ active = false }: { active?: boolean }) {
   const size = CREATE_CAMERA_CONTROL_ICON_SIZE;
-  const strokeWidth = active ? 2.2 : 1.75;
+  const strokeWidth = active ? 2.55 : 2.15;
   const stroke = "#fff";
   const radius = 5.15;
   const top = { cx: 12, cy: 8.15 };
@@ -12051,6 +15732,42 @@ function CreateCameraFilterIcon({ active = false }: { active?: boolean }) {
   );
 }
 
+function CreateCameraFlipIcon() {
+  const size = CREATE_CAMERA_CONTROL_ICON_SIZE;
+  const strokeWidth = 2.2;
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      {/* Two circular arrows — flip / switch camera */}
+      <Path
+        d="M7.2 6.4a7.2 7.2 0 0 1 11.1 2.4"
+        stroke="#fff"
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+      />
+      <Path
+        d="M18.6 5.2v4.1h-4.1"
+        stroke="#fff"
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <Path
+        d="M16.8 17.6a7.2 7.2 0 0 1-11.1-2.4"
+        stroke="#fff"
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+      />
+      <Path
+        d="M5.4 18.8v-4.1h4.1"
+        stroke="#fff"
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
 function CreateCameraFlashIcon({ enabled }: { enabled: boolean }) {
   const size = CREATE_CAMERA_CONTROL_ICON_SIZE;
   return (
@@ -12058,7 +15775,7 @@ function CreateCameraFlashIcon({ enabled }: { enabled: boolean }) {
       <Path
         d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z"
         stroke="#fff"
-        strokeWidth={enabled ? 2.2 : 1.8}
+        strokeWidth={enabled ? 2.6 : 2.2}
         fill={enabled ? "#fff" : "none"}
         strokeLinejoin="round"
       />
@@ -12074,29 +15791,29 @@ function CreateCameraTimerIcon({ seconds }: { seconds: RecordingTimerSeconds }) 
   const size = CREATE_CAMERA_CONTROL_ICON_SIZE;
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-      <Circle cx="12" cy="13" r="8" stroke="#fff" strokeWidth={1.8} />
-      <Path d="M12 9.5v4.2l2.4 1.8" stroke="#fff" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
-      <Path d="M9 3.5h6" stroke="#fff" strokeWidth={1.8} strokeLinecap="round" />
+      <Circle cx="12" cy="13" r="8" stroke="#fff" strokeWidth={2.2} />
+      <Path d="M12 9.5v4.2l2.4 1.8" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" />
+      <Path d="M9 3.5h6" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" />
     </Svg>
   );
 }
 
-function FeedFilterIcon() {
+function FeedFilterIcon({ color = "#fff" }: { color?: string }) {
   return (
     <Svg width={26} height={34} viewBox="0 0 24 32" fill="none">
-      <Path d="M4 8h16" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" />
-      <Path d="M7 16h10" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" />
-      <Path d="M4 24h16" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" />
+      <Path d="M4 8h16" stroke={color} strokeWidth={2.2} strokeLinecap="round" />
+      <Path d="M7 16h10" stroke={color} strokeWidth={2.2} strokeLinecap="round" />
+      <Path d="M4 24h16" stroke={color} strokeWidth={2.2} strokeLinecap="round" />
     </Svg>
   );
 }
 
-function MenuIcon() {
+function MenuIcon({ color = "#fff" }: { color?: string }) {
   return (
     <Svg width={22} height={16} viewBox="0 0 22 16" fill="none">
-      <Path d="M1 1h20" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
-      <Path d="M1 8h20" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
-      <Path d="M1 15h20" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M1 1h20" stroke={color} strokeWidth={2} strokeLinecap="round" />
+      <Path d="M1 8h20" stroke={color} strokeWidth={2} strokeLinecap="round" />
+      <Path d="M1 15h20" stroke={color} strokeWidth={2} strokeLinecap="round" />
     </Svg>
   );
 }
@@ -12438,28 +16155,13 @@ function ProBadge({ kind }: { kind: ProBadgeKind }) {
 }
 
 function VerificationBadge({ tone }: { tone: ProBadgeKind }) {
-  const scallops = Array.from({ length: 24 }, (_, index) => {
-    const angle = (index / 24) * Math.PI * 2;
-    const radius = 5.7;
-    return {
-      left: 6.6 + Math.cos(angle) * radius,
-      top: 6.6 + Math.sin(angle) * radius,
-    };
-  });
   const colors =
     tone === "blue"
       ? (["#0b3a7a", "#2f7de1", "#9fd0ff", "#2a6fd0", "#0a2f66"] as const)
       : (["#8b5b10", "#d7a435", "#fff36f", "#c98d21", "#7b4e0b"] as const);
-  const scallopColor = tone === "blue" ? "#2f7de1" : "#d7a435";
 
   return (
     <View style={styles.goldBadge}>
-      {scallops.map((scallop, index) => (
-        <View
-          key={index}
-          style={[styles.goldBadgeScallop, scallop, { backgroundColor: scallopColor }]}
-        />
-      ))}
       <LinearGradient
         colors={[...colors]}
         locations={[0, 0.25, 0.52, 0.78, 1]}
@@ -12549,33 +16251,78 @@ function ProfileNameAnchor({ children }: { children: React.ReactNode }) {
   );
 }
 
-function ProfileTopScrollFade({
-  topInset,
-  contentContainerStyle,
-  children,
-  collapsedHeader,
-  onCollapseChange,
-  onScroll,
-  ...scrollProps
-}: {
-  topInset: number;
-  contentContainerStyle?: StyleProp<ViewStyle>;
-  children: React.ReactNode;
-  collapsedHeader?: {
-    title: string;
-    left?: React.ReactNode;
-    right?: React.ReactNode;
-  };
-  onCollapseChange?: (collapsed: boolean) => void;
-} & Omit<ScrollViewProps, "contentContainerStyle" | "children" | "onScroll"> & {
-  onScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
-}) {
+type ProfileScrollFadeHandle = {
+  /** Scroll so a window-rect is fully inside the visible profile area. */
+  ensureWindowRectVisible: (rect: {
+    y: number;
+    height: number;
+    topExtra?: number;
+    bottomExtra?: number;
+  }) => Promise<void>;
+};
+
+const ProfileTopScrollFade = forwardRef<
+  ProfileScrollFadeHandle,
+  {
+    topInset: number;
+    contentContainerStyle?: StyleProp<ViewStyle>;
+    children: React.ReactNode;
+    collapsedHeader?: {
+      title: string;
+      left?: React.ReactNode;
+      right?: React.ReactNode;
+    };
+    onCollapseChange?: (collapsed: boolean) => void;
+  } & Omit<ScrollViewProps, "contentContainerStyle" | "children" | "onScroll"> & {
+    onScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  }
+>(function ProfileTopScrollFade(
+  {
+    topInset,
+    contentContainerStyle,
+    children,
+    collapsedHeader,
+    onCollapseChange,
+    onScroll,
+    ...scrollProps
+  },
+  ref,
+) {
   const contentRef = useRef<View>(null);
+  const scrollRef = useRef<ScrollView>(null);
   const scrollYRef = useRef(0);
   const showCollapsedRef = useRef(false);
   const [nameEndY, setNameEndY] = useState(0);
   const [showCollapsed, setShowCollapsed] = useState(false);
   const collapsedAnim = useRef(new Animated.Value(0)).current;
+  const insets = useSafeAreaInsets();
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      ensureWindowRectVisible: ({ y, height, topExtra = 0, bottomExtra = 0 }) => {
+        const minY = Math.max(insets.top, 8) + 6;
+        const maxY = viewportHeight - Math.max(insets.bottom, 0) - NAV_BAR_HEIGHT - 8;
+        const neededTop = y - topExtra;
+        const neededBottom = y + height + bottomExtra;
+        let delta = 0;
+        if (neededTop < minY) {
+          delta = neededTop - minY;
+        } else if (neededBottom > maxY) {
+          delta = neededBottom - maxY;
+        }
+        if (Math.abs(delta) < 2) {
+          return Promise.resolve();
+        }
+        const nextY = Math.max(0, scrollYRef.current + delta);
+        scrollRef.current?.scrollTo({ y: nextY, animated: true });
+        return new Promise((resolve) => {
+          setTimeout(resolve, 280);
+        });
+      },
+    }),
+    [insets.bottom, insets.top],
+  );
 
   const measureNameEnd = useCallback((anchor: View) => {
     const content = contentRef.current;
@@ -12664,6 +16411,7 @@ function ProfileTopScrollFade({
           </Animated.View>
         ) : null}
         <ScrollView
+          ref={scrollRef}
           {...scrollProps}
           onScroll={handleScroll}
           scrollEventThrottle={scrollProps.scrollEventThrottle ?? 16}
@@ -12675,14 +16423,18 @@ function ProfileTopScrollFade({
         </ScrollView>
         <LinearGradient
           pointerEvents="none"
-          colors={[dark, "rgba(10, 10, 10, 0)"]}
+          colors={
+            activeThemeMode === "light"
+              ? ["#f7f7f8", "rgba(247, 247, 248, 0)"]
+              : [dark, "rgba(10, 10, 10, 0)"]
+          }
           locations={[0, 1]}
           style={[styles.profileScrollTopFade, { height: topInset + PROFILE_TOP_FADE_EXTRA }]}
         />
       </View>
     </ProfileScrollCollapseContext.Provider>
   );
-}
+});
 
 function TabLogoHeader({
   right,
@@ -12755,17 +16507,20 @@ function FilterQueryField({
   onChangeText,
   placeholder,
   onReset,
+  onFocus,
 }: {
   value: string;
   onChangeText: (value: string) => void;
   placeholder: string;
   onReset: () => void;
+  onFocus?: () => void;
 }) {
   return (
     <View style={styles.filterQueryRow}>
       <TextInput
         value={value}
         onChangeText={onChangeText}
+        onFocus={onFocus}
         placeholder={placeholder}
         placeholderTextColor="#71717a"
         style={[styles.input, styles.filterQueryInput]}
@@ -12870,6 +16625,53 @@ function SegmentedTabs({
   );
 }
 
+function ProfileLibraryTabs({
+  active,
+  onChange,
+}: {
+  active: "videos" | "saved";
+  onChange: (tab: "videos" | "saved") => void;
+}) {
+  return (
+    <View style={styles.profileLibraryTabs}>
+      <Pressable
+        onPress={() => onChange("videos")}
+        hitSlop={8}
+        accessibilityRole="button"
+        accessibilityState={{ selected: active === "videos" }}
+      >
+        <Text style={[styles.profileLibraryTabText, active === "videos" && styles.profileLibraryTabTextActive]}>
+          videos
+        </Text>
+      </Pressable>
+      <View style={styles.profileLibraryTabDivider} />
+      <Pressable
+        onPress={() => onChange("saved")}
+        hitSlop={8}
+        accessibilityRole="button"
+        accessibilityState={{ selected: active === "saved" }}
+      >
+        <Text style={[styles.profileLibraryTabText, active === "saved" && styles.profileLibraryTabTextActive]}>
+          saved
+        </Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function ProfileGridLoadingPlaceholder() {
+  // One frosted slab over the grid area (not per-cell spinners).
+  const coverHeight = PROFILE_GRID_ITEM_WIDTH * (16 / 9) * 2 + PROFILE_GRID_GAP;
+  return (
+    <View
+      style={[styles.profileGridLoadingBlur, { height: coverHeight }]}
+      accessibilityLabel="loading videos"
+    >
+      <ActivityIndicator color={getActivityIndicatorColor()} />
+    </View>
+  );
+}
+
 function UploadProgressRing({ progress, size = 48 }: { progress: number; size?: number }) {
   const strokeWidth = 3.5;
   const radius = (size - strokeWidth) / 2;
@@ -12906,8 +16708,24 @@ function UploadProgressRing({ progress, size = 48 }: { progress: number; size?: 
   );
 }
 
-function ProfileGridThumbnail({ video }: { video: ProfileVideo | FeedVideo }) {
+function ProfileGridThumbnail({
+  video,
+  blurred = false,
+  prewarmEnabled = false,
+  visibilitySyncRef,
+  instantReveal = false,
+}: {
+  video: ProfileVideo | FeedVideo;
+  blurred?: boolean;
+  /** When true, start buffering HLS once this thumb intersects the viewport. */
+  prewarmEnabled?: boolean;
+  visibilitySyncRef?: MutableRefObject<Set<() => void>>;
+  /** Skip the load crossfade (used for the long-press pin preview clone). */
+  instantReveal?: boolean;
+}) {
   const streamId = getVideoStreamId(video);
+  const aspectCacheKey = getVideoAspectCacheKeyFromVideo(video);
+  const rememberedAspect = getRememberedVideoAspectSize(aspectCacheKey);
   const thumbnailTimeMs = getVideoThumbnailTimeMs(video);
   const mediaUri =
     ("mediaUrl" in video && video.mediaUrl) ||
@@ -12918,35 +16736,174 @@ function ProfileGridThumbnail({ video }: { video: ProfileVideo | FeedVideo }) {
     [video.id, streamId, thumbnailTimeMs, mediaUri],
   );
   const [candidateIndex, setCandidateIndex] = useState(0);
+  const [thumbResizeMode, setThumbResizeMode] = useState<"contain" | "cover">(() =>
+    imageResizeModeForVideoSize(rememberedAspect?.width, rememberedAspect?.height),
+  );
   const uri = candidates[candidateIndex] ?? null;
   const caption = getVideoCaption(video);
+  const rootRef = useRef<View>(null);
+  const prewarmedVisibleRef = useRef(false);
+  const revealedRef = useRef(instantReveal);
+  const thumbOpacity = useRef(new Animated.Value(instantReveal ? 1 : 0)).current;
+  const placeholderOpacity = useRef(new Animated.Value(instantReveal ? 0 : 1)).current;
+
+  function resetThumbReveal() {
+    if (instantReveal) {
+      revealedRef.current = true;
+      thumbOpacity.stopAnimation();
+      placeholderOpacity.stopAnimation();
+      thumbOpacity.setValue(1);
+      placeholderOpacity.setValue(0);
+      return;
+    }
+    revealedRef.current = false;
+    thumbOpacity.stopAnimation();
+    placeholderOpacity.stopAnimation();
+    thumbOpacity.setValue(0);
+    placeholderOpacity.setValue(1);
+  }
+
+  function revealThumb() {
+    if (revealedRef.current) return;
+    revealedRef.current = true;
+    if (instantReveal) {
+      thumbOpacity.setValue(1);
+      placeholderOpacity.setValue(0);
+      return;
+    }
+    Animated.parallel([
+      Animated.timing(thumbOpacity, {
+        toValue: 1,
+        duration: 240,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(placeholderOpacity, {
+        toValue: 0,
+        duration: 240,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }
 
   useEffect(() => {
     setCandidateIndex(0);
-  }, [video.id, streamId, thumbnailTimeMs, mediaUri]);
+    const cached = getRememberedVideoAspectSize(aspectCacheKey);
+    setThumbResizeMode(imageResizeModeForVideoSize(cached?.width, cached?.height));
+    prewarmedVisibleRef.current = false;
+    resetThumbReveal();
+  }, [aspectCacheKey, video.id, streamId, thumbnailTimeMs, mediaUri, instantReveal]);
+
+  useEffect(() => {
+    resetThumbReveal();
+  }, [uri, instantReveal]);
+
+  // Warm aspect cache from HLS before the user taps into fullscreen.
+  useEffect(() => {
+    if (getRememberedVideoAspectSize(aspectCacheKey)) return;
+    const gridSource = getGridVideoSource(video);
+    if (!gridSource || !gridSource.includes(".m3u8")) return;
+    let cancelled = false;
+    void probeHlsVideoSize(gridSource).then((size) => {
+      if (cancelled || !size) return;
+      rememberVideoAspectSize(aspectCacheKey, size.width, size.height);
+      rememberVideoAspectSize(getVideoAspectCacheKeyFromSource(gridSource), size.width, size.height);
+      setThumbResizeMode(imageResizeModeForVideoSize(size.width, size.height));
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Depend on identity fields only — pin toggles must not retrigger probes.
+  }, [aspectCacheKey, streamId, video.id]);
+
+  useEffect(() => {
+    if (!prewarmEnabled || blurred) return;
+
+    const checkVisibility = () => {
+      rootRef.current?.measureInWindow((x, y, width, height) => {
+        if (!(width > 0 && height > 0)) return;
+        const visible =
+          y < viewportHeight &&
+          y + height > 0 &&
+          x < viewportWidth &&
+          x + width > 0;
+        if (!visible) return;
+        const gridSource = getGridVideoSource(video);
+        if (!gridSource) return;
+        if (prewarmedVisibleRef.current) {
+          touchProfileVideoPrewarm(gridSource);
+          return;
+        }
+        prewarmedVisibleRef.current = true;
+        prewarmProfileVideoSource(gridSource);
+        void ensureVideoAspectCached(video);
+      });
+    };
+
+    visibilitySyncRef?.current.add(checkVisibility);
+    const frame = requestAnimationFrame(checkVisibility);
+    const interval = setInterval(checkVisibility, 700);
+    return () => {
+      visibilitySyncRef?.current.delete(checkVisibility);
+      cancelAnimationFrame(frame);
+      clearInterval(interval);
+    };
+    // video.id only — pin metadata updates must not restart prewarm timers.
+  }, [blurred, prewarmEnabled, video.id, visibilitySyncRef]);
 
   if (!uri) {
-    return <Text style={styles.gridCaption}>{caption}</Text>;
+    return (
+      <View style={[StyleSheet.absoluteFill, styles.gridThumbPlaceholder]}>
+        <Text style={styles.gridCaption}>{caption}</Text>
+      </View>
+    );
   }
 
   const presentation = getVideoPresentation(video);
 
   return (
-    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-      <Image
+    <View
+      ref={rootRef}
+      collapsable={false}
+      pointerEvents="none"
+      style={[StyleSheet.absoluteFill, { backgroundColor: "#000" }]}
+    >
+      <Animated.View
+        style={[styles.gridThumbPlaceholder, { opacity: placeholderOpacity }]}
+      />
+      <Animated.Image
         alt={caption}
         source={{ uri }}
-        style={StyleSheet.absoluteFill}
-        resizeMode="cover"
+        style={[StyleSheet.absoluteFill, { opacity: thumbOpacity }]}
+        resizeMode={thumbResizeMode}
+        blurRadius={blurred ? 18 : 0}
+        onLoad={(event) => {
+          const { width, height } = event.nativeEvent.source;
+          // Wide clip thumbs are a reliable landscape signal; portrait image boxes are not
+          // (local bake posters can be a tall canvas around landscape footage).
+          if (width > height) {
+            rememberVideoAspectSize(aspectCacheKey, width, height);
+          }
+          const cached = getRememberedVideoAspectSize(aspectCacheKey);
+          setThumbResizeMode(
+            imageResizeModeForVideoSize(cached?.width ?? width, cached?.height ?? height),
+          );
+          revealThumb();
+        }}
         onError={() => {
           setCandidateIndex((current) => (current + 1 < candidates.length ? current + 1 : current));
         }}
       />
-      <VideoPresentationOverlays
-        filter={presentation.filter}
-        textOverlays={presentation.textOverlays}
-        density="thumb"
-      />
+      {!blurred ? (
+        <Animated.View style={[StyleSheet.absoluteFill, { opacity: thumbOpacity }]} pointerEvents="none">
+          <VideoPresentationOverlays
+            filter={presentation.filter}
+            textOverlays={presentation.textOverlays}
+            density="thumb"
+          />
+        </Animated.View>
+      ) : null}
     </View>
   );
 }
@@ -12954,40 +16911,329 @@ function ProfileGridThumbnail({ video }: { video: ProfileVideo | FeedVideo }) {
 function VideoGrid({
   videos,
   locked,
+  lockMessage,
+  lockScrollSyncRef,
   privateCopy,
   showPendingUploadState = false,
+  prewarmVisibleVideos = false,
+  allowPinning = false,
   onRetryPendingUpload,
+  onTogglePin,
+  onPinPreviewChange,
+  ensurePinItemVisible,
   onVideoPress,
 }: {
   videos: Array<ProfileVideo | FeedVideo>;
   locked?: boolean;
+  lockMessage?: string;
+  /** Parent calls this on every scroll frame so the lock copy stays viewport-centred. */
+  lockScrollSyncRef?: MutableRefObject<(() => void) | null>;
   privateCopy?: boolean;
   showPendingUploadState?: boolean;
+  /** Pre-buffer HLS for thumbs that intersect the viewport. */
+  prewarmVisibleVideos?: boolean;
+  /** Own-profile only: long-press opens a pin popup. */
+  allowPinning?: boolean;
   onRetryPendingUpload?: (uploadId: string) => void;
+  onTogglePin?: (video: ProfileVideo | FeedVideo) => void;
+  /** Fired when the long-press pin preview opens/closes (lock parent scroll). */
+  onPinPreviewChange?: (active: boolean) => void;
+  /** Scroll the parent so a partially visible thumb is fully on screen before preview. */
+  ensurePinItemVisible?: (rect: {
+    y: number;
+    height: number;
+    topExtra?: number;
+    bottomExtra?: number;
+  }) => Promise<void>;
   onVideoPress?: (video: ProfileVideo | FeedVideo, index: number) => void;
 }) {
   usePendingVideoUploads();
+  const lockGateRef = useRef<View>(null);
+  const lockMessageRef = useRef<View>(null);
+  const lockMessageHeightRef = useRef(48);
+  const thumbVisibilityCheckersRef = useRef<Set<() => void>>(new Set());
+  const gridItemRefs = useRef(new Map<string, View | null>());
+  const pinPreviewScale = useRef(new Animated.Value(1)).current;
+  const pinPreviewDim = useRef(new Animated.Value(0)).current;
+  const pinMenuCardAnim = useRef(new Animated.Value(0)).current;
+  const pinPreviewClosingRef = useRef(false);
+  const pinPreviewAfterCloseRef = useRef<(() => void) | null>(null);
+  const pinPreviewOpenTokenRef = useRef(0);
+  const [pinMenu, setPinMenu] = useState<{
+    videoId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const pinMenuVideo = pinMenu
+    ? videos.find((entry) => entry.id === pinMenu.videoId) ?? null
+    : null;
+  const pinMenuPinned = getProfileVideoPinnedRank(pinMenuVideo as ProfileVideo | null) != null;
 
-  if (videos.length === 0) return <EmptyCard text="no videos yet" />;
+  function openPinMenuForVideo(videoId: string) {
+    if (pinPreviewClosingRef.current) return;
+    triggerHoldHaptic();
+    const present = (x: number, y: number, width: number, height: number) => {
+      pinPreviewClosingRef.current = false;
+      pinPreviewAfterCloseRef.current = null;
+      pinPreviewScale.stopAnimation();
+      pinPreviewDim.stopAnimation();
+      pinMenuCardAnim.stopAnimation();
+      pinPreviewScale.setValue(1);
+      pinPreviewDim.setValue(0);
+      pinMenuCardAnim.setValue(0);
+      pinPreviewOpenTokenRef.current += 1;
+      // Mount the floating clone first; animate on the next frames once it's painted
+      // so enlarge doesn't hitch on Modal/image mount.
+      setPinMenu({ videoId, x, y, width, height });
+    };
+
+    const node = gridItemRefs.current.get(videoId);
+    if (!node) {
+      present(viewportWidth / 2 - 40, viewportHeight / 2 - 40, 80, 80);
+      return;
+    }
+
+    node.measureInWindow((x, y, width, height) => {
+      const expand = (height * (PIN_PREVIEW_SCALE - 1)) / 2;
+      const reveal = async () => {
+        if (ensurePinItemVisible) {
+          await ensurePinItemVisible({
+            y,
+            height,
+            topExtra: expand + PIN_MENU_CARD_HEIGHT + 10,
+            bottomExtra: expand + 8,
+          });
+          // Re-measure after the grid scrolls the thumb fully on screen.
+          node.measureInWindow((nx, ny, nw, nh) => {
+            present(nx, ny, nw, nh);
+          });
+          return;
+        }
+        present(x, y, width, height);
+      };
+      void reveal();
+    });
+  }
+
+  function dismissPinMenu(afterClose?: () => void) {
+    // A second dismiss during the close animation used to run afterClose
+    // immediately (pin → unpin → pin). Keep a single close callback instead.
+    if (pinPreviewClosingRef.current) {
+      if (afterClose) pinPreviewAfterCloseRef.current = afterClose;
+      return;
+    }
+    if (!pinMenu) {
+      afterClose?.();
+      return;
+    }
+    pinPreviewClosingRef.current = true;
+    pinPreviewAfterCloseRef.current = afterClose ?? null;
+    pinPreviewOpenTokenRef.current += 1;
+    Animated.parallel([
+      Animated.timing(pinPreviewScale, {
+        toValue: 1,
+        duration: 220,
+        easing: PIN_PREVIEW_EASE,
+        useNativeDriver: true,
+      }),
+      Animated.timing(pinPreviewDim, {
+        toValue: 0,
+        duration: 220,
+        easing: PIN_PREVIEW_EASE,
+        useNativeDriver: true,
+      }),
+      Animated.timing(pinMenuCardAnim, {
+        toValue: 0,
+        duration: 220,
+        easing: PIN_PREVIEW_EASE,
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      pinPreviewClosingRef.current = false;
+      const cb = pinPreviewAfterCloseRef.current;
+      pinPreviewAfterCloseRef.current = null;
+      if (!finished) return;
+      setPinMenu(null);
+      cb?.();
+    });
+  }
+
+  useEffect(() => {
+    onPinPreviewChange?.(Boolean(pinMenu));
+    return () => onPinPreviewChange?.(false);
+  }, [onPinPreviewChange, pinMenu]);
+
+  useEffect(() => {
+    if (!pinMenu) return;
+    const token = pinPreviewOpenTokenRef.current;
+    let frame2 = 0;
+    const frame1 = requestAnimationFrame(() => {
+      frame2 = requestAnimationFrame(() => {
+        if (token !== pinPreviewOpenTokenRef.current || pinPreviewClosingRef.current) return;
+        Animated.parallel([
+          Animated.timing(pinPreviewScale, {
+            toValue: PIN_PREVIEW_SCALE,
+            duration: 260,
+            easing: PIN_PREVIEW_EASE,
+            useNativeDriver: true,
+          }),
+          Animated.timing(pinPreviewDim, {
+            toValue: 0.38,
+            duration: 260,
+            easing: PIN_PREVIEW_EASE,
+            useNativeDriver: true,
+          }),
+          Animated.timing(pinMenuCardAnim, {
+            toValue: 1,
+            duration: 260,
+            easing: PIN_PREVIEW_EASE,
+            useNativeDriver: true,
+          }),
+        ]).start();
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frame1);
+      cancelAnimationFrame(frame2);
+    };
+  }, [pinMenu?.videoId]);
+
+  const profileGridItemHeight = PROFILE_GRID_ITEM_WIDTH * (16 / 9);
+  const rowStride = profileGridItemHeight + PROFILE_GRID_GAP;
+  const showLockGate = Boolean(locked && videos.length > 3);
+  // Fade covers all blurred rows (from row 2).
+  const lockGateTop = 8 + rowStride;
+  // Rise from row 3, release onto the second-to-last row at the end.
+  const rowCount = Math.max(1, Math.ceil(videos.length / 3));
+  const row3CenterFromRoot = 8 + 2 * rowStride + profileGridItemHeight / 2;
+  const secondLastRowIndex = Math.max(0, rowCount - 2);
+  const secondLastRowCenterFromRoot =
+    8 + secondLastRowIndex * rowStride + profileGridItemHeight / 2;
+  const riseAnchorFromGateTop = row3CenterFromRoot - lockGateTop;
+  const releaseAnchorFromGateTop = secondLastRowCenterFromRoot - lockGateTop;
+  const lockFadeColor = activeThemeMode === "light" ? "#f7f7f8" : dark;
+
+  const updateLockMessagePosition = useCallback(() => {
+    if (!showLockGate) {
+      lockMessageRef.current?.setNativeProps({ style: { opacity: 0 } });
+      return;
+    }
+
+    lockGateRef.current?.measureInWindow((_x, y, _width, height) => {
+      if (height <= 0) {
+        lockMessageRef.current?.setNativeProps({ style: { opacity: 0 } });
+        return;
+      }
+
+      const viewportCenter = viewportHeight / 2;
+      const messageHeight = lockMessageHeightRef.current;
+      const riseAnchorY = y + riseAnchorFromGateTop;
+      const releaseAnchorY = y + releaseAnchorFromGateTop;
+      // Between row 3 and second-to-last: stick to screen middle; else follow those anchors.
+      const topAnchorY = Math.min(riseAnchorY, releaseAnchorY);
+      const bottomAnchorY = Math.max(riseAnchorY, releaseAnchorY);
+      const messageCenterY = Math.min(
+        bottomAnchorY,
+        Math.max(topAnchorY, viewportCenter),
+      );
+      const gateBottom = y + height;
+
+      // Fade in as row 3 rises; soft fade if you scroll back up / past the gate.
+      const fadeBand = Math.max(64, profileGridItemHeight * 0.75);
+      const fadeIn = (viewportHeight - riseAnchorY) / (viewportHeight - viewportCenter);
+      const fadeOut = (gateBottom - messageCenterY) / fadeBand;
+      const opacity = Math.max(0, Math.min(1, fadeIn, fadeOut));
+
+      lockMessageRef.current?.setNativeProps({
+        style: {
+          opacity,
+          top: Math.max(0, messageCenterY - y - messageHeight / 2),
+        },
+      });
+    });
+  }, [
+    profileGridItemHeight,
+    releaseAnchorFromGateTop,
+    riseAnchorFromGateTop,
+    showLockGate,
+  ]);
+
+  const runGridScrollSync = useCallback(() => {
+    if (showLockGate) updateLockMessagePosition();
+    if (prewarmVisibleVideos) {
+      for (const check of thumbVisibilityCheckersRef.current) {
+        check();
+      }
+    }
+  }, [prewarmVisibleVideos, showLockGate, updateLockMessagePosition]);
+
+  useLayoutEffect(() => {
+    if (!lockScrollSyncRef) return;
+    lockScrollSyncRef.current = runGridScrollSync;
+    return () => {
+      if (lockScrollSyncRef.current === runGridScrollSync) {
+        lockScrollSyncRef.current = null;
+      }
+    };
+  }, [lockScrollSyncRef, runGridScrollSync]);
+
+  useLayoutEffect(() => {
+    if (!showLockGate) {
+      lockMessageRef.current?.setNativeProps({ style: { opacity: 0 } });
+      return;
+    }
+    updateLockMessagePosition();
+  }, [showLockGate, videos.length, updateLockMessagePosition]);
+
+  if (videos.length === 0) {
+    // Saved tab: plain centered copy. Videos tab keeps the bordered empty card.
+    if (privateCopy) {
+      return <Text style={styles.profileSavedEmptyText}>no videos yet</Text>;
+    }
+    return <EmptyCard text="no videos yet" />;
+  }
+
   return (
     <View>
+      {privateCopy ? <Text style={styles.helper}>only visible to you.</Text> : null}
       <View style={styles.grid}>
         {videos.map((video, index) => {
-          const isLocked = locked && index >= 3;
+          const isLocked = Boolean(locked && index >= 3);
           const pendingUpload =
             showPendingUploadState && isPendingProfileVideoId(video.id)
               ? getPendingUploadById(getPendingUploadIdFromProfileVideoId(video.id))
               : null;
           const isPendingFailed = pendingUpload?.phase === "failed";
+          const isPinned = getProfileVideoPinnedRank(video as ProfileVideo) != null;
+          const canPin =
+            allowPinning &&
+            !isLocked &&
+            !isPendingFailed &&
+            !pendingUpload &&
+            !isPendingProfileVideoId(video.id);
           const content = (
             <>
-              <ProfileGridThumbnail video={video} />
+              <ProfileGridThumbnail
+                video={video}
+                blurred={isLocked}
+                prewarmEnabled={prewarmVisibleVideos && !isLocked}
+                visibilitySyncRef={thumbVisibilityCheckersRef}
+              />
+              {isPinned ? (
+                <View style={styles.gridPinnedBadge} accessibilityLabel="pinned">
+                  <PinIcon size={28} />
+                </View>
+              ) : null}
               {pendingUpload && !isPendingFailed ? (
                 <View style={styles.gridPendingOverlay}>
                   <UploadProgressRing progress={pendingUpload.progress} />
                   <Text style={styles.gridPendingStatusText}>
                     {pendingUpload.phase === "processing"
-                      ? "processing"
+                      ? pendingUpload.progress < 32 && !pendingUpload.presentationBaked
+                        ? "rendering"
+                        : "processing"
                       : pendingUpload.phase === "saving"
                         ? "posting"
                         : "uploading"}
@@ -13006,21 +17252,30 @@ function VideoGrid({
                   </Pressable>
                 </View>
               ) : null}
-              {isLocked && (
-                <View style={styles.lockedOverlay}>
-                  <Text style={styles.lockedText}>jam to unlock full profile</Text>
-                </View>
-              )}
+              {isLocked ? <View style={styles.lockedOverlay} /> : null}
             </>
           );
 
           // Pending uploads stay visible with a ring, but aren't openable until Stream is ready.
-          if (onVideoPress && !isLocked && !isPendingFailed && !pendingUpload) {
+          if ((onVideoPress || canPin) && !isLocked && !isPendingFailed && !pendingUpload) {
             return (
               <Pressable
                 key={video.id}
+                ref={(node) => {
+                  if (node) gridItemRefs.current.set(video.id, node);
+                  else gridItemRefs.current.delete(video.id);
+                }}
+                collapsable={false}
                 style={styles.gridItem}
-                onPress={() => onVideoPress(video, index)}
+                onPress={() => {
+                  if (pinMenu) {
+                    dismissPinMenu();
+                    return;
+                  }
+                  onVideoPress?.(video, index);
+                }}
+                onLongPress={canPin ? () => openPinMenuForVideo(video.id) : undefined}
+                delayLongPress={50}
               >
                 {content}
               </Pressable>
@@ -13034,7 +17289,123 @@ function VideoGrid({
           );
         })}
       </View>
-      {privateCopy && <Text style={styles.helper}>only visible to you.</Text>}
+      <Modal
+        transparent
+        animationType="none"
+        visible={Boolean(pinMenu && pinMenuVideo)}
+        onRequestClose={() => dismissPinMenu()}
+      >
+        <View style={styles.gridPinMenuRoot} pointerEvents="box-none">
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => dismissPinMenu()}
+            accessibilityLabel="dismiss"
+          />
+          {pinMenu && pinMenuVideo ? (
+            <>
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.gridPinPreview,
+                  {
+                    left: pinMenu.x,
+                    top: pinMenu.y,
+                    width: pinMenu.width,
+                    height: pinMenu.height,
+                    transform: [{ scale: pinPreviewScale }],
+                  },
+                ]}
+              >
+                <ProfileGridThumbnail video={pinMenuVideo} instantReveal />
+                {pinMenuPinned ? (
+                  <View style={styles.gridPinnedBadge} accessibilityLabel="pinned">
+                    <PinIcon size={28} />
+                  </View>
+                ) : null}
+                <Animated.View
+                  style={[styles.gridPinPreviewDim, { opacity: pinPreviewDim }]}
+                />
+              </Animated.View>
+              <Animated.View
+                pointerEvents="box-none"
+                style={[
+                  styles.gridPinMenuCardWrap,
+                  {
+                    left: Math.max(
+                      8,
+                      Math.min(
+                        pinMenu.x + pinMenu.width / 2 - PIN_MENU_CARD_WIDTH / 2,
+                        viewportWidth - PIN_MENU_CARD_WIDTH - 8,
+                      ),
+                    ),
+                    // Float above the scaled preview (transform origin is center).
+                    top: Math.max(
+                      8,
+                      pinMenu.y -
+                        (pinMenu.height * (PIN_PREVIEW_SCALE - 1)) / 2 -
+                        PIN_MENU_CARD_HEIGHT -
+                        10,
+                    ),
+                    opacity: pinMenuCardAnim,
+                    transform: [
+                      {
+                        translateY: pinMenuCardAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [8, 0],
+                        }),
+                      },
+                    ],
+                  },
+                ]}
+              >
+                <Pressable
+                  style={styles.gridPinMenuCard}
+                  onPress={() => {
+                    if (pinPreviewClosingRef.current) return;
+                    const target = pinMenuVideo;
+                    dismissPinMenu(() => onTogglePin?.(target));
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={pinMenuPinned ? "unpin video" : "pin video"}
+                >
+                  <PinIcon size={26} />
+                </Pressable>
+              </Animated.View>
+            </>
+          ) : null}
+        </View>
+      </Modal>
+      {showLockGate ? (
+        <View
+          ref={lockGateRef}
+          collapsable={false}
+          pointerEvents="none"
+          style={[styles.profileLockGate, { top: lockGateTop }]}
+          onLayout={updateLockMessagePosition}
+        >
+          <LinearGradient
+            colors={[`${lockFadeColor}00`, `${lockFadeColor}CC`, `${lockFadeColor}F2`]}
+            locations={[0, 0.28, 0.72]}
+            style={StyleSheet.absoluteFill}
+          />
+          <View
+            ref={lockMessageRef}
+            collapsable={false}
+            style={[styles.profileLockGateMessage, { opacity: 0 }]}
+            onLayout={(event) => {
+              const nextHeight = event.nativeEvent.layout.height;
+              if (nextHeight > 0 && Math.abs(nextHeight - lockMessageHeightRef.current) > 1) {
+                lockMessageHeightRef.current = nextHeight;
+                updateLockMessagePosition();
+              }
+            }}
+          >
+            <Text style={styles.profileLockGateText}>
+              {lockMessage ?? "you must be jamming to see their full profile"}
+            </Text>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -13095,6 +17466,30 @@ function SettingsButton({ label, onPress }: { label: string; onPress?: () => voi
       <Text style={styles.settingsText}>{label}</Text>
     </Pressable>
   );
+}
+
+function getInboxEmptyCopy({
+  tab,
+  filtersActive,
+  nearMeActive,
+}: {
+  tab: InboxTab;
+  filtersActive: boolean;
+  nearMeActive: boolean;
+}) {
+  if (nearMeActive) {
+    if (tab === "requests") return "no nearby requests right now.";
+    if (tab === "jams") return "no nearby jams right now.";
+    return "no nearby sent jams right now.";
+  }
+  if (filtersActive) {
+    if (tab === "requests") return "no requests match these filters.";
+    if (tab === "jams") return "no jams match these filters.";
+    return "no sent jams match these filters.";
+  }
+  if (tab === "requests") return "no requests right now.";
+  if (tab === "jams") return "no jams yet. mutual jams will appear here.";
+  return "no sent jams waiting right now.";
 }
 
 function EmptyCard({ text }: { text: string }) {
@@ -13209,6 +17604,41 @@ function encodeLocationFilter(selections: readonly LocationFilterSelection[]) {
   return cleanSelections.length ? `${LOCATION_FILTER_PREFIX}${JSON.stringify(cleanSelections)}` : "";
 }
 
+function toFeedContentFilters(
+  filters: Pick<FeedFilterState, "roles" | "genres" | "location" | "lookingForActive">,
+): FeedContentFilters {
+  const roles = getUniqueStrings(filters.roles);
+  const genres = getUniqueStrings(filters.genres);
+  const locations = parseLocationFilter(filters.location).map((selection) => {
+    const option = LOCATION_FILTER_COUNTRIES.find((country) => country.country === selection.country);
+    return {
+      country: selection.country,
+      cities: selection.cities,
+      country_aliases: [...(option?.aliases ?? [])],
+    };
+  });
+
+  return {
+    roles: roles.length ? roles : undefined,
+    genres: genres.length ? genres : undefined,
+    locations: locations.length ? locations : undefined,
+    lookingForOnly: filters.lookingForActive || undefined,
+  };
+}
+
+function buildDiscoverFeedQueryKey(filters: FeedFilterState) {
+  const rolesKey = [...filters.roles].map((role) => role.toLowerCase()).sort().join(",");
+  const genresKey = [...filters.genres].map((genre) => genre.toLowerCase()).sort().join(",");
+  const lookingKey = filters.lookingForActive ? "looking" : "";
+  const contentKey = `${rolesKey}|${genresKey}|${filters.location}|${lookingKey}`;
+
+  if (filters.nearMeActive && filters.userLocation) {
+    return `near:${filters.userLocation.latitude.toFixed(5)}:${filters.userLocation.longitude.toFixed(5)}:${filters.nearMeRadiusMiles}:${contentKey}`;
+  }
+
+  return `global:${contentKey}`;
+}
+
 function locationFilterMatches(itemLocation: string, filterValue: string) {
   if (!filterValue) return true;
 
@@ -13237,16 +17667,14 @@ type FeedFilterState = {
   genres: string[];
   location: string;
   nearMeActive: boolean;
+  lookingForActive: boolean;
   userLocation: { latitude: number; longitude: number } | null;
   nearMeRadiusMiles: NearMeRadiusMiles;
 };
 
 function feedVideoMatchesFilters(item: FeedVideo, filters: FeedFilterState) {
-  const itemRoles = item.roles.length
-    ? item.roles.map((role) => role.toLowerCase())
-    : item.categories.length
-      ? item.categories.map((category) => category.toLowerCase())
-      : [item.role.toLowerCase()];
+  // Match video tags only — never the creator's profile role.
+  const itemRoles = item.roles.map((role) => role.toLowerCase());
   const itemGenres = item.genres.map((genre) => genre.toLowerCase());
   const roleMatch =
     filters.roles.length === 0 ||
@@ -13255,19 +17683,10 @@ function feedVideoMatchesFilters(item: FeedVideo, filters: FeedFilterState) {
     filters.genres.length === 0 ||
     filters.genres.some((genre) => itemGenres.includes(genre.toLowerCase()));
   const locationMatch = !filters.location || locationFilterMatches(item.location, filters.location);
-  const nearMeMatch =
-    !filters.nearMeActive ||
-    (filters.userLocation != null &&
-      isCreatorWithinNearMeRadius(
-        filters.userLocation.latitude,
-        filters.userLocation.longitude,
-        item.latitude,
-        item.longitude,
-        item.liveLatitude,
-        item.liveLongitude,
-        filters.nearMeRadiusMiles,
-      ));
-  return roleMatch && genreMatch && locationMatch && nearMeMatch;
+  const lookingForMatch = !filters.lookingForActive || item.lookingFor;
+  // Near-me + role/genre are enforced server-side on new page fetches.
+  // Client filter remains so already-loaded / bridged clips stay correct instantly.
+  return roleMatch && genreMatch && locationMatch && lookingForMatch;
 }
 
 function isFeedFilterStateActive(filters: FeedFilterState) {
@@ -13275,7 +17694,8 @@ function isFeedFilterStateActive(filters: FeedFilterState) {
     filters.roles.length > 0 ||
     filters.genres.length > 0 ||
     Boolean(filters.location) ||
-    filters.nearMeActive
+    filters.nearMeActive ||
+    filters.lookingForActive
   );
 }
 
@@ -13341,10 +17761,6 @@ async function extractVideoThumbnailFrames(
   return frames;
 }
 
-function getCreateFilterOverlayStyle(filter: VideoFilter): ViewStyle {
-  return getVideoFilterOverlayStyle(filter);
-}
-
 function getVideoPresentation(video: ProfileVideo | FeedVideo) {
   if ("videoFilter" in video || "textOverlays" in video) {
     return {
@@ -13363,10 +17779,10 @@ function getVideoPresentation(video: ProfileVideo | FeedVideo) {
   };
 }
 
-function CreateFilterThumbImage({ uri }: { uri: string }) {
+function CreateFilterThumbImage({ uri }: { uri?: string | null }) {
   return (
     <Image
-      source={{ uri }}
+      source={uri ? { uri } : CREATE_FILTER_PREVIEW_IMAGE}
       style={styles.createFilterThumbImage as ImageStyle}
       resizeMode="cover"
       {...(Platform.OS === "android" ? { resizeMethod: "resize" as const } : {})}
@@ -13377,8 +17793,8 @@ function CreateFilterThumbImage({ uri }: { uri: string }) {
 function CreateFilterPickerRow({
   selectedFilter,
   onSelect,
-  thumbnailUri,
-  textOverlays = [],
+  thumbnailUri: _thumbnailUri,
+  textOverlays: _textOverlays = [],
   compact = false,
 }: {
   selectedFilter: VideoFilter;
@@ -13387,41 +17803,139 @@ function CreateFilterPickerRow({
   textOverlays?: CreateTextOverlayItem[];
   compact?: boolean;
 }) {
+  const [filterOptions, setFilterOptions] = useState(getFilterPickerOptions);
+  const [flashLabel, setFlashLabel] = useState<string | null>(null);
+  const flashOpacity = useRef(new Animated.Value(0)).current;
+  const flashTokenRef = useRef(0);
+
+  useEffect(() => {
+    void ensureFilterCatalogLoaded();
+    return subscribeFilterCatalog(() => {
+      setFilterOptions(getFilterPickerOptions());
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      flashOpacity.stopAnimation();
+    };
+  }, [flashOpacity]);
+
+  function flashFilterName(label: string) {
+    const token = flashTokenRef.current + 1;
+    flashTokenRef.current = token;
+    setFlashLabel(label);
+    flashOpacity.stopAnimation();
+    flashOpacity.setValue(0);
+    Animated.sequence([
+      Animated.timing(flashOpacity, {
+        toValue: 1,
+        duration: 90,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.delay(800),
+      Animated.timing(flashOpacity, {
+        toValue: 0,
+        duration: 220,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (!finished || flashTokenRef.current !== token) return;
+      setFlashLabel(null);
+    });
+  }
+
+  return (
+    <>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={[styles.createFilterList, compact && styles.createFilterListCompact]}
+      >
+        {filterOptions.map((filter) => (
+          <Pressable
+            key={filter.id}
+            style={[styles.createFilterOption, compact && styles.createFilterOptionCompact]}
+            onPress={() => {
+              onSelect(filter.id);
+              flashFilterName(filter.label);
+            }}
+          >
+            <View
+              style={[
+                styles.createFilterThumbRing,
+                compact && styles.createFilterThumbRingCompact,
+                selectedFilter === filter.id && styles.createFilterThumbRingActive,
+              ]}
+            >
+              <View style={[styles.createFilterThumbInner, compact && styles.createFilterThumbInnerCompact]}>
+                <CreateFilterThumbImage />
+                <VideoPresentationOverlays
+                  filter={filter.id}
+                  textOverlays={[]}
+                  density="micro"
+                />
+              </View>
+            </View>
+            {!compact ? <Text style={styles.createFilterLabel}>{filter.label}</Text> : null}
+          </Pressable>
+        ))}
+      </ScrollView>
+      <Modal transparent visible={Boolean(flashLabel)} animationType="none" statusBarTranslucent>
+        <View pointerEvents="none" style={styles.createFilterNameFlashRoot}>
+          <Animated.Text style={[styles.createFilterNameFlashText, { opacity: flashOpacity }]}>
+            {flashLabel}
+          </Animated.Text>
+        </View>
+      </Modal>
+    </>
+  );
+}
+
+function CreateTextFontPickerRow({
+  selectedFontId,
+  onSelect,
+}: {
+  selectedFontId: VideoTextFontId;
+  onSelect: (fontId: VideoTextFontId) => void;
+}) {
   return (
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
-      contentContainerStyle={[styles.createFilterList, compact && styles.createFilterListCompact]}
+      style={styles.createTextFontPickerScroll}
+      contentContainerStyle={[styles.createFilterList, styles.createTextFontPickerList]}
     >
-      {CREATE_FILTER_OPTIONS.map((filter) => (
-        <Pressable
-          key={filter.id}
-          style={[styles.createFilterOption, compact && styles.createFilterOptionCompact]}
-          onPress={() => onSelect(filter.id)}
-        >
-          <View
-            style={[
-              styles.createFilterThumbRing,
-              compact && styles.createFilterThumbRingCompact,
-              selectedFilter === filter.id && styles.createFilterThumbRingActive,
-            ]}
+      {VIDEO_TEXT_FONT_OPTIONS.map((font) => {
+        const selected = selectedFontId === font.id;
+        return (
+          <Pressable
+            key={font.id}
+            style={[styles.createFilterOption, styles.createFilterOptionCompact]}
+            onPress={() => onSelect(font.id)}
+            accessibilityRole="button"
+            accessibilityState={{ selected }}
+            accessibilityLabel={`${font.label} font`}
           >
-            <View style={[styles.createFilterThumbInner, compact && styles.createFilterThumbInnerCompact]}>
-              {thumbnailUri ? (
-                <CreateFilterThumbImage uri={thumbnailUri} />
-              ) : (
-                <View style={styles.createFilterThumbFallback} />
-              )}
-              <VideoPresentationOverlays
-                filter={filter.id}
-                textOverlays={textOverlays}
-                density="micro"
-              />
+            <View
+              style={[
+                styles.createFilterThumbRing,
+                styles.createFilterThumbRingCompact,
+                selected && styles.createFilterThumbRingActive,
+              ]}
+            >
+              <View style={[styles.createTextFontThumbInner, styles.createFilterThumbInnerCompact]}>
+                <Text style={[styles.createTextFontThumbSample, { fontFamily: font.fontFamily }]}>
+                  Aa
+                </Text>
+              </View>
             </View>
-          </View>
-          {!compact ? <Text style={styles.createFilterLabel}>{filter.label}</Text> : null}
-        </Pressable>
-      ))}
+            <Text style={[styles.createFilterLabel, styles.createFilterLabelCompact]}>{font.label}</Text>
+          </Pressable>
+        );
+      })}
     </ScrollView>
   );
 }
@@ -13455,11 +17969,12 @@ function getVideoSource(item: FeedVideo) {
   return item.mediaUrl;
 }
 
-/** First-frame poster for feed transitions — not the creator-picked grid thumbnail. */
+/** Near-start poster for feed transitions — matches playback from the beginning. */
 function getFeedPosterSource(item: FeedVideo) {
   const streamId = item.cloudflareStreamId || extractCloudflareStreamId(item.mediaUrl);
   if (!streamId) return null;
-  return getCloudflareThumbnailUrl(streamId, 1000, { height: 1280 });
+  // 100ms avoids a pure black camera-open frame while staying at the start of the clip.
+  return getCloudflareThumbnailUrl(streamId, 100, { height: 1280 });
 }
 
 function getCloudflareFreezeFrameUri(source: string, timeSec: number) {
@@ -13470,11 +17985,7 @@ function getCloudflareFreezeFrameUri(source: string, timeSec: number) {
 }
 
 function getExpoVideoSource(source: string | null): VideoSource {
-  if (!source) return null;
-  return {
-    uri: source,
-    contentType: source.includes(".m3u8") ? "hls" : "auto",
-  };
+  return getPrewarmExpoVideoSource(source);
 }
 
 function getGridVideoSource(video: ProfileVideo | FeedVideo) {
@@ -13611,10 +18122,6 @@ function profileToFeedVideo(
     creatorName: displayName,
     role,
     location: formatProfileLocation(getProfileLocationParts(profile).country, getProfileLocationParts(profile).city) ?? "unknown",
-    latitude: profile.latitude,
-    longitude: profile.longitude,
-    liveLatitude: profile.live_latitude,
-    liveLongitude: profile.live_longitude,
     avatarUrl: profile.avatar_url,
     bio: profile.bio,
     caption: video?.caption ?? "",
@@ -13627,6 +18134,10 @@ function profileToFeedVideo(
     thumbnailTimeMs: video?.thumbnailTimeMs ?? video?.thumbnail_time_ms ?? null,
     videoFilter: normalizeVideoFilter(video?.videoFilter ?? video?.video_filter),
     textOverlays: normalizeVideoTextOverlays(video?.textOverlays ?? video?.text_overlays),
+    lookingFor: Boolean(
+      video && ("lookingFor" in video ? video.lookingFor : "looking_for" in video ? video.looking_for : false),
+    ),
+    pinnedRank: getProfileVideoPinnedRank(video),
     earlyAdopter: Boolean(profile.early_adopter),
     proBadge,
     videoCount,
@@ -13653,11 +18164,13 @@ function getUnreadLocalInboxCount(
   _sent: Conversation[],
   systemMessages: InboxMessage[],
 ) {
-  return (
-    requests.reduce((total, request) => total + request.unreadCount, 0) +
-    conversations.reduce((total, conversation) => total + conversation.unreadCount, 0) +
-    systemMessages.filter((message) => !message.read).length
-  );
+  // Badge = distinct people with unread messages, plus system as one more "account"
+  // when any system message is unread.
+  const unreadPeople =
+    requests.filter((request) => request.unreadCount > 0).length +
+    conversations.filter((conversation) => conversation.unreadCount > 0).length;
+  const unreadSystem = systemMessages.some((message) => !message.read) ? 1 : 0;
+  return unreadPeople + unreadSystem;
 }
 
 function feedItemToPreloadedProfile(item: FeedVideo, feedItems: FeedVideo[]): PreloadedUserProfile {
@@ -13676,6 +18189,9 @@ function feedItemToPreloadedProfile(item: FeedVideo, feedItems: FeedVideo[]): Pr
       thumbnailTimeMs: video.thumbnailTimeMs,
       videoFilter: video.videoFilter,
       textOverlays: video.textOverlays,
+      lookingFor: video.lookingFor,
+      pinnedRank: video.pinnedRank ?? null,
+      pinned_rank: video.pinnedRank ?? null,
       created_at: video.createdAt,
       creatorName: video.creatorName,
       role: video.role,
@@ -13699,10 +18215,11 @@ function feedItemToPreloadedProfile(item: FeedVideo, feedItems: FeedVideo[]): Pr
       location: item.location,
       country: null,
       city: null,
-      latitude: item.latitude,
-      longitude: item.longitude,
-      live_latitude: item.liveLatitude,
-      live_longitude: item.liveLongitude,
+      latitude: null,
+      longitude: null,
+      live_latitude: null,
+      live_longitude: null,
+      live_location_updated_at: null,
       near_me_radius_miles: null,
       avatar_url: item.avatarUrl,
       onboarding_complete: true,
@@ -13743,10 +18260,6 @@ function profileVideoToFeedVideo(video: ProfileVideo | FeedVideo): FeedVideo | n
       creatorName: video.creatorName ?? "creator",
       role: video.role ?? "creator",
       location: video.location ?? "unknown",
-      latitude: "latitude" in video ? video.latitude ?? null : null,
-      longitude: "longitude" in video ? video.longitude ?? null : null,
-      liveLatitude: "liveLatitude" in video ? video.liveLatitude ?? null : null,
-      liveLongitude: "liveLongitude" in video ? video.liveLongitude ?? null : null,
       avatarUrl: video.avatarUrl ?? null,
       bio: null,
       caption: video.caption ?? "",
@@ -13763,6 +18276,14 @@ function profileVideoToFeedVideo(video: ProfileVideo | FeedVideo): FeedVideo | n
           : null,
       videoFilter: presentation.filter,
       textOverlays: presentation.textOverlays,
+      lookingFor: Boolean(
+        "lookingFor" in video
+          ? video.lookingFor
+          : "looking_for" in video
+            ? (video as { looking_for?: boolean | null }).looking_for
+            : false,
+      ),
+      pinnedRank: getProfileVideoPinnedRank(video as ProfileVideo),
       earlyAdopter: Boolean(video.earlyAdopter),
       proBadge: "proBadge" in video ? video.proBadge ?? null : null,
       videoCount: "videoCount" in video && typeof video.videoCount === "number" ? video.videoCount : 0,
@@ -13789,8 +18310,115 @@ function getProfileVideoOwner(video: ProfileVideo | FeedVideo) {
   };
 }
 
+/** Pinned first (rank 1–3), then newest → oldest. */
+function sortProfileVideos<T extends ProfileVideo | FeedVideo>(videos: T[]) {
+  return [...videos].sort((a, b) => {
+    const aPin = getProfileVideoPinnedRank(a as ProfileVideo);
+    const bPin = getProfileVideoPinnedRank(b as ProfileVideo);
+    const aPinned = aPin != null;
+    const bPinned = bPin != null;
+    if (aPinned !== bPinned) return aPinned ? -1 : 1;
+    if (aPinned && bPinned && aPin !== bPin) return (aPin as number) - (bPin as number);
+    return getProfileVideoCreatedAtMs(b) - getProfileVideoCreatedAtMs(a);
+  });
+}
+
 function sortProfileVideosByNewest<T extends ProfileVideo | FeedVideo>(videos: T[]) {
-  return [...videos].sort((a, b) => getProfileVideoCreatedAtMs(b) - getProfileVideoCreatedAtMs(a));
+  return sortProfileVideos(videos);
+}
+
+async function toggleOwnProfileVideoPin(
+  userId: string,
+  video: ProfileVideo | FeedVideo,
+  setVideos: (updater: (current: ProfileVideo[]) => ProfileVideo[]) => void,
+  pendingPinRanks?: MutableRefObject<Map<string, number | null>>,
+) {
+  if (isPendingProfileVideoId(video.id)) return;
+
+  const currentlyPinned = getProfileVideoPinnedRank(video as ProfileVideo) != null;
+  let previousVideos: ProfileVideo[] = [];
+  let optimisticRank: number | null = null;
+
+  // Keep fetch order in state; displayVideos sorts. Avoid LayoutAnimation + avoid a
+  // second reshuffle after the server responds (that was causing pin glitches).
+
+  setVideos((current) => {
+    previousVideos = current;
+    if (currentlyPinned) {
+      pendingPinRanks?.current.set(video.id, null);
+      return current.map((entry) =>
+        entry.id === video.id
+          ? { ...entry, pinnedRank: null, pinned_rank: null }
+          : entry,
+      );
+    }
+
+    const pinnedCount = current.filter((entry) => getProfileVideoPinnedRank(entry) != null).length;
+    if (pinnedCount >= MAX_PINNED_PROFILE_VIDEOS) {
+      return current;
+    }
+
+    const used = new Set(
+      current
+        .map((entry) => getProfileVideoPinnedRank(entry))
+        .filter((rank): rank is number => rank != null),
+    );
+    optimisticRank = 1;
+    while (used.has(optimisticRank) && optimisticRank <= MAX_PINNED_PROFILE_VIDEOS) {
+      optimisticRank += 1;
+    }
+
+    pendingPinRanks?.current.set(video.id, optimisticRank);
+    return current.map((entry) =>
+      entry.id === video.id
+        ? { ...entry, pinnedRank: optimisticRank, pinned_rank: optimisticRank }
+        : entry,
+    );
+  });
+
+  if (!currentlyPinned) {
+    const pinnedCount = previousVideos.filter(
+      (entry) => getProfileVideoPinnedRank(entry) != null,
+    ).length;
+    if (pinnedCount >= MAX_PINNED_PROFILE_VIDEOS) {
+      pendingPinRanks?.current.delete(video.id);
+      Alert.alert("pin limit", `you can pin up to ${MAX_PINNED_PROFILE_VIDEOS} videos`);
+      return;
+    }
+  }
+
+  try {
+    if (currentlyPinned) {
+      await unpinProfileVideo(userId, video.id);
+      pendingPinRanks?.current.delete(video.id);
+      return;
+    }
+
+    const rank = await pinProfileVideo(userId, video.id);
+    pendingPinRanks?.current.set(video.id, rank);
+    setVideos((current) => {
+      const existing = getProfileVideoPinnedRank(
+        current.find((entry) => entry.id === video.id),
+      );
+      if (existing === rank) {
+        pendingPinRanks?.current.delete(video.id);
+        return current;
+      }
+      return current.map((entry) =>
+        entry.id === video.id
+          ? { ...entry, pinnedRank: rank, pinned_rank: rank }
+          : entry,
+      );
+    });
+    pendingPinRanks?.current.delete(video.id);
+  } catch (err) {
+    pendingPinRanks?.current.delete(video.id);
+    setVideos(() => previousVideos);
+    Alert.alert(
+      currentlyPinned ? "could not unpin" : "could not pin",
+      err instanceof Error ? err.message : "try again",
+    );
+  }
 }
 
 function getProfileVideoCreatedAtMs(video: ProfileVideo | FeedVideo) {
@@ -13881,19 +18509,36 @@ async function deleteOwnProfileVideo(
   setVideos: (updater: (current: ProfileVideo[]) => ProfileVideo[]) => void,
   setFullscreenIndex: (value: number | null) => void,
 ) {
-  const previousVideosPromise = new Promise<ProfileVideo[]>((resolve) => {
-    setVideos((current) => {
-      resolve(current);
-      return current.filter((video) => video.id !== videoId);
+  // Tombstone first so any profile reload can't flash the video back on.
+  locallyDeletedProfileVideoIds.add(videoId);
+  setFullscreenIndex(null);
+
+  // Wait for the fullscreen to unmount so the grid fade/slide is visible.
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve());
     });
   });
 
-  setFullscreenIndex(null);
+  if (
+    Platform.OS === "android" &&
+    UIManager.setLayoutAnimationEnabledExperimental
+  ) {
+    UIManager.setLayoutAnimationEnabledExperimental(true);
+  }
+
+  let previousVideos: ProfileVideo[] = [];
+  LayoutAnimation.configureNext(PROFILE_VIDEO_DELETE_ANIMATION);
+  setVideos((current) => {
+    previousVideos = current;
+    return current.filter((video) => video.id !== videoId);
+  });
 
   try {
     await deleteVideo(videoId);
   } catch (err) {
-    const previousVideos = await previousVideosPromise;
+    locallyDeletedProfileVideoIds.delete(videoId);
+    LayoutAnimation.configureNext(PROFILE_VIDEO_DELETE_ANIMATION);
     setVideos(() => previousVideos);
     Alert.alert("could not delete", err instanceof Error ? err.message : "try again");
   }
@@ -14150,20 +18795,34 @@ const baseStyles = {
     alignSelf: "center",
     gap: 6,
   },
+  profileActionPill: {
+    minHeight: 48,
+    minWidth: 190,
+    alignSelf: "center",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 999,
+    backgroundColor: "#3f3f46",
+    paddingHorizontal: 24,
+  },
+  profileActionPillText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "700",
+    textTransform: "lowercase",
+  },
   profileJamButton: {
     minWidth: 190,
     height: 48,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: border,
-    backgroundColor: panel,
+    borderRadius: 999,
+    backgroundColor: "#3f3f46",
     paddingHorizontal: 24,
   },
-  profileJamButtonJamming: { borderColor: "#fff", backgroundColor: "#fff" },
+  profileJamButtonJamming: { backgroundColor: "#52525b" },
   profileJamButtonText: { color: "#fff", fontSize: 16, fontWeight: "800" },
-  profileJamButtonTextJamming: { color: "#000" },
+  profileJamButtonTextJamming: { color: "#fff" },
   profileJamCancelButton: {
     width: 48,
     height: 48,
@@ -14276,8 +18935,10 @@ const baseStyles = {
   },
   profileMenuItem: { paddingHorizontal: 16, paddingVertical: 13 },
   profileMenuDangerText: { color: "#fca5a5", fontSize: 15, fontWeight: "800", textTransform: "lowercase" },
-  unjamPopover: { position: "absolute", width: 200, gap: 4, padding: 12, paddingBottom: 4, borderRadius: 18, borderWidth: 1, borderColor: border, backgroundColor: "rgba(9,9,11,0.98)" },
+  unjamPopover: { position: "absolute", width: 200, gap: 4, padding: 12, paddingBottom: 4, borderRadius: 18, borderWidth: 1, borderColor: border, backgroundColor: "#09090b" },
+  notifyPopover: { position: "absolute", width: 240, gap: 4, padding: 12, paddingBottom: 4, borderRadius: 18, borderWidth: 1, borderColor: border, backgroundColor: "#09090b" },
   unjamPopoverTitle: { color: "#fff", fontSize: 15, fontWeight: "800", textAlign: "center" },
+  confirmOptionYesText: { color: "#fff", fontSize: 16, fontWeight: "800", textTransform: "lowercase" },
   profileMenuMutedText: { color: "#71717a", fontSize: 14, fontWeight: "700", textTransform: "lowercase" },
   blockedUsersList: { gap: 10 },
   blockedUserRow: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 18, borderWidth: 1, borderColor: border, backgroundColor: panelSoft },
@@ -14292,8 +18953,7 @@ const baseStyles = {
   avatarImage: { backgroundColor: panel },
   avatarFallback: { alignItems: "center", justifyContent: "center", backgroundColor: "#27272a" },
   avatarText: { color: "#fff", fontWeight: "800" },
-  goldBadge: { width: 19, height: 19, alignItems: "center", justifyContent: "center" },
-  goldBadgeScallop: { position: "absolute", width: 5.7, height: 5.7, borderRadius: 2.85, backgroundColor: "#d5a231" },
+  goldBadge: { width: 15, height: 15, alignItems: "center", justifyContent: "center" },
   goldBadgeBase: { width: 15, height: 15, borderRadius: 7.5, alignItems: "center", justifyContent: "center", overflow: "hidden", shadowColor: "#f8d363", shadowOpacity: 0.32, shadowRadius: 3, shadowOffset: { width: 0, height: 1 }, elevation: 3 },
   goldBadgeInnerRing: { position: "absolute", width: 13.2, height: 13.2, borderRadius: 6.6, borderWidth: 1, borderColor: "#050505" },
   checkMark: { width: 9, height: 7.2, marginLeft: 0.6, marginTop: -0.6, alignItems: "center", justifyContent: "center" },
@@ -14332,6 +18992,14 @@ const baseStyles = {
     gap: 10,
     paddingHorizontal: 18,
   },
+  // Same horizontal spacing as feedTopBar, but in-flow for the inbox ScrollView.
+  inboxTopBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginHorizontal: -SCREEN_CONTENT_PADDING,
+    paddingHorizontal: 18,
+  },
   feedRecentFiltersArea: { flex: 1, justifyContent: "center", overflow: "visible" },
   feedRecentFiltersMask: { flex: 1, height: 44 },
   feedRecentFiltersMaskElement: { flex: 1, backgroundColor: "transparent" },
@@ -14364,7 +19032,37 @@ const baseStyles = {
   },
   feedNearMeButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
   feedNearMeButtonActive: { opacity: 1 },
-  nearMeRadiusRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 8 },
+  feedCaptionRow: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+  filterLookingForRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    alignItems: "center",
+    marginBottom: -6,
+  },
+  filterLookingForControl: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  filterLookingForLabel: {
+    color: muted,
+    fontSize: 15,
+    fontWeight: "600",
+    textTransform: "lowercase",
+  },
+  filterLookingForIconSlot: {
+    minHeight: 40,
+    minWidth: 52,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  feedLookingForIcon: {
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 2,
+  },
+  feedCaptionText: { flex: 1 },
+  nearMeRadiusRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   nearMeRadiusOption: {
     minWidth: 58,
     paddingHorizontal: 12,
@@ -14399,14 +19097,112 @@ const baseStyles = {
   },
   feedBufferingIndicator: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center" },
   videoBufferingIndicator: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center" },
-  feedShade: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.28)" },
+  // TikTok-style: no full-frame dim — soft edge fades behind chrome.
+  feedTopShade: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    height: Math.round(viewportHeight * 0.22),
+  },
+  feedBottomShade: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    height: Math.round(viewportHeight * 0.34),
+  },
   feedOverlayLayer: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0 },
+  feedChromeLockHud: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    zIndex: 8,
+    alignItems: "center",
+  },
+  feedSpeedHud: {
+    position: "absolute",
+    zIndex: 9,
+    alignItems: "center",
+  },
+  feedSpeedPill: {
+    width: FEED_SPEED_PILL_WIDTH,
+    height: FEED_SPEED_PILL_HEIGHT,
+    paddingVertical: FEED_SPEED_PILL_PADDING_V,
+    borderRadius: FEED_SPEED_PILL_WIDTH / 2,
+    backgroundColor: "rgba(0,0,0,0.42)",
+    borderWidth: 1.5,
+    borderColor: "rgba(255,255,255,0.55)",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  feedSpeedRow: {
+    height: FEED_SPEED_ROW_HEIGHT,
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  feedSpeedText: {
+    color: "rgba(255,255,255,0.45)",
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: -0.3,
+  },
+  feedSpeedTextSelected: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  feedChromeLockTrack: {
+    width: FEED_CHROME_LOCK_CIRCLE_SIZE,
+    alignItems: "center",
+  },
+  feedChromeLockPath: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    left: 0,
+    width: FEED_CHROME_LOCK_CIRCLE_SIZE,
+    borderRadius: FEED_CHROME_LOCK_CIRCLE_SIZE / 2,
+    borderWidth: 1.5,
+    borderColor: "rgba(255,255,255,0.55)",
+    backgroundColor: "rgba(255,255,255,0.10)",
+  },
+  feedChromeLockKnob: {
+    position: "absolute",
+    top: 0,
+    width: FEED_CHROME_LOCK_CIRCLE_SIZE,
+    height: FEED_CHROME_LOCK_CIRCLE_SIZE,
+    borderRadius: FEED_CHROME_LOCK_CIRCLE_SIZE / 2,
+    borderWidth: 1.5,
+    borderColor: "rgba(255,255,255,0.92)",
+    backgroundColor: "rgba(0,0,0,0.28)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  feedChromeLockTarget: {
+    position: "absolute",
+    bottom: 0,
+    width: FEED_CHROME_LOCK_CIRCLE_SIZE,
+    height: FEED_CHROME_LOCK_CIRCLE_SIZE,
+    borderRadius: FEED_CHROME_LOCK_CIRCLE_SIZE / 2,
+    borderWidth: 1.5,
+    borderColor: "rgba(255,255,255,0.35)",
+    backgroundColor: "rgba(0,0,0,0.16)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   feedMeta: { position: "absolute", left: 18, right: 76, gap: 11 },
-  feedName: { color: "#fff", fontSize: 25, fontWeight: "800", letterSpacing: -0.4, ...overlayTextShadow },
-  feedRole: { color: "#f4f4f5", fontSize: 14, fontWeight: "600", ...overlayTextShadow },
+  feedName: { color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3, ...overlayTextShadow },
+  feedRole: { color: "#f4f4f5", fontSize: 12, fontWeight: "600", ...overlayTextShadow },
   caption: { color: "#fff", fontSize: 15, lineHeight: 21, ...overlayTextShadow },
   tags: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   tag: { color: "#e4e4e7", fontSize: 14, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.10)", ...overlayTextShadow },
+  tagHighlighted: {
+    color: "#fff",
+    backgroundColor: "rgba(255,255,255,0.28)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.45)",
+  },
   badge: { color: "#fff", fontSize: 11, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.20)", overflow: "hidden", ...overlayTextShadow },
   actions: { position: "absolute", right: 18, gap: FEED_ACTION_GAP },
   actionButton: { width: 56, height: 56, alignItems: "center", justifyContent: "center" },
@@ -14489,7 +19285,6 @@ const baseStyles = {
     justifyContent: "center",
     gap: 18,
     paddingHorizontal: 28,
-    paddingBottom: NAV_BAR_HEIGHT,
     backgroundColor: dark,
   },
   endOfFeedFullscreen: {
@@ -14507,6 +19302,7 @@ const baseStyles = {
   topSheet: { position: "absolute", left: 0, right: 0, top: 0, gap: 10, padding: 22, paddingBottom: 26, borderBottomLeftRadius: 28, borderBottomRightRadius: 28, borderWidth: 1, borderColor: border, backgroundColor: "#09090b" },
   topSheetScroll: { flexShrink: 1 },
   topSheetScrollContent: { gap: 10, paddingBottom: 2 },
+  filterSheetSection: { gap: 10 },
   bottomModalWrap: { flex: 1, justifyContent: "flex-end" },
   bottomCard: { gap: 14, padding: 18, paddingBottom: 28, borderTopLeftRadius: 28, borderTopRightRadius: 28, borderWidth: 1, borderColor: border, backgroundColor: "#09090b" },
   jamPromptOverlay: { flex: 1, justifyContent: "center", padding: 22 },
@@ -14524,6 +19320,27 @@ const baseStyles = {
   },
   jamPromptShade: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.42)" },
   jamPromptCard: { gap: 14, padding: 18, borderRadius: 28, borderWidth: 1, borderColor: border, backgroundColor: "rgba(9,9,11,0.92)" },
+  confirmModalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 48,
+  },
+  confirmModalCard: {
+    width: "100%",
+    maxWidth: 260,
+    gap: 8,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: border,
+    backgroundColor: "#09090b",
+  },
+  confirmModalTitle: { color: "#fff", fontSize: 16, fontWeight: "800", textAlign: "center" },
+  confirmModalMessage: { color: "#a1a1aa", fontSize: 13, lineHeight: 18, textAlign: "center" },
+  confirmModalActions: { flexDirection: "row", gap: 6, marginTop: 2 },
+  confirmModalOption: { flex: 1, minHeight: 36, alignItems: "center", justifyContent: "center" },
   cardTitle: { color: "#fff", fontSize: 20, fontWeight: "800" },
   reportReasonList: { gap: 8 },
   reportReasonButton: { minHeight: 48, justifyContent: "center", borderRadius: 16, borderWidth: 1, borderColor: border, backgroundColor: panel, paddingHorizontal: 16 },
@@ -14531,9 +19348,10 @@ const baseStyles = {
   smallPill: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 13, borderWidth: 1, borderColor: border, backgroundColor: panel },
   smallPillText: { color: "#e4e4e7", fontWeight: "700" },
   iconCircle: { width: 42, height: 42, borderRadius: 21, borderWidth: 1, borderColor: border, backgroundColor: panelSoft, alignItems: "center", justifyContent: "center" },
+  chatBackButton: { width: 36, height: 42, alignItems: "center", justifyContent: "center" },
   previewBox: { overflow: "hidden", borderRadius: 28, borderWidth: 1, borderColor: border, backgroundColor: "#000" },
   previewVideo: { width: "100%", aspectRatio: 9 / 16, backgroundColor: "#000" },
-  createThumbnailLoader: { alignSelf: "center", marginVertical: 8 },
+  createThumbnailLoader: { alignSelf: "center", marginVertical: 8, alignItems: "center", gap: 8 },
   createThumbnailFilmstripWrap: {
     height: CREATE_THUMBNAIL_FILMSTRIP_FRAME_HEIGHT + 6,
     borderRadius: 16,
@@ -14552,6 +19370,29 @@ const baseStyles = {
     borderColor: "#fff",
     borderRadius: 8,
     zIndex: 2,
+  },
+  createLookingForToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginBottom: 12,
+    alignSelf: "stretch",
+  },
+  createLookingForToggleCopy: {
+    flex: 1,
+    gap: 2,
+    justifyContent: "center",
+  },
+  createLookingForToggleTitle: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "700",
+    textTransform: "lowercase",
+  },
+  createLookingForToggleHelper: {
+    color: "#a1a1aa",
+    fontSize: 13,
+    lineHeight: 18,
   },
   createDetailsComposerRow: { flexDirection: "row", gap: 12, alignItems: "stretch" },
   createDetailsCaptionInput: {
@@ -14576,7 +19417,12 @@ const baseStyles = {
     backgroundColor: "#000",
   },
   createDetailsVideoTapImage: { width: "100%", height: "100%" },
-  createDetailsVideoTapFallback: { flex: 1, backgroundColor: "#18181b" },
+  createDetailsVideoTapFallback: {
+    flex: 1,
+    backgroundColor: "#18181b",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   createDetailsVideoTapBadge: {
     position: "absolute",
     left: 0,
@@ -14603,13 +19449,12 @@ const baseStyles = {
   },
   createPostPreviewTextOverlayText: {
     color: "rgba(255,255,255,0.88)",
-    fontSize: 30,
-    lineHeight: 36,
-    fontWeight: "900",
+    fontSize: TEXT_OVERLAY_BASE_FONT_SIZE,
+    lineHeight: Math.round(TEXT_OVERLAY_BASE_FONT_SIZE * 1.25),
     textAlign: "center",
-    textShadowColor: "rgba(0,0,0,0.45)",
-    textShadowRadius: 8,
-    textShadowOffset: { width: 0, height: 2 },
+    textShadowColor: "rgba(0,0,0,0.55)",
+    textShadowRadius: 1.5,
+    textShadowOffset: { width: 0, height: 1 },
   },
   createPostPreviewShade: {
     ...StyleSheet.absoluteFillObject,
@@ -14697,6 +19542,11 @@ const baseStyles = {
     position: "absolute",
     zIndex: 2,
     maxWidth: "85%",
+    overflow: "visible",
+  },
+  createTextOverlayPinchCapture: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 2,
   },
   createTextOverlaySnapGuideVertical: {
     position: "absolute",
@@ -14718,30 +19568,54 @@ const baseStyles = {
     backgroundColor: "#FFE566",
     zIndex: 1,
   },
-  createTextOverlayPreviewText: { color: "#fff", fontSize: 30, lineHeight: 36, fontWeight: "900", textAlign: "center", textShadowColor: "rgba(0,0,0,0.62)", textShadowRadius: 8, textShadowOffset: { width: 0, height: 2 } },
+  createTextOverlayPreviewText: {
+    color: "#fff",
+    fontSize: TEXT_OVERLAY_BASE_FONT_SIZE,
+    lineHeight: Math.round(TEXT_OVERLAY_BASE_FONT_SIZE * 1.25),
+    textAlign: "center",
+    flexShrink: 1,
+    textShadowColor: "rgba(0,0,0,0.55)",
+    textShadowRadius: 1.5,
+    textShadowOffset: { width: 0, height: 1 },
+  },
   createTextOverlayInput: {
     color: "#fff",
-    fontSize: 30,
-    lineHeight: 36,
-    fontWeight: "900",
+    fontSize: TEXT_OVERLAY_BASE_FONT_SIZE,
+    lineHeight: Math.round(TEXT_OVERLAY_BASE_FONT_SIZE * 1.25),
     textAlign: "center",
-    textShadowColor: "rgba(0,0,0,0.62)",
-    textShadowRadius: 8,
-    textShadowOffset: { width: 0, height: 2 },
+    textShadowColor: "rgba(0,0,0,0.55)",
+    textShadowRadius: 1.5,
+    textShadowOffset: { width: 0, height: 1 },
     padding: 0,
     margin: 0,
     minWidth: 18,
-    maxWidth: "100%",
     backgroundColor: "transparent",
     includeFontPadding: false,
   },
   createTextOverlayActionMenu: {
     position: "absolute",
     zIndex: 8,
+    alignItems: "center",
+  },
+  createTextOverlayActionCaret: {
+    position: "absolute",
+    top: 0,
+    width: 0,
+    height: 0,
+    borderLeftWidth: 8,
+    borderRightWidth: 8,
+    borderBottomWidth: 9,
+    borderLeftColor: "transparent",
+    borderRightColor: "transparent",
+    borderBottomColor: "rgba(20,20,22,0.96)",
+    zIndex: 2,
+  },
+  createTextOverlayActionBubble: {
+    marginTop: 8,
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "rgba(20,20,22,0.94)",
-    borderRadius: 12,
+    backgroundColor: "rgba(20,20,22,0.96)",
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.12)",
     overflow: "hidden",
@@ -14755,6 +19629,21 @@ const baseStyles = {
     fontSize: 14,
     fontWeight: "800",
     textTransform: "lowercase",
+  },
+  createTextOverlayActionEffectButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    minWidth: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  createTextOverlayActionEffectGlyph: {
+    color: "#fff",
+    fontSize: 18,
+    lineHeight: 24,
+    fontWeight: "900",
+    textAlign: "center",
+    includeFontPadding: false,
   },
   createTextOverlayActionDeleteText: {
     color: "#f87171",
@@ -14878,7 +19767,7 @@ const baseStyles = {
     height: 78,
     borderRadius: 16,
     borderWidth: CREATE_FILTER_THUMB_BORDER_WIDTH,
-    borderColor: "rgba(255,255,255,0.14)",
+    borderColor: "transparent",
   },
   createFilterThumbRingCompact: { width: 44, height: 44, borderRadius: 22 },
   createFilterThumbRingActive: { borderColor: "#fff" },
@@ -14889,9 +19778,42 @@ const baseStyles = {
     backgroundColor: "#18181b",
   },
   createFilterThumbInnerCompact: { borderRadius: 22 - CREATE_FILTER_THUMB_BORDER_WIDTH },
+  createTextFontThumbInner: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(24,24,27,0.92)",
+    borderRadius: 22 - CREATE_FILTER_THUMB_BORDER_WIDTH,
+    overflow: "hidden",
+  },
+  createTextFontThumbSample: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "800",
+  },
   createFilterThumbImage: { width: "100%", height: "100%" },
   createFilterThumbFallback: { flex: 1, backgroundColor: "#27272a" },
   createFilterLabel: { color: "#d4d4d8", fontSize: 12, fontWeight: "800" },
+  createFilterNameFlashRoot: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  createFilterNameFlashText: {
+    color: "#fff",
+    fontSize: 34,
+    fontWeight: "700",
+    fontFamily: Platform.select({
+      ios: "Book Antiqua",
+      android: "serif",
+      default: "Book Antiqua",
+    }),
+    letterSpacing: 0.2,
+    textAlign: "center",
+    textShadowColor: "rgba(0,0,0,0.55)",
+    textShadowRadius: 10,
+    textShadowOffset: { width: 0, height: 2 },
+  },
   createFilterLabelCompact: { fontSize: 10 },
   createEditUploadProgress: { height: 5, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.12)", overflow: "hidden" },
   createCameraRoot: { flex: 1, backgroundColor: "#000" },
@@ -14907,6 +19829,44 @@ const baseStyles = {
   },
   createCameraPermission: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", gap: 16, padding: 28, backgroundColor: "#000" },
   createCameraTapLayer: { ...StyleSheet.absoluteFillObject, zIndex: 1 },
+  createCameraFocusReticle: {
+    position: "absolute",
+    width: CREATE_CAMERA_FOCUS_RETICLE_SIZE,
+    height: CREATE_CAMERA_FOCUS_RETICLE_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 4,
+  },
+  createCameraFocusReticleCircle: {
+    width: CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.78,
+    height: CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.78,
+    borderRadius: (CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.78) / 2,
+    borderWidth: 1.5,
+    borderColor: "rgba(255,255,255,0.95)",
+    backgroundColor: "transparent",
+  },
+  createCameraExposureRail: {
+    position: "absolute",
+    right: -14,
+    top: CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.06,
+    bottom: CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.06,
+    width: 16,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  createCameraExposureLine: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    width: StyleSheet.hairlineWidth * 2,
+    backgroundColor: "rgba(255,255,255,0.95)",
+  },
+  createCameraExposureDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "#fff",
+  },
   createCameraFilterPreview: { zIndex: 2 },
   createCameraScreenFlash: { zIndex: 3 },
   createCameraCountdownOverlay: {
@@ -14936,14 +19896,50 @@ const baseStyles = {
     bottom: 0,
     overflow: "hidden",
   },
+  createTextFontPickerBand: {
+    justifyContent: "center",
+  },
+  createTextFontPickerScroll: {
+    flexGrow: 0,
+  },
+  createTextFontPickerList: {
+    gap: 10,
+    paddingHorizontal: 16,
+    alignItems: "center",
+  },
   createCameraFilterFloat: { position: "absolute", left: 0, right: 0, alignItems: "center" },
-  createCameraBottomBar: { position: "absolute", left: 28, right: 28, zIndex: 5, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  createCameraSpacer: { width: 58, height: 58 },
-  createLibraryButton: { width: 58, height: 58, borderRadius: 16, overflow: "hidden", borderWidth: 2, borderColor: "#fff", backgroundColor: "rgba(24,24,27,0.72)" },
+  createCameraBottomBar: {
+    position: "absolute",
+    left: 28,
+    right: 28,
+    zIndex: 5,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  createLibraryButton: {
+    position: "absolute",
+    left: 18,
+    zIndex: 5,
+    width: 58,
+    height: 58,
+    borderRadius: 16,
+    overflow: "hidden",
+    borderWidth: 2,
+    borderColor: "#fff",
+    backgroundColor: "rgba(24,24,27,0.72)",
+  },
   createLibraryThumbnail: { width: "100%", height: "100%" },
-  createLibraryPlaceholder: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(24,24,27,0.82)" },
-  createLibraryPlaceholderText: { color: "#fff", fontSize: 22, fontWeight: "800" },
-  createRecordButton: { width: 78, height: 78, borderRadius: 39, borderWidth: 4, borderColor: "#fff", alignItems: "center", justifyContent: "center", backgroundColor: "rgba(255,255,255,0.08)" },
+  createRecordButton: {
+    width: CREATE_CAMERA_RECORD_BUTTON_SIZE,
+    height: CREATE_CAMERA_RECORD_BUTTON_SIZE,
+    borderRadius: CREATE_CAMERA_RECORD_BUTTON_SIZE / 2,
+    borderWidth: CREATE_CAMERA_RECORD_BUTTON_BORDER_WIDTH,
+    borderColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
   createCameraHint: { position: "absolute", left: 0, right: 0, zIndex: 5, textAlign: "center", color: "#fff", fontSize: 13, fontWeight: "800", textTransform: "lowercase" },
   progressTrack: { height: 8, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.12)", overflow: "hidden" },
   progressFill: { height: "100%", backgroundColor: "#fff" },
@@ -14960,6 +19956,22 @@ const baseStyles = {
   alignEnd: { alignItems: "flex-end", gap: 5 },
   unreadDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: "#ec4899" },
   emptyCard: { padding: 18, borderRadius: 22, borderWidth: 1, borderColor: border, backgroundColor: panelSoft },
+  profileSavedEmptyText: {
+    color: muted,
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: "center",
+    paddingVertical: 36,
+    paddingHorizontal: 16,
+  },
+  inboxEmptyText: {
+    color: muted,
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: "center",
+    paddingVertical: 28,
+    paddingHorizontal: 12,
+  },
   chatHeader: { flexDirection: "row", alignItems: "center", gap: 12, padding: 16, borderBottomWidth: 1, borderBottomColor: border },
   chatProfileTarget: { flexDirection: "row", alignItems: "center", gap: 12, flex: 1 },
   chatContent: { flexGrow: 1, gap: 10, padding: 16 },
@@ -15000,9 +20012,111 @@ const baseStyles = {
   },
   sendButton: { paddingHorizontal: 16, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" },
   sendButtonText: { color: "#000", fontWeight: "800" },
-  profileTabSlider: { overflow: "visible" },
+  profileTabSliderViewport: {
+    overflow: "hidden",
+    marginHorizontal: -SCREEN_CONTENT_PADDING,
+  },
+  profileTabSliderTrack: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+  },
+  profileTabPane: {
+    width: viewportWidth,
+    paddingHorizontal: SCREEN_CONTENT_PADDING,
+  },
+  profileLibraryTabs: {
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    marginTop: 2,
+    marginBottom: 4,
+  },
+  profileLibraryTabText: {
+    color: "#71717a",
+    fontSize: 16,
+    fontWeight: "500",
+    textTransform: "lowercase",
+  },
+  profileLibraryTabTextActive: {
+    color: "#fff",
+    fontWeight: "800",
+  },
+  profileLibraryTabDivider: {
+    width: StyleSheet.hairlineWidth,
+    height: 14,
+    backgroundColor: "#52525b",
+  },
   grid: { width: viewportWidth, flexDirection: "row", flexWrap: "wrap", gap: PROFILE_GRID_GAP, marginTop: 8, marginHorizontal: -SCREEN_CONTENT_PADDING },
-  gridItem: { width: PROFILE_GRID_ITEM_WIDTH, aspectRatio: 9 / 16, overflow: "hidden", alignItems: "flex-end", justifyContent: "flex-end", padding: 8, backgroundColor: panel },
+  gridItem: {
+    width: PROFILE_GRID_ITEM_WIDTH,
+    aspectRatio: 9 / 16,
+    overflow: "hidden",
+    alignItems: "flex-end",
+    justifyContent: "flex-end",
+    padding: 8,
+    backgroundColor: "#000",
+  },
+  gridPinPreview: {
+    position: "absolute",
+    overflow: "hidden",
+    borderRadius: 16,
+    backgroundColor: "#000",
+    shadowColor: "#000",
+    shadowOpacity: 0.45,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
+  },
+  gridPinPreviewDim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#000",
+    borderRadius: 16,
+  },
+  profileGridLoadingBlur: {
+    width: viewportWidth,
+    marginTop: 8,
+    marginHorizontal: -SCREEN_CONTENT_PADDING,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    backgroundColor: "rgba(39,39,42,0.72)",
+  },
+  gridThumbPlaceholder: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#3f3f46",
+  },
+  gridPinnedBadge: {
+    position: "absolute",
+    top: 6,
+    left: 6,
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 2,
+  },
+  gridPinMenuRoot: {
+    flex: 1,
+  },
+  gridPinMenuCardWrap: {
+    position: "absolute",
+    width: 148,
+    height: 52,
+  },
+  gridPinMenuCard: {
+    width: 148,
+    height: 52,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: border,
+    backgroundColor: "rgba(9,9,11,0.96)",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+  },
   gridPendingOverlay: {
     ...StyleSheet.absoluteFillObject,
     alignItems: "center",
@@ -15047,9 +20161,53 @@ const baseStyles = {
     alignItems: "center",
   },
   profilePostedToastText: { color: "#000", fontWeight: "700", fontSize: 14 },
+  feedReplayToast: {
+    position: "absolute",
+    alignSelf: "center",
+    left: 28,
+    right: 28,
+    zIndex: 40,
+    backgroundColor: "rgba(255,255,255,0.72)",
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    alignItems: "center",
+  },
+  feedReplayToastText: {
+    color: "rgba(0,0,0,0.88)",
+    fontWeight: "700",
+    fontSize: 13,
+    textAlign: "center",
+    textTransform: "lowercase",
+  },
   gridCaption: { color: "#fff", fontSize: 11, lineHeight: 15, fontWeight: "600", ...overlayTextShadow },
-  lockedOverlay: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.58)", padding: 8 },
+  lockedOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(10,10,10,0.28)",
+  },
   lockedText: { color: "#fff", textAlign: "center", fontSize: 11, fontWeight: "800", ...overlayTextShadow },
+  profileLockGate: {
+    position: "absolute",
+    left: -SCREEN_CONTENT_PADDING,
+    right: -SCREEN_CONTENT_PADDING,
+    bottom: 0,
+    zIndex: 4,
+  },
+  profileLockGateMessage: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    alignItems: "center",
+    paddingHorizontal: 28,
+  },
+  profileLockGateText: {
+    color: "#fff",
+    textAlign: "center",
+    fontSize: 15,
+    lineHeight: 21,
+    fontWeight: "800",
+    ...overlayTextShadow,
+  },
   settingsOverlay: { flex: 1, alignItems: "flex-end" },
   settingsBackdrop: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.42)" },
   settingsDrawer: { position: "absolute", right: 0, top: 0, bottom: 0, borderLeftWidth: 1, borderLeftColor: border, backgroundColor: "#09090b", shadowColor: "#000", shadowOpacity: 0.35, shadowRadius: 22, shadowOffset: { width: -8, height: 0 }, elevation: 16 },
@@ -15059,7 +20217,16 @@ const baseStyles = {
   settingsButton: { paddingVertical: 14, paddingHorizontal: 10, borderRadius: 16 },
   settingsToggleGroup: { marginTop: 10, gap: 0 },
   settingsLocationGroup: { gap: 0 },
-  settingsNearMeSection: { gap: 4, paddingBottom: 8, paddingHorizontal: 10 },
+  // Match settingsRow vertical rhythm (14) so "near me radius" sits evenly
+  // under "share live location" like light mode ↔ share live location.
+  settingsNearMeSection: { gap: 8, paddingTop: 14, paddingBottom: 14, paddingHorizontal: 10 },
+  settingsLiveLocationCopy: {
+    color: muted,
+    fontSize: 13,
+    lineHeight: 18,
+    paddingHorizontal: 10,
+    paddingBottom: 8,
+  },
   settingsRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 14, paddingHorizontal: 10 },
   settingsRowLabel: { flex: 1, paddingRight: 12 },
   settingsText: { color: "#e4e4e7", fontSize: 15, textTransform: "lowercase" },
@@ -15113,7 +20280,30 @@ const baseStyles = {
   gridNavCell: { width: 9, height: 9, borderWidth: 1.8, borderColor: "#fff", borderRadius: 3 },
   mailIconWrap: { width: 33, height: 30, alignItems: "center", justifyContent: "center" },
   mailIcon: { width: 26, height: 19, borderColor: "#fff" },
-  mailBadge: { position: "absolute", right: -3, top: -4, minWidth: 17, height: 17, paddingHorizontal: 4, borderRadius: 8.5, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: "rgba(10,10,10,0.96)", backgroundColor: "#ef4444" },
+  // Outer = black ring; inner = red fill — avoids red bleeding past the outline.
+  mailBadge: {
+    position: "absolute",
+    right: -3,
+    top: -4,
+    minWidth: 17,
+    height: 17,
+    padding: 1.5,
+    borderRadius: 999,
+    backgroundColor: "rgba(10,10,10,0.96)",
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  mailBadgeInner: {
+    minWidth: 14,
+    minHeight: 14,
+    paddingHorizontal: 3,
+    borderRadius: 999,
+    backgroundColor: "#ef4444",
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
   mailBadgeText: { color: "#fff", fontSize: 10, lineHeight: 12, fontWeight: "900" },
   createNav: { width: 66, height: 66, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" },
   createNavText: { color: "#000", fontSize: 38, lineHeight: 41, fontWeight: "600" },
@@ -15148,6 +20338,11 @@ const mediaOverlayStyleNames = new Set([
   "topSheet",
   "topSheetScroll",
   "topSheetScrollContent",
+  "filterSheetSection",
+  "filterLookingForRow",
+  "filterLookingForControl",
+  "filterLookingForLabel",
+  "filterLookingForIconSlot",
   "sectionLabelLight",
   "locationFilterList",
   "locationCountryGroup",
@@ -15165,7 +20360,11 @@ const mediaOverlayStyleNames = new Set([
   "feedBootOverlay",
   "feedName",
   "feedRole",
+  "feedRecentFilterText",
+  "feedRecentFilterTextActive",
   "caption",
+  "feedCaptionText",
+  "feedLookingForIcon",
   "tag",
   "badge",
   "actionText",
@@ -15187,7 +20386,8 @@ const mediaOverlayStyleNames = new Set([
   "gridCaption",
   "lockedText",
   "videoPlaceholder",
-  "feedShade",
+  "feedTopShade",
+  "feedBottomShade",
   "fullscreenVideoRoot",
   "fullscreenAdjacentVideo",
   "fullscreenMessageRoot",
@@ -15213,8 +20413,12 @@ const mediaOverlayStyleNames = new Set([
   "createTextOverlayPreviewText",
   "createTextOverlayInput",
   "createTextOverlayActionMenu",
+  "createTextOverlayActionCaret",
+  "createTextOverlayActionBubble",
   "createTextOverlayActionButton",
   "createTextOverlayActionButtonText",
+  "createTextOverlayActionEffectButton",
+  "createTextOverlayActionEffectGlyph",
   "createTextOverlayActionDeleteText",
   "createTextOverlayActionDivider",
   "createTrimHeader",
@@ -15238,14 +20442,23 @@ const mediaOverlayStyleNames = new Set([
   "createFilterThumbRingActive",
   "createFilterThumbInner",
   "createFilterThumbInnerCompact",
+  "createTextFontThumbInner",
+  "createTextFontThumbSample",
   "createFilterThumbImage",
   "createFilterThumbFallback",
   "createFilterLabel",
+  "createFilterNameFlashRoot",
+  "createFilterNameFlashText",
   "createEditUploadProgress",
   "createCameraRoot",
   "createCameraViewport",
   "createCameraPermission",
   "createCameraTapLayer",
+  "createCameraFocusReticle",
+  "createCameraFocusReticleCircle",
+  "createCameraExposureRail",
+  "createCameraExposureLine",
+  "createCameraExposureDot",
   "createCameraFilterPreview",
   "createCameraScreenFlash",
   "createCameraCountdownOverlay",
@@ -15260,11 +20473,8 @@ const mediaOverlayStyleNames = new Set([
   "createCameraFilterBand",
   "createCameraFilterFloat",
   "createCameraBottomBar",
-  "createCameraSpacer",
   "createLibraryButton",
   "createLibraryThumbnail",
-  "createLibraryPlaceholder",
-  "createLibraryPlaceholderText",
   "createRecordButton",
   "createCameraHint",
 ]);
@@ -15322,6 +20532,7 @@ function getLightModeColor(value: string) {
     "rgba(24,24,27,0.82)": "rgba(255,255,255,0.88)",
     "rgba(255,255,255,0.14)": "rgba(0,0,0,0.14)",
     "rgba(255,255,255,0.20)": "rgba(0,0,0,0.10)",
+    "rgba(255,255,255,0.28)": "rgba(0,0,0,0.28)",
     "rgba(255,255,255,0.10)": "rgba(0,0,0,0.08)",
     "rgba(0,0,0,0.42)": "rgba(0,0,0,0.18)",
     "rgba(0,0,0,0.62)": "rgba(0,0,0,0.20)",

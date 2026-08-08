@@ -38,23 +38,3 @@ export const musicGenres = [
   "soul",
   "trap",
 ] as const;
-
-const locationSuggestionsUnsorted = [
-  "London, UK",
-  "Berlin, Germany",
-  "Toronto, Canada",
-  "Lagos, Nigeria",
-  "Accra, Ghana",
-  "Los Angeles, USA",
-  "New York, USA",
-  "Paris, France",
-  "Amsterdam, Netherlands",
-  "Tokyo, Japan",
-  "Sydney, Australia",
-  "Mumbai, India",
-  "Sao Paulo, Brazil",
-  "Mexico City, Mexico",
-  "Stockholm, Sweden",
-] as const;
-
-export const locationSuggestions = [...locationSuggestionsUnsorted].sort((a, b) => a.localeCompare(b));

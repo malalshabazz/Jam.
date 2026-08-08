@@ -6,8 +6,6 @@
     <true/>
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
-    <key>CFBundleDisplayName</key>
-    <string>Jam.</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -40,25 +38,29 @@
     <true/>
     <key>NSAppTransportSecurity</key>
     <dict>
+      <key>NSAllowsArbitraryLoads</key>
+      <false/>
+      <key>NSAllowsLocalNetworking</key>
+      <true/>
       <key>NSExceptionDomains</key>
       <dict>
-        <key>upload.cloudflarestream.com</key>
+        <key>cloudflarestream.com</key>
         <dict>
-          <key>NSIncludesSubdomains</key>
-          <true/>
           <key>NSExceptionAllowsInsecureHTTPLoads</key>
           <false/>
+          <key>NSIncludesSubdomains</key>
+          <true/>
           <key>NSExceptionMinimumTLSVersion</key>
           <string>TLSv1.0</string>
           <key>NSExceptionRequiresForwardSecrecy</key>
           <false/>
         </dict>
-        <key>cloudflarestream.com</key>
+        <key>upload.cloudflarestream.com</key>
         <dict>
-          <key>NSIncludesSubdomains</key>
-          <true/>
           <key>NSExceptionAllowsInsecureHTTPLoads</key>
           <false/>
+          <key>NSIncludesSubdomains</key>
+          <true/>
           <key>NSExceptionMinimumTLSVersion</key>
           <string>TLSv1.0</string>
           <key>NSExceptionRequiresForwardSecrecy</key>
@@ -66,10 +68,10 @@
         </dict>
         <key>upload.videodelivery.net</key>
         <dict>
-          <key>NSIncludesSubdomains</key>
-          <true/>
           <key>NSExceptionAllowsInsecureHTTPLoads</key>
           <false/>
+          <key>NSIncludesSubdomains</key>
+          <true/>
           <key>NSExceptionMinimumTLSVersion</key>
           <string>TLSv1.2</string>
           <key>NSExceptionRequiresForwardSecrecy</key>
@@ -77,10 +79,10 @@
         </dict>
         <key>videodelivery.net</key>
         <dict>
-          <key>NSIncludesSubdomains</key>
-          <true/>
           <key>NSExceptionAllowsInsecureHTTPLoads</key>
           <false/>
+          <key>NSIncludesSubdomains</key>
+          <true/>
           <key>NSExceptionMinimumTLSVersion</key>
           <string>TLSv1.2</string>
           <key>NSExceptionRequiresForwardSecrecy</key>
@@ -89,9 +91,7 @@
       </dict>
     </dict>
     <key>NSCameraUsageDescription</key>
-    <string>Jam uses your camera so you can record videos.</string>
-    <key>NSFaceIDUsageDescription</key>
-    <string>Allow $(PRODUCT_NAME) to access your Face ID biometric data.</string>
+    <string>Jam uses your camera so you can record videos for your profile and feed.</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
     <string>Jam updates your live location for nearby creators while share live location is enabled in settings.</string>
     <key>NSLocationAlwaysUsageDescription</key>
@@ -100,19 +100,16 @@
     <string>Jam uses your location to show creators near you and share your live location when enabled in settings.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Jam uses your microphone so your videos can include sound.</string>
-    <key>NSPhotoLibraryAddUsageDescription</key>
-    <string>Allow $(PRODUCT_NAME) to save photos</string>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>Jam lets you choose videos and profile photos from your library.</string>
     <key>RCTNewArchEnabled</key>
     <true/>
-    <key>UIBackgroundModes</key>
-    <array>
-      <string>fetch</string>
-      <string>location</string>
-    </array>
     <key>UILaunchStoryboardName</key>
     <string>SplashScreen</string>
+    <key>UIBackgroundModes</key>
+    <array>
+      <string>location</string>
+    </array>
     <key>UIRequiredDeviceCapabilities</key>
     <array>
       <string>arm64</string>
@@ -124,7 +121,6 @@
     <key>UISupportedInterfaceOrientations</key>
     <array>
       <string>UIInterfaceOrientationPortrait</string>
-      <string>UIInterfaceOrientationPortraitUpsideDown</string>
     </array>
     <key>UIUserInterfaceStyle</key>
     <string>Dark</string>

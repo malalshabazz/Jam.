@@ -111,6 +111,56 @@ index 639cebd..2aaf882 100644
  }
  /**
   * @hidden
+diff --git a/node_modules/expo-camera/build/CameraView.d.ts b/node_modules/expo-camera/build/CameraView.d.ts
+index 8b68d2e..e557b8f 100644
+--- a/node_modules/expo-camera/build/CameraView.d.ts
++++ b/node_modules/expo-camera/build/CameraView.d.ts
+@@ -154,6 +154,18 @@ export default class CameraView extends Component<CameraViewProps> {
+      * @platform ios
+      */
+     stopRecording(): void;
++    /**
++     * Focus + meter at a normalized preview point (0–1, 0–1).
++     * @platform android
++     * @platform ios
++     */
++    focusAtPoint(x: number, y: number): Promise<void | undefined>;
++    /**
++     * Set exposure bias in normalized range [-1, 1] (darker → brighter).
++     * @platform android
++     * @platform ios
++     */
++    setExposureBias(bias: number): Promise<void | undefined>;
+     _onCameraReady: () => void;
+     _onAvailableLensesChanged: ({ nativeEvent }: {
+         nativeEvent: AvailableLenses;
+diff --git a/node_modules/expo-camera/build/CameraView.js b/node_modules/expo-camera/build/CameraView.js
+index 0da8747..9b6318a 100644
+--- a/node_modules/expo-camera/build/CameraView.js
++++ b/node_modules/expo-camera/build/CameraView.js
+@@ -203,6 +203,22 @@ export default class CameraView extends Component {
+     stopRecording() {
+         this._cameraRef.current?.stopRecording();
+     }
++    /**
++     * Focus + meter at a normalized preview point (0–1, 0–1).
++     * @platform android
++     * @platform ios
++     */
++    async focusAtPoint(x, y) {
++        return this._cameraRef.current?.focusAtPoint(x, y);
++    }
++    /**
++     * Set exposure bias in normalized range [-1, 1] (darker → brighter).
++     * @platform android
++     * @platform ios
++     */
++    async setExposureBias(bias) {
++        return this._cameraRef.current?.setExposureBias(bias);
++    }
+     _onCameraReady = () => {
+         if (this.props.onCameraReady) {
+             this.props.onCameraReady();
 diff --git a/node_modules/expo-camera/ios/CameraViewModule.swift b/node_modules/expo-camera/ios/CameraViewModule.swift
 index 6410204..8310edc 100644
 --- a/node_modules/expo-camera/ios/CameraViewModule.swift
@@ -147,7 +197,7 @@ index 6410204..8310edc 100644
  
      Class("Picture", PictureRef.self) {
 diff --git a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
-index dc2a548..30864d6 100644
+index dc2a548..e170430 100644
 --- a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
 +++ b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
 @@ -197,8 +197,14 @@ class CameraSessionManager: NSObject {
@@ -172,7 +222,7 @@ index dc2a548..30864d6 100644
    }
  
 +  func focusAtPoint(normalizedX: CGFloat, normalizedY: CGFloat, previewLayer: AVCaptureVideoPreviewLayer) {
-+    guard let device = captureDeviceInput?.device else {
++    guard let device = captureDeviceInput?.device, let delegate else {
 +      return
 +    }
 +
@@ -182,7 +232,7 @@ index dc2a548..30864d6 100644
 +    )
 +    let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: layerPoint)
 +
-+    sessionQueue.async {
++    delegate.sessionQueue.async {
 +      do {
 +        try device.lockForConfiguration()
 +        if device.isFocusPointOfInterestSupported {
@@ -207,11 +257,11 @@ index dc2a548..30864d6 100644
 +  }
 +
 +  func setExposureBias(_ bias: Float) {
-+    guard let device = captureDeviceInput?.device else {
++    guard let device = captureDeviceInput?.device, let delegate else {
 +      return
 +    }
 +
-+    sessionQueue.async {
++    delegate.sessionQueue.async {
 +      do {
 +        try device.lockForConfiguration()
 +        let span = max(abs(device.minExposureTargetBias), abs(device.maxExposureTargetBias))
@@ -238,6 +288,23 @@ index dc2a548..30864d6 100644
    func getAvailableLenses() -> [String] {
      guard let delegate else {
        return []
+diff --git a/node_modules/expo-camera/ios/Current/CameraVideoRecording.swift b/node_modules/expo-camera/ios/Current/CameraVideoRecording.swift
+index 0cf1b56..5bd8e05 100644
+--- a/node_modules/expo-camera/ios/Current/CameraVideoRecording.swift
++++ b/node_modules/expo-camera/ios/Current/CameraVideoRecording.swift
+@@ -33,8 +33,10 @@ class CameraVideoRecording: NSObject, AVCaptureFileOutputRecordingDelegate {
+       connection.videoOrientation = ExpoCameraUtils.videoOrientation(for: orientation)
+       await setVideoOptions(options: options, for: connection, videoFileOutput: videoFileOutput, promise: promise)
+ 
+-      if connection.isVideoOrientationSupported && delegate?.mirror == true {
+-        connection.isVideoMirrored = delegate?.mirror ?? false
++      // isVideoMirroringSupported (not orientation) gates selfie mirroring into the file.
++      if connection.isVideoMirroringSupported {
++        connection.automaticallyAdjustsVideoMirroring = false
++        connection.isVideoMirrored = delegate?.mirror == true
+       }
+     }
+ 
 diff --git a/node_modules/expo-camera/ios/Current/CameraView.swift b/node_modules/expo-camera/ios/Current/CameraView.swift
 index b2e7f9e..84fd55f 100644
 --- a/node_modules/expo-camera/ios/Current/CameraView.swift
@@ -280,3 +347,32 @@ index c9ea132..21fc9b2 100644
  }
  
  /**
+diff --git a/node_modules/expo-camera/src/CameraView.tsx b/node_modules/expo-camera/src/CameraView.tsx
+index cf61c1c..33438ce 100644
+--- a/node_modules/expo-camera/src/CameraView.tsx
++++ b/node_modules/expo-camera/src/CameraView.tsx
+@@ -300,6 +300,24 @@ export default class CameraView extends Component<CameraViewProps> {
+     this._cameraRef.current?.stopRecording();
+   }
+ 
++  /**
++   * Focus + meter at a normalized preview point (0–1, 0–1).
++   * @platform android
++   * @platform ios
++   */
++  async focusAtPoint(x: number, y: number) {
++    return this._cameraRef.current?.focusAtPoint(x, y);
++  }
++
++  /**
++   * Set exposure bias in normalized range [-1, 1] (darker → brighter).
++   * @platform android
++   * @platform ios
++   */
++  async setExposureBias(bias: number) {
++    return this._cameraRef.current?.setExposureBias(bias);
++  }
++
+   _onCameraReady = () => {
+     if (this.props.onCameraReady) {
+       this.props.onCameraReady();

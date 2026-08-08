@@ -7,8 +7,14 @@ import { updateLiveLocation, type Profile } from "@/lib/native-social-data";
 
 export const LIVE_LOCATION_TASK_NAME = "jam-live-location-updates";
 const SHARE_LIVE_LOCATION_KEY_PREFIX = "jam.shareLiveLocation:";
+const NEAR_ME_LIVE_LOCATION_NOTICE_KEY_PREFIX = "jam.nearMeLiveLocationNoticeSeen:";
 const MIN_PUBLISH_INTERVAL_MS = 30_000;
 const MIN_PUBLISH_DISTANCE_MILES = 0.06;
+
+/** First-time Near Me disclosure — keep in sync with Settings copy. */
+export const NEAR_ME_LIVE_LOCATION_NOTICE_TITLE = "near me shares your location";
+export const NEAR_ME_LIVE_LOCATION_NOTICE_MESSAGE =
+  "turning on near me also turns on share live location in settings. while sharing is on, jam. updates your live location so you can find creators nearby — and they can find you. turn sharing off anytime in settings.";
 
 const WATCH_OPTIONS: Location.LocationOptions = {
   accuracy: Location.Accuracy.Balanced,
@@ -31,6 +37,7 @@ let lastPublishAt = 0;
 let lastPublishedLatitude: number | null = null;
 let lastPublishedLongitude: number | null = null;
 let appStateSubscription: { remove: () => void } | null = null;
+let persistingOnBackground = false;
 
 function getSharePreferenceKey(userId: string) {
   return `${SHARE_LIVE_LOCATION_KEY_PREFIX}${userId}`;
@@ -45,7 +52,9 @@ async function hasAlwaysLocationAccess() {
   return foreground.ios?.scope === "always" || background.granted;
 }
 
-function shouldPublishLocation(latitude: number, longitude: number) {
+function shouldPublishLocation(latitude: number, longitude: number, force: boolean) {
+  if (force) return true;
+
   const now = Date.now();
   if (now - lastPublishAt < MIN_PUBLISH_INTERVAL_MS) {
     if (lastPublishedLatitude == null || lastPublishedLongitude == null) {
@@ -64,8 +73,13 @@ function shouldPublishLocation(latitude: number, longitude: number) {
   return true;
 }
 
-async function publishLiveLocation(userId: string, latitude: number, longitude: number) {
-  if (!shouldPublishLocation(latitude, longitude)) return;
+async function publishLiveLocation(
+  userId: string,
+  latitude: number,
+  longitude: number,
+  force = false,
+) {
+  if (!shouldPublishLocation(latitude, longitude, force)) return;
 
   await updateLiveLocation(userId, { latitude, longitude });
   lastPublishAt = Date.now();
@@ -95,6 +109,39 @@ async function stopBackgroundUpdates() {
   const started = await Location.hasStartedLocationUpdatesAsync(LIVE_LOCATION_TASK_NAME);
   if (started) {
     await Location.stopLocationUpdatesAsync(LIVE_LOCATION_TASK_NAME);
+  }
+}
+
+/**
+ * For "while using the app" permission, tracking stops when the app leaves the
+ * foreground. Persist the freshest fix we can so near-me still finds this user
+ * from their last known live location until they turn sharing off.
+ */
+async function persistLastKnownLiveLocation(userId: string) {
+  if (persistingOnBackground) return;
+  persistingOnBackground = true;
+
+  try {
+    try {
+      const position = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      await publishLiveLocation(
+        userId,
+        position.coords.latitude,
+        position.coords.longitude,
+        true,
+      );
+      return;
+    } catch {
+      // Fall through to last in-memory fix when GPS is unavailable mid-exit.
+    }
+
+    if (lastPublishedLatitude != null && lastPublishedLongitude != null) {
+      await publishLiveLocation(userId, lastPublishedLatitude, lastPublishedLongitude, true);
+    }
+  } finally {
+    persistingOnBackground = false;
   }
 }
 
@@ -161,6 +208,9 @@ async function handleAppStateChange(nextState: AppStateStatus) {
     return;
   }
 
+  // Leaving the app with while-using permission: save last fix, then stop watching.
+  // Stored live_latitude / live_longitude stay until share live location is turned off.
+  await persistLastKnownLiveLocation(userId).catch(() => undefined);
   await stopForegroundWatch();
 }
 
@@ -191,6 +241,18 @@ export async function isLiveLocationSharingEnabled(userId: string) {
   return (await AsyncStorage.getItem(getSharePreferenceKey(userId))) === "1";
 }
 
+function getNearMeLiveLocationNoticeKey(userId: string) {
+  return `${NEAR_ME_LIVE_LOCATION_NOTICE_KEY_PREFIX}${userId}`;
+}
+
+export async function hasSeenNearMeLiveLocationNotice(userId: string) {
+  return (await AsyncStorage.getItem(getNearMeLiveLocationNoticeKey(userId))) === "1";
+}
+
+export async function markNearMeLiveLocationNoticeSeen(userId: string) {
+  await AsyncStorage.setItem(getNearMeLiveLocationNoticeKey(userId), "1");
+}
+
 export async function enableLiveLocationSharing(
   userId: string,
 ): Promise<{ profile: Profile } | { error: string }> {
@@ -218,7 +280,20 @@ export async function enableLiveLocationSharing(
 export async function disableLiveLocationSharing(userId: string) {
   await AsyncStorage.removeItem(getSharePreferenceKey(userId));
   await stopLocationTracking();
+  // Only explicit opt-out clears stored live coords so offline near-me stops matching.
   return updateLiveLocation(userId, null);
+}
+
+/**
+ * Sign-out path: stop local GPS tracking, but keep the last live fix + share
+ * preference so this user can still appear in others' near-me feeds (until TTL
+ * or they turn sharing off).
+ */
+export async function pauseLiveLocationSharingOnLogout(userId: string) {
+  if (await isLiveLocationSharingEnabled(userId)) {
+    await persistLastKnownLiveLocation(userId).catch(() => undefined);
+  }
+  await stopLocationTracking();
 }
 
 export async function resumeLiveLocationSharingIfEnabled(userId: string) {
@@ -226,7 +301,8 @@ export async function resumeLiveLocationSharingIfEnabled(userId: string) {
 
   const foreground = await Location.getForegroundPermissionsAsync();
   if (foreground.status !== "granted") {
-    await disableLiveLocationSharing(userId);
+    // Keep the last stored live location for near-me; only stop local tracking.
+    await stopLocationTracking();
     return null;
   }
 
