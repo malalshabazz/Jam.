@@ -37,6 +37,7 @@
     "theme/**/*.ts",
     "components/**/*.ts",
     "components/**/*.tsx",
+    "screens/**/*.tsx",
     "app/api/**/*.ts",
     "next.config.ts",
     "**/*.mts"

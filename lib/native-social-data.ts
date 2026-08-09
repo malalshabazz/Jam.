@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { clearDiscoverFeedSessionCache } from "@/lib/discover-feed-session-cache";
 import { geocodeProfileLocation } from "@/lib/geocode";
 import { publishJamRelationship } from "@/lib/jam-relationship-sync";
 import { deleteCloudflareVideo, getCloudflarePlaybackUrl } from "@/lib/native-cloudflare";
@@ -639,6 +640,18 @@ export async function fetchFeedVideos(
 ): Promise<FeedPage> {
   // Global + filtered discover both go through the RPC so seen phases stay consistent.
   return fetchFilteredFeedVideos(currentUserId, options ?? {});
+}
+
+/** Newest video timestamp — used to invalidate session feed caches when something new posts. */
+export async function fetchNewestVideoCreatedAt(): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("videos")
+    .select("created_at")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data?.created_at) return null;
+  return data.created_at;
 }
 
 /** Role / genre / location filtered global feed (server-side overlaps + profile location). */
@@ -1909,6 +1922,8 @@ export async function createVideo(input: {
         videoId: data.id,
         lookingForPersisted: "looking_for" in payload ? lookingFor : null,
       });
+      // New post should not be hidden behind stale filter pages from this session.
+      clearDiscoverFeedSessionCache();
       return { id: data.id as string };
     }
     logVideoDatabaseStep("createVideo insert attempt failed", {

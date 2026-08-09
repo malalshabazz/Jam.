@@ -33,6 +33,7 @@ export function ProfileGridThumbnail({
   prewarmEnabled = false,
   visibilitySyncRef,
   instantReveal = false,
+  onReady,
 }: {
   video: ProfileVideo | FeedVideo;
   blurred?: boolean;
@@ -41,6 +42,8 @@ export function ProfileGridThumbnail({
   visibilitySyncRef?: MutableRefObject<Set<() => void>>;
   /** Skip the load crossfade (used for the long-press pin preview clone). */
   instantReveal?: boolean;
+  /** Fires once the thumb image is painted (pin preview waits on this to avoid a blank flash). */
+  onReady?: () => void;
 }) {
   const streamId = getVideoStreamId(video);
   const aspectCacheKey = getVideoAspectCacheKeyFromVideo(video);
@@ -62,32 +65,37 @@ export function ProfileGridThumbnail({
   const caption = getVideoCaption(video);
   const rootRef = useRef<View>(null);
   const prewarmedVisibleRef = useRef(false);
-  const revealedRef = useRef(instantReveal);
-  const thumbOpacity = useRef(new Animated.Value(instantReveal ? 1 : 0)).current;
+  const revealedRef = useRef(false);
+  const revealGenerationRef = useRef(0);
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
+  // Always start transparent; pin clones must never mount opaque before the bitmap paints.
+  const thumbOpacity = useRef(new Animated.Value(0)).current;
   const placeholderOpacity = useRef(new Animated.Value(instantReveal ? 0 : 1)).current;
 
-  function resetThumbReveal() {
-    if (instantReveal) {
-      revealedRef.current = true;
-      thumbOpacity.stopAnimation();
-      placeholderOpacity.stopAnimation();
-      thumbOpacity.setValue(1);
-      placeholderOpacity.setValue(0);
-      return;
-    }
+  function armThumbReveal() {
+    const generation = ++revealGenerationRef.current;
     revealedRef.current = false;
     thumbOpacity.stopAnimation();
     placeholderOpacity.stopAnimation();
+    placeholderOpacity.setValue(instantReveal ? 0 : 1);
+    if (instantReveal) {
+      // Don't yank thumbOpacity to 0 — cached onLoad often wins the race against this
+      // effect and a reset would blank the clone after onReady (flash).
+      return generation;
+    }
     thumbOpacity.setValue(0);
-    placeholderOpacity.setValue(1);
+    return generation;
   }
 
-  function revealThumb() {
+  function revealThumb(generation?: number) {
+    if (generation != null && generation !== revealGenerationRef.current) return;
     if (revealedRef.current) return;
     revealedRef.current = true;
     if (instantReveal) {
       thumbOpacity.setValue(1);
       placeholderOpacity.setValue(0);
+      onReadyRef.current?.();
       return;
     }
     Animated.parallel([
@@ -103,7 +111,9 @@ export function ProfileGridThumbnail({
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }),
-    ]).start();
+    ]).start(() => {
+      onReadyRef.current?.();
+    });
   }
 
   useEffect(() => {
@@ -111,11 +121,18 @@ export function ProfileGridThumbnail({
     const cached = getRememberedVideoAspectSize(aspectCacheKey);
     setThumbResizeMode(imageResizeModeForVideoSize(cached?.width, cached?.height));
     prewarmedVisibleRef.current = false;
-    resetThumbReveal();
+    armThumbReveal();
   }, [aspectCacheKey, video.id, streamId, thumbnailTimeMs, mediaUri, instantReveal]);
 
   useEffect(() => {
-    resetThumbReveal();
+    // Arm a new reveal for this URI. Cached images often fire onLoad before this
+    // effect; a blind reset afterward left opacity at 0 forever (blank grid cell
+    // while fullscreen playback still worked). Generation + fallback fixes that.
+    const generation = armThumbReveal();
+    if (!uri) return;
+    // Pin clones: short fallback so onReady still fires if load events are skipped.
+    const timer = setTimeout(() => revealThumb(generation), instantReveal ? 320 : 480);
+    return () => clearTimeout(timer);
   }, [uri, instantReveal]);
 
   // Warm aspect cache from HLS before the user taps into fullscreen.
@@ -186,12 +203,18 @@ export function ProfileGridThumbnail({
       ref={rootRef}
       collapsable={false}
       pointerEvents="none"
-      style={[StyleSheet.absoluteFill, { backgroundColor: "#000" }]}
+      style={[
+        StyleSheet.absoluteFill,
+        // Pin-preview clone stays transparent until the bitmap paints so the
+        // real grid thumb underneath doesn't get covered by a black flash.
+        { backgroundColor: instantReveal ? "transparent" : "#000" },
+      ]}
     >
       <Animated.View
         style={[styles.gridThumbPlaceholder, { opacity: placeholderOpacity }]}
       />
       <Animated.Image
+        key={uri}
         alt={caption}
         source={{ uri }}
         style={[StyleSheet.absoluteFill, { opacity: thumbOpacity }]}
@@ -210,8 +233,18 @@ export function ProfileGridThumbnail({
           );
           revealThumb();
         }}
+        onLoadEnd={() => {
+          // Cache hits sometimes skip onLoad after a late opacity reset; onLoadEnd
+          // still runs and recovers the visible thumb.
+          revealThumb();
+        }}
         onError={() => {
-          setCandidateIndex((current) => (current + 1 < candidates.length ? current + 1 : current));
+          setCandidateIndex((current) => {
+            if (current + 1 < candidates.length) return current + 1;
+            // Last candidate failed — still unblock pin-preview waiters.
+            onReadyRef.current?.();
+            return current;
+          });
         }}
       />
       {!blurred ? (

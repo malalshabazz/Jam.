@@ -535,6 +535,12 @@ const baseStyles = {
     borderBottomRightRadius: FEED_PREVIEW_VIDEO_BOTTOM_CORNER_RADIUS,
   },
   feedBufferingIndicator: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center" },
+  feedPausedPlayOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 4,
+  },
   videoBufferingIndicator: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center" },
   // TikTok-style: no full-frame dim — soft edge fades behind chrome.
   feedTopShade: {
@@ -1500,7 +1506,9 @@ const baseStyles = {
     position: "absolute",
     overflow: "hidden",
     borderRadius: 16,
-    backgroundColor: "#000",
+    // Transparent until the clone image paints — a solid fill flashed black over
+    // the real grid thumb whenever decode lagged a frame.
+    backgroundColor: "transparent",
     shadowColor: "#000",
     shadowOpacity: 0.45,
     shadowRadius: 16,

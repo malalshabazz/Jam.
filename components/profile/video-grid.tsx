@@ -9,6 +9,7 @@ import {
 import {
   Animated,
   Easing,
+  Image,
   Modal,
   Pressable,
   StyleSheet,
@@ -38,6 +39,7 @@ import {
   isPendingProfileVideoId,
   usePendingVideoUploads,
 } from "@/lib/pending-video-uploads";
+import { getGridThumbnailCandidates } from "@/lib/video-thumbnails";
 import { activeThemeMode, styles } from "@/theme/styles";
 import {
   PROFILE_GRID_GAP,
@@ -105,6 +107,8 @@ export function VideoGrid({
     width: number;
     height: number;
   } | null>(null);
+  /** Clone image has painted — safe to cover the real thumb and enlarge. */
+  const [pinCloneReady, setPinCloneReady] = useState(false);
   const pinMenuVideo = pinMenu
     ? videos.find((entry) => entry.id === pinMenu.videoId) ?? null
     : null;
@@ -113,6 +117,7 @@ export function VideoGrid({
   function openPinMenuForVideo(videoId: string) {
     if (pinPreviewClosingRef.current) return;
     triggerHoldHaptic();
+    const targetVideo = videos.find((entry) => entry.id === videoId) ?? null;
     const present = (x: number, y: number, width: number, height: number) => {
       pinPreviewClosingRef.current = false;
       pinPreviewAfterCloseRef.current = null;
@@ -123,8 +128,9 @@ export function VideoGrid({
       pinPreviewDim.setValue(0);
       pinMenuCardAnim.setValue(0);
       pinPreviewOpenTokenRef.current += 1;
-      // Mount the floating clone first; animate on the next frames once it's painted
-      // so enlarge doesn't hitch on Modal/image mount.
+      // Mount the modal clone first; enlarge waits on paint so we never cover the
+      // real thumb with an empty/black frame. Caller scrolls clipped tiles first.
+      setPinCloneReady(false);
       setPinMenu({ videoId, x, y, width, height });
     };
 
@@ -136,23 +142,32 @@ export function VideoGrid({
 
     node.measureInWindow((x, y, width, height) => {
       const expand = (height * (PIN_PREVIEW_SCALE - 1)) / 2;
-      const reveal = async () => {
-        if (ensurePinItemVisible) {
-          await ensurePinItemVisible({
-            y,
-            height,
-            topExtra: expand + PIN_MENU_CARD_HEIGHT + 10,
-            bottomExtra: expand + 8,
-          });
-          // Re-measure after the grid scrolls the thumb fully on screen.
-          node.measureInWindow((nx, ny, nw, nh) => {
-            present(nx, ny, nw, nh);
-          });
-          return;
-        }
-        present(x, y, width, height);
+      // Warm cache in the background; the grid thumb is usually already decoded.
+      const thumbUri = targetVideo ? getGridThumbnailCandidates(targetVideo)[0] : null;
+      if (thumbUri) {
+        void Image.prefetch(thumbUri);
+      }
+
+      const presentAfterLayout = () => {
+        if (pinPreviewClosingRef.current) return;
+        node.measureInWindow((nx, ny, nw, nh) => {
+          if (pinPreviewClosingRef.current) return;
+          present(nx, ny, nw, nh);
+        });
       };
-      void reveal();
+
+      // Bring a clipped tile fully on screen (with room to enlarge + pin card) first,
+      // then open — fully visible tiles resolve immediately and enlarge right away.
+      if (!ensurePinItemVisible) {
+        present(x, y, width, height);
+        return;
+      }
+      void ensurePinItemVisible({
+        y,
+        height,
+        topExtra: expand + PIN_MENU_CARD_HEIGHT + 10,
+        bottomExtra: expand + 8,
+      }).then(presentAfterLayout);
     });
   }
 
@@ -195,6 +210,7 @@ export function VideoGrid({
       pinPreviewAfterCloseRef.current = null;
       if (!finished) return;
       setPinMenu(null);
+      setPinCloneReady(false);
       cb?.();
     });
   }
@@ -205,39 +221,35 @@ export function VideoGrid({
   }, [onPinPreviewChange, pinMenu]);
 
   useEffect(() => {
-    if (!pinMenu) return;
+    if (!pinMenu || !pinCloneReady) return;
     const token = pinPreviewOpenTokenRef.current;
-    let frame2 = 0;
-    const frame1 = requestAnimationFrame(() => {
-      frame2 = requestAnimationFrame(() => {
-        if (token !== pinPreviewOpenTokenRef.current || pinPreviewClosingRef.current) return;
-        Animated.parallel([
-          Animated.timing(pinPreviewScale, {
-            toValue: PIN_PREVIEW_SCALE,
-            duration: 260,
-            easing: PIN_PREVIEW_EASE,
-            useNativeDriver: true,
-          }),
-          Animated.timing(pinPreviewDim, {
-            toValue: 0.38,
-            duration: 260,
-            easing: PIN_PREVIEW_EASE,
-            useNativeDriver: true,
-          }),
-          Animated.timing(pinMenuCardAnim, {
-            toValue: 1,
-            duration: 260,
-            easing: PIN_PREVIEW_EASE,
-            useNativeDriver: true,
-          }),
-        ]).start();
-      });
+    // Enlarge only after the clone bitmap is ready — transparent modal keeps the
+    // real grid thumb visible until then (no black flash).
+    const frame = requestAnimationFrame(() => {
+      if (token !== pinPreviewOpenTokenRef.current || pinPreviewClosingRef.current) return;
+      Animated.parallel([
+        Animated.timing(pinPreviewScale, {
+          toValue: PIN_PREVIEW_SCALE,
+          duration: 260,
+          easing: PIN_PREVIEW_EASE,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pinPreviewDim, {
+          toValue: 0.38,
+          duration: 260,
+          easing: PIN_PREVIEW_EASE,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pinMenuCardAnim, {
+          toValue: 1,
+          duration: 260,
+          easing: PIN_PREVIEW_EASE,
+          useNativeDriver: true,
+        }),
+      ]).start();
     });
-    return () => {
-      cancelAnimationFrame(frame1);
-      cancelAnimationFrame(frame2);
-    };
-  }, [pinMenu?.videoId]);
+    return () => cancelAnimationFrame(frame);
+  }, [pinMenu?.videoId, pinCloneReady]);
 
   const profileGridItemHeight = PROFILE_GRID_ITEM_WIDTH * (16 / 9);
   const rowStride = profileGridItemHeight + PROFILE_GRID_GAP;
@@ -451,11 +463,20 @@ export function VideoGrid({
                     top: pinMenu.y,
                     width: pinMenu.width,
                     height: pinMenu.height,
+                    // Stay invisible until paint so the real thumb shows through.
+                    opacity: pinCloneReady ? 1 : 0,
                     transform: [{ scale: pinPreviewScale }],
                   },
                 ]}
               >
-                <ProfileGridThumbnail video={pinMenuVideo} instantReveal />
+                <ProfileGridThumbnail
+                  video={pinMenuVideo}
+                  instantReveal
+                  onReady={() => {
+                    if (pinPreviewClosingRef.current) return;
+                    setPinCloneReady(true);
+                  }}
+                />
                 {pinMenuPinned ? (
                   <View style={styles.gridPinnedBadge} accessibilityLabel="pinned">
                     <PinIcon size={28} />

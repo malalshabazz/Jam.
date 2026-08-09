@@ -40,10 +40,14 @@ export function getGridThumbnailCandidates(video: ProfileVideo | FeedVideo) {
 
   const streamId = getVideoStreamId(video);
   if (streamId) {
-    const primary = getCloudflareThumbnailUrl(streamId, getVideoThumbnailTimeMs(video), { height: 640 });
-    const fallback = getCloudflareThumbnailUrl(streamId, 1000, { height: 640 });
-    candidates.push(primary);
-    if (fallback !== primary) candidates.push(fallback);
+    // Prefer the editor-chosen frame, then safer early timestamps. Short clips
+    // often 404 when asked for 1s+/custom times beyond their duration — playback
+    // still works, so the grid used to look "broken" while tap-to-play succeeded.
+    const timesMs = [getVideoThumbnailTimeMs(video), 1000, 100];
+    for (const timeMs of timesMs) {
+      const url = getCloudflareThumbnailUrl(streamId, timeMs, { height: 640 });
+      if (!candidates.includes(url)) candidates.push(url);
+    }
   }
 
   return candidates;

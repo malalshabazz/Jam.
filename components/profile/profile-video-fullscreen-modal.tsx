@@ -204,6 +204,17 @@ export function ProfileVideoFullscreenModal({
     [translateX],
   );
 
+  // Shrink as the finger drags away so dismiss feels like the whole screen leaving.
+  const dismissScale = useMemo(
+    () =>
+      translateX.interpolate({
+        inputRange: [0, viewportWidth],
+        outputRange: [1, 0.5],
+        extrapolate: "clamp",
+      }),
+    [translateX],
+  );
+
   const onHorizontalGestureEvent = useMemo(
     () =>
       Animated.event(
@@ -465,6 +476,7 @@ export function ProfileVideoFullscreenModal({
               transform: [
                 { translateX: clampedTranslateX },
                 { translateY: horizontalTranslateY },
+                { scale: dismissScale },
               ],
             },
           ]}
@@ -528,62 +540,63 @@ export function ProfileVideoFullscreenModal({
               />
             )}
           />
-        </Animated.View>
-      </PanGestureHandler>
-      {showMessageBar ? (
-        <Animated.View
-          pointerEvents={chromeInteractive ? "box-none" : "none"}
-          style={[
-            styles.fullscreenMessageBar,
-            {
-              height: messageBarHeight,
-              bottom: keyboardOffset,
-              paddingBottom: Math.max(insets.bottom, 12),
-              opacity: chromeOpacity,
-            },
-          ]}
-        >
-          <TextInput
-            ref={messageInputRef}
-            value={messageDraft}
-            onChangeText={(value) => setMessageDraft(value.slice(0, 200))}
-            onFocus={() => setMessageInputFocused(true)}
-            onBlur={() => setMessageInputFocused(false)}
-            editable={!currentPendingSentJam && !messageSending}
-            placeholder={currentPendingSentJam ? "waiting for a jam" : "message..."}
-            placeholderTextColor="#71717a"
-            returnKeyType="send"
-            enablesReturnKeyAutomatically
-            onSubmitEditing={() => void submitFullscreenMessage()}
-            maxLength={200}
-            style={styles.fullscreenMessageInput}
-          />
-          <Animated.View style={[styles.fullscreenMessageSendFrame, { width: messageSendButtonWidth }]}>
-            <Pressable
-              onPress={() => void submitFullscreenMessage()}
-              disabled={!messageDraft.trim() || currentPendingSentJam || messageSending}
+          {/* Keep the message bar inside the swipe surface so dismiss moves the full screen. */}
+          {showMessageBar ? (
+            <Animated.View
+              pointerEvents={chromeInteractive ? "box-none" : "none"}
               style={[
-                styles.fullscreenMessageSendButton,
-                (!messageDraft.trim() || currentPendingSentJam || messageSending) && styles.disabled,
+                styles.fullscreenMessageBar,
+                {
+                  height: messageBarHeight,
+                  bottom: keyboardOffset,
+                  paddingBottom: Math.max(insets.bottom, 12),
+                  opacity: chromeOpacity,
+                },
               ]}
             >
-              {messageSentTickVisible ? (
-                <Animated.Text
+              <TextInput
+                ref={messageInputRef}
+                value={messageDraft}
+                onChangeText={(value) => setMessageDraft(value.slice(0, 200))}
+                onFocus={() => setMessageInputFocused(true)}
+                onBlur={() => setMessageInputFocused(false)}
+                editable={!currentPendingSentJam && !messageSending}
+                placeholder={currentPendingSentJam ? "waiting for a jam" : "message..."}
+                placeholderTextColor="#71717a"
+                returnKeyType="send"
+                enablesReturnKeyAutomatically
+                onSubmitEditing={() => void submitFullscreenMessage()}
+                maxLength={200}
+                style={styles.fullscreenMessageInput}
+              />
+              <Animated.View style={[styles.fullscreenMessageSendFrame, { width: messageSendButtonWidth }]}>
+                <Pressable
+                  onPress={() => void submitFullscreenMessage()}
+                  disabled={!messageDraft.trim() || currentPendingSentJam || messageSending}
                   style={[
-                    styles.fullscreenMessageSendText,
-                    styles.fullscreenMessageSentTick,
-                    { transform: [{ scale: messageSentTickScale }] },
+                    styles.fullscreenMessageSendButton,
+                    (!messageDraft.trim() || currentPendingSentJam || messageSending) && styles.disabled,
                   ]}
                 >
-                  ✓
-                </Animated.Text>
-              ) : (
-                <Text style={styles.fullscreenMessageSendText}>{messageSending ? "..." : "send"}</Text>
-              )}
-            </Pressable>
-          </Animated.View>
+                  {messageSentTickVisible ? (
+                    <Animated.Text
+                      style={[
+                        styles.fullscreenMessageSendText,
+                        styles.fullscreenMessageSentTick,
+                        { transform: [{ scale: messageSentTickScale }] },
+                      ]}
+                    >
+                      ✓
+                    </Animated.Text>
+                  ) : (
+                    <Text style={styles.fullscreenMessageSendText}>{messageSending ? "..." : "send"}</Text>
+                  )}
+                </Pressable>
+              </Animated.View>
+            </Animated.View>
+          ) : null}
         </Animated.View>
-      ) : null}
+      </PanGestureHandler>
     </View>
   );
 
