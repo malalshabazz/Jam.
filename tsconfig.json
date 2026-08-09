@@ -35,6 +35,8 @@
     "lib/**/*.ts",
     "types/**/*.ts",
     "theme/**/*.ts",
+    "components/**/*.ts",
+    "components/**/*.tsx",
     "app/api/**/*.ts",
     "next.config.ts",
     "**/*.mts"
