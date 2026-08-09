@@ -1501,7 +1501,8 @@ const baseStyles = {
     alignItems: "flex-end",
     justifyContent: "flex-end",
     padding: 8,
-    backgroundColor: "#000",
+    // Soft slate while thumbs decode — never a hard black cell.
+    backgroundColor: "#3f3f46",
   },
   gridPinPreview: {
     position: "absolute",
@@ -1532,7 +1533,12 @@ const baseStyles = {
   },
   gridThumbPlaceholder: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "#3f3f46",
+    // Frosted loading wash (lighter mottling over the slate cell).
+    backgroundColor: "rgba(82,82,91,0.92)",
+  },
+  gridThumbLoadingBlur: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(63,63,70,0.55)",
   },
   gridPinnedBadge: {
     position: "absolute",

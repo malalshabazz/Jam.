@@ -69,6 +69,8 @@ export function ProfileGridThumbnail({
   const revealGenerationRef = useRef(0);
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
+  // Soft-focus until the first paint reveal finishes (locked cells stay blurred).
+  const [softFocus, setSoftFocus] = useState(!instantReveal);
   // Always start transparent; pin clones must never mount opaque before the bitmap paints.
   const thumbOpacity = useRef(new Animated.Value(0)).current;
   const placeholderOpacity = useRef(new Animated.Value(instantReveal ? 0 : 1)).current;
@@ -79,6 +81,7 @@ export function ProfileGridThumbnail({
     thumbOpacity.stopAnimation();
     placeholderOpacity.stopAnimation();
     placeholderOpacity.setValue(instantReveal ? 0 : 1);
+    setSoftFocus(!instantReveal);
     if (instantReveal) {
       // Don't yank thumbOpacity to 0 — cached onLoad often wins the race against this
       // effect and a reset would blank the clone after onReady (flash).
@@ -95,9 +98,11 @@ export function ProfileGridThumbnail({
     if (instantReveal) {
       thumbOpacity.setValue(1);
       placeholderOpacity.setValue(0);
+      setSoftFocus(false);
       onReadyRef.current?.();
       return;
     }
+    // Fade the thumb in while still soft-focused so cells read as blurred, not black.
     Animated.parallel([
       Animated.timing(thumbOpacity, {
         toValue: 1,
@@ -111,7 +116,8 @@ export function ProfileGridThumbnail({
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }),
-    ]).start(() => {
+    ]).start(({ finished }) => {
+      if (finished && !blurred) setSoftFocus(false);
       onReadyRef.current?.();
     });
   }
@@ -198,6 +204,8 @@ export function ProfileGridThumbnail({
 
   const presentation = getVideoPresentation(video);
 
+  const showBlur = blurred || softFocus;
+
   return (
     <View
       ref={rootRef}
@@ -207,7 +215,8 @@ export function ProfileGridThumbnail({
         StyleSheet.absoluteFill,
         // Pin-preview clone stays transparent until the bitmap paints so the
         // real grid thumb underneath doesn't get covered by a black flash.
-        { backgroundColor: instantReveal ? "transparent" : "#000" },
+        // Normal cells use the slate placeholder — never a hard black void.
+        { backgroundColor: instantReveal ? "transparent" : "#3f3f46" },
       ]}
     >
       <Animated.View
@@ -219,7 +228,7 @@ export function ProfileGridThumbnail({
         source={{ uri }}
         style={[StyleSheet.absoluteFill, { opacity: thumbOpacity }]}
         resizeMode={thumbResizeMode}
-        blurRadius={blurred ? 18 : 0}
+        blurRadius={showBlur ? 18 : 0}
         onLoad={(event) => {
           const { width, height } = event.nativeEvent.source;
           // Wide clip thumbs are a reliable landscape signal; portrait image boxes are not
@@ -247,7 +256,13 @@ export function ProfileGridThumbnail({
           });
         }}
       />
-      {!blurred ? (
+      {showBlur ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[styles.gridThumbLoadingBlur, { opacity: placeholderOpacity }]}
+        />
+      ) : null}
+      {!showBlur ? (
         <Animated.View style={[StyleSheet.absoluteFill, { opacity: thumbOpacity }]} pointerEvents="none">
           <VideoPresentationOverlays
             filter={presentation.filter}
