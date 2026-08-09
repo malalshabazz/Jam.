@@ -52,7 +52,8 @@ export function getActivityIndicatorColor() {
 const baseStyles = {
   gestureRoot: { flex: 1, backgroundColor: dark },
   swipeBackSurface: { flex: 1, backgroundColor: dark },
-  profileStackOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: dark, zIndex: 20 },
+  // Transparent host so swipe-back can reveal the screen underneath (feed / video / chat).
+  profileStackOverlay: { ...StyleSheet.absoluteFillObject, zIndex: 20, elevation: 20 },
   fullscreenOverlay: { ...StyleSheet.absoluteFillObject, zIndex: 60, elevation: 60 },
   app: { flex: 1, backgroundColor: dark },
   tabScene: { backgroundColor: dark },

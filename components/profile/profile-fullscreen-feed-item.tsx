@@ -8,6 +8,7 @@ import {
   StyleSheet,
   Text,
   View,
+  type GestureResponderEvent,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { type VideoContentFit } from "expo-video";
@@ -15,6 +16,7 @@ import { Avatar } from "@/components/ui/avatar";
 import { ProBadge } from "@/components/ui/badges";
 import { BookmarkIcon } from "@/components/icons/bookmark-icon";
 import { FeedChromeLockIcon } from "@/components/icons/feed-chrome-lock-icon";
+import { FeedPausedPlayIcon } from "@/components/icons/feed-paused-play-icon";
 import { JamJarIcon } from "@/components/icons/jam-jar-icon";
 import { LookingForIcon } from "@/components/icons/looking-for-icon";
 import {
@@ -88,6 +90,7 @@ export function ProfileFullscreenFeedItem({
   onSpeedHoldEnd,
   onSave,
   onMessage,
+  onOpenProfile,
   onNotInterested,
   onBlock,
   onReport,
@@ -121,6 +124,7 @@ export function ProfileFullscreenFeedItem({
   onSpeedHoldEnd?: () => void;
   onSave: (video: ProfileVideo | FeedVideo, nextSaved: boolean) => void;
   onMessage: (video: ProfileVideo | FeedVideo) => void;
+  onOpenProfile?: () => void;
   onNotInterested?: (video: ProfileVideo | FeedVideo) => void;
   onBlock?: (video: ProfileVideo | FeedVideo) => void;
   onReport?: (video: ProfileVideo | FeedVideo) => void;
@@ -147,6 +151,9 @@ export function ProfileFullscreenFeedItem({
   const [heartScale] = useState(() => new Animated.Value(1));
   const [jamShake] = useState(() => new Animated.Value(0));
   const greyCoverOpacity = useRef(new Animated.Value(1)).current;
+  /** Window Y of the top of own-video meta (avatar row); taps at/below ignore pause. */
+  const ownMetaTopPageYRef = useRef<number | null>(null);
+  const ownMetaMeasureRef = useRef<View>(null);
   const chromeHoldingRef = useRef(false);
   const speedHoldingRef = useRef(false);
   const chromeSuppressPressRef = useRef(false);
@@ -185,6 +192,7 @@ export function ProfileFullscreenFeedItem({
     setWaitingForFirstPlay(Boolean(source));
     setShowGreyCover(Boolean(source));
     setShowWaitingSpinner(false);
+    ownMetaTopPageYRef.current = null;
     greyCoverOpacity.stopAnimation();
     greyCoverOpacity.setValue(1);
     const cached = getRememberedVideoAspectSize(getVideoAspectCacheKeyFromVideo(video));
@@ -315,6 +323,22 @@ export function ProfileFullscreenFeedItem({
     }).start();
   }
 
+  function isOwnBottomChromePageY(pageY: number) {
+    if (!ownVideoActions) return false;
+    const metaTop = ownMetaTopPageYRef.current;
+    if (metaTop != null) return pageY >= metaTop;
+    // Fallback before measure: approximate band from avatar through bottom.
+    return pageY >= height - metaBottom - 200;
+  }
+
+  function measureOwnMetaTop() {
+    if (!ownVideoActions) return;
+    ownMetaMeasureRef.current?.measureInWindow((_x, y) => {
+      // Line sits just above the avatar / name block.
+      ownMetaTopPageYRef.current = Math.max(0, y - 8);
+    });
+  }
+
   function handleProfileTouchStart(locationX: number, pageY: number) {
     clearChromeHoldTimer();
     chromeTouchStartXRef.current = locationX;
@@ -323,6 +347,7 @@ export function ProfileFullscreenFeedItem({
     chromePullProgressRef.current = 0;
     chromeTouchInSpeedZoneRef.current = locationX >= viewportWidth * FEED_SPEED_ZONE_LEFT_RATIO;
     if (menuOpen) return;
+    if (isOwnBottomChromePageY(pageY)) return;
     if (!chromeTouchInSpeedZoneRef.current && chromeLockedRef.current) return;
 
     chromeHoldTimerRef.current = setTimeout(() => {
@@ -412,7 +437,7 @@ export function ProfileFullscreenFeedItem({
     setPaused((current) => !current);
   }
 
-  function handleProfilePress() {
+  function handleProfilePress(event: GestureResponderEvent) {
     if (chromeSuppressPressRef.current) {
       chromeSuppressPressRef.current = false;
       return;
@@ -422,6 +447,10 @@ export function ProfileFullscreenFeedItem({
       return;
     }
     if (chromeHoldingRef.current || speedHoldingRef.current) return;
+    if (isOwnBottomChromePageY(event.nativeEvent.pageY)) {
+      if (menuOpen) setMenuOpen(false);
+      return;
+    }
     togglePlayback();
   }
 
@@ -518,9 +547,12 @@ export function ProfileFullscreenFeedItem({
               knownHeight={rememberedAspect?.height ?? null}
               shouldPlay={isActive && !paused}
               isLooping
-              isMuted={!isActive}
-              volume={isActive ? 1 : 0}
+              isMuted={!isActive || paused}
+              volume={isActive && !paused ? 1 : 0}
               playbackRate={playbackRate}
+              // Match Discover: only cover with a thumb when scrolling away —
+              // tap-pause must keep the live decoded frame (CF thumb was black-flashing).
+              showFreezeFrameOnPause={!isActive}
               adoptPrewarmed={isActive}
               onFirstFrameRender={revealFirstFrameFromGrey}
               onContentFitChange={setMediaContentFit}
@@ -529,6 +561,11 @@ export function ProfileFullscreenFeedItem({
               filter={presentation.filter}
               textOverlays={presentation.textOverlays}
             />
+            {isActive && paused ? (
+              <View pointerEvents="none" style={styles.feedPausedPlayOverlay}>
+                <FeedPausedPlayIcon />
+              </View>
+            ) : null}
             {showGreyCover ? (
               <Animated.View
                 pointerEvents="none"
@@ -640,12 +677,38 @@ export function ProfileFullscreenFeedItem({
           style={[styles.feedBottomShade, { bottom: videoBottomInset }]}
         />
 
-        <View style={[styles.feedMeta, { bottom: metaBottom }]} pointerEvents="box-none">
+        <View
+          ref={ownVideoActions ? ownMetaMeasureRef : undefined}
+          collapsable={false}
+          style={[styles.feedMeta, { bottom: metaBottom }]}
+          pointerEvents="box-none"
+          onLayout={ownVideoActions ? measureOwnMetaTop : undefined}
+        >
           <View style={styles.row}>
-            <Avatar uri={owner.avatarUrl} size={52} />
+            {onOpenProfile && !ownVideoActions ? (
+              <Pressable
+                onPress={onOpenProfile}
+                accessibilityLabel={`open ${owner.creatorName}'s profile`}
+                accessibilityRole="button"
+              >
+                <Avatar uri={owner.avatarUrl} size={52} />
+              </Pressable>
+            ) : (
+              <Avatar uri={owner.avatarUrl} size={52} />
+            )}
             <View style={styles.flex}>
               <View style={styles.row}>
-                <Text style={styles.feedName}>{owner.creatorName}</Text>
+                {onOpenProfile && !ownVideoActions ? (
+                  <Pressable
+                    onPress={onOpenProfile}
+                    accessibilityLabel={`open ${owner.creatorName}'s profile`}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.feedName}>{owner.creatorName}</Text>
+                  </Pressable>
+                ) : (
+                  <Text style={styles.feedName}>{owner.creatorName}</Text>
+                )}
                 {owner.proBadge ? <ProBadge kind={owner.proBadge} /> : null}
                 {connection ? <Text style={styles.badge}>{connection}</Text> : null}
               </View>

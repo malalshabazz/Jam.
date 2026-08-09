@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Animated,
@@ -48,6 +48,7 @@ export function ProfileVideoFullscreenModal({
   onClose,
   onSave,
   onMessage,
+  onOpenProfile,
   getSavedForVideo,
   getOwnerForVideo,
   ownVideoActions,
@@ -55,6 +56,7 @@ export function ProfileVideoFullscreenModal({
   onBlock,
   onReport,
   onSendMessage,
+  profileOverlay = null,
 }: {
   visible: boolean;
   videos: Array<ProfileVideo | FeedVideo>;
@@ -72,6 +74,7 @@ export function ProfileVideoFullscreenModal({
   onClose: () => void;
   onSave: (video: ProfileVideo | FeedVideo, nextSaved: boolean) => void;
   onMessage: (video: ProfileVideo | FeedVideo) => void;
+  onOpenProfile?: (video: ProfileVideo | FeedVideo) => void;
   getSavedForVideo?: (video: ProfileVideo | FeedVideo) => boolean;
   ownVideoActions?: {
     onDelete: (video: ProfileVideo | FeedVideo) => void;
@@ -88,6 +91,8 @@ export function ProfileVideoFullscreenModal({
     earlyAdopter: boolean;
     proBadge?: ProBadgeKind | null;
   };
+  /** Inline profile (or other) stack rendered over the video — swipe-back reveals this player. */
+  profileOverlay?: ReactNode;
 }) {
   const wasVisibleRef = useRef(false);
   const listRef = useRef<FlatList<ProfileVideo | FeedVideo>>(null);
@@ -456,13 +461,15 @@ export function ProfileVideoFullscreenModal({
 
   if (!contentMounted) return null;
 
+  const profileOverlayOpen = Boolean(profileOverlay);
+
   const content = (
     <View
       style={styles.fullscreenMessageRoot}
       pointerEvents={visible ? "auto" : "none"}
     >
       <PanGestureHandler
-        enabled={visible}
+        enabled={visible && !profileOverlayOpen}
         activeOffsetX={14}
         failOffsetY={[-22, 22]}
         onGestureEvent={onHorizontalGestureEvent}
@@ -487,7 +494,7 @@ export function ProfileVideoFullscreenModal({
             keyExtractor={(item) => item.id}
             style={{ flex: 1 }}
             pagingEnabled
-            scrollEnabled={visible && !chromeHolding && !speedHolding}
+            scrollEnabled={visible && !chromeHolding && !speedHolding && !profileOverlayOpen}
             decelerationRate="fast"
             disableIntervalMomentum
             showsVerticalScrollIndicator={false}
@@ -534,6 +541,11 @@ export function ProfileVideoFullscreenModal({
                 onSpeedHoldEnd={handleSpeedHoldEnd}
                 onSave={handleSave}
                 onMessage={onMessage}
+                onOpenProfile={
+                  onOpenProfile && !ownVideoActions
+                    ? () => onOpenProfile(item)
+                    : undefined
+                }
                 onNotInterested={onNotInterested}
                 onBlock={onBlock}
                 onReport={onReport}
@@ -597,6 +609,7 @@ export function ProfileVideoFullscreenModal({
           ) : null}
         </Animated.View>
       </PanGestureHandler>
+      {profileOverlay}
     </View>
   );
 
