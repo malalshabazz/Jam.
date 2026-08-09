@@ -212,10 +212,28 @@ export function uploadToCloudflare(
   return uploadToCloudflareWithFallbacks(uploadUrls, asset, onProgress);
 }
 
-export function getCloudflarePlaybackUrl(streamId: string) {
-  // Adaptive HLS (no bandwidth lock): start on a light rung for fast first frame,
-  // then let the player ramp quality — same idea as TikTok-style feeds.
+/** Remote Cloudflare HLS master (all rungs). Used for readiness / size probes. */
+export function getCloudflareStreamManifestUrl(streamId: string) {
   return `https://videodelivery.net/${streamId}/manifest/video.m3u8`;
+}
+
+/**
+ * Mbps hint for Cloudflare's clientBandwidthHint — picks the representation
+ * closest to this bandwidth. High enough that Stream returns the top (~1080p)
+ * rung instead of letting native ABR stick on the lowest ladder step.
+ *
+ * Must stay on the *master* playlist (not a single media variant URL). Pinning
+ * to a variant drops demuxed AUDIO groups and plays silent video.
+ */
+const PLAYBACK_BANDWIDTH_HINT_MBPS = 25;
+
+/**
+ * Playback URL for feed / fullscreen.
+ * Prefer the highest Cloudflare rung on good connections (TikTok-style),
+ * while keeping audio via the master manifest.
+ */
+export function getCloudflarePlaybackUrl(streamId: string) {
+  return `${getCloudflareStreamManifestUrl(streamId)}?clientBandwidthHint=${PLAYBACK_BANDWIDTH_HINT_MBPS}`;
 }
 
 export function extractCloudflareStreamId(mediaUrl: string | null | undefined) {
@@ -248,7 +266,13 @@ export async function probeHlsVideoSize(
   manifestUrl: string,
 ): Promise<{ width: number; height: number } | null> {
   try {
-    const response = await fetch(manifestUrl);
+    // Always probe the full adaptive master — playback URLs may be a single
+    // high-rung media playlist (no RESOLUTION tags) or a bandwidth-hinted master.
+    const streamId = extractCloudflareStreamId(manifestUrl);
+    const probeUrl = streamId
+      ? getCloudflareStreamManifestUrl(streamId)
+      : manifestUrl.split("?")[0] || manifestUrl;
+    const response = await fetch(probeUrl);
     if (!response.ok) return null;
     const text = await response.text();
     let best: { width: number; height: number; pixels: number } | null = null;
@@ -301,7 +325,7 @@ function sleep(ms: number) {
 
 /** Poll the public HLS manifest — works without deploying a /ready API route. */
 async function isPublicStreamManifestReady(cloudflareStreamId: string) {
-  const manifestUrl = getCloudflarePlaybackUrl(cloudflareStreamId);
+  const manifestUrl = getCloudflareStreamManifestUrl(cloudflareStreamId);
   try {
     const response = await fetch(manifestUrl, {
       method: "GET",

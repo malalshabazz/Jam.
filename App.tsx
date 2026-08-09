@@ -238,118 +238,183 @@ import {
   subscribeFilterCatalog,
 } from "@/lib/video-filters";
 
-type Route = "auth" | "onboarding" | "welcome" | "main";
-type Tab = "discover" | "inbox" | "create" | "you";
-type ThemeMode = "dark" | "light";
-type MainTabParamList = {
-  discover: undefined;
-  create: undefined;
-  inbox: undefined;
-  you: undefined;
-};
-type InboxTab = "requests" | "jams" | "sent";
-type CreateStage = "camera" | "edit" | "details";
-type VideoFilter = VideoFilterId;
-type AuthMode = "login" | "signup" | "forgot" | "reset";
-type AuthDeepLinkResult = "recovery" | "session" | null;
 
-const AUTH_PASSWORD_MIN_LENGTH = 8;
-type LocationCountryOption = {
-  country: string;
-  aliases?: readonly string[];
-  cities: readonly string[];
-};
-type LocationFilterSelection = {
-  country: string;
-  cities: string[];
-};
-type PreloadedUserProfile = {
-  userId: string;
-  profile: Profile | null;
-  videos: ProfileVideo[];
-  jammedByMe: boolean;
-  jammedMe: boolean;
-};
-type SavedVideoController = {
-  savedVideoIds: Set<string>;
-  setVideoSaved: (videoId: string, nextSaved: boolean) => Promise<boolean>;
-  refreshSavedVideos: () => Promise<Set<string>>;
-};
+import type {
+  AuthDeepLinkResult,
+  AuthMode,
+  CreateStage,
+  CreateTextOverlayItem,
+  FeedPlaybackSpeed,
+  InboxTab,
+  LocationCountryOption,
+  LocationFilterSelection,
+  MainTabParamList,
+  PreloadedUserProfile,
+  RecordingTimerSeconds,
+  Route,
+  SavedVideoController,
+  Tab,
+  ThemeMode,
+  VideoFilter,
+} from "@/types/app";
+import {
+  AUTH_PASSWORD_MIN_LENGTH,
+  BOOKMARK_CREAM,
+  CAMERA_PINCH_ZOOM_STEP,
+  CREATE_CAMERA_CONTROLS_BOTTOM_PADDING,
+  CREATE_CAMERA_CONTROL_BUTTON_SIZE,
+  CREATE_CAMERA_CONTROL_ICON_SIZE,
+  CREATE_CAMERA_EXPOSURE_DRAG_RANGE_PX,
+  CREATE_CAMERA_FILTER_ROW_HEIGHT,
+  CREATE_CAMERA_FOCUS_RETICLE_SIZE,
+  CREATE_CAMERA_RECORD_BUTTON_BORDER_WIDTH,
+  CREATE_CAMERA_RECORD_BUTTON_SIZE,
+  CREATE_CAMERA_TOP_CONTROLS_OFFSET,
+  CREATE_DETAILS_PREVIEW_HEIGHT,
+  CREATE_DETAILS_PREVIEW_WIDTH,
+  CREATE_FILTER_PREVIEW_IMAGE,
+  CREATE_FILTER_THUMB_BORDER_WIDTH,
+  CREATE_RECORDING_TIMER_OPTIONS,
+  CREATE_THUMBNAIL_FILMSTRIP_FRAME_HEIGHT,
+  CREATE_THUMBNAIL_FRAME_COUNT,
+  CREATE_THUMBNAIL_SELECTOR_WIDTH_SCALE,
+  CREATE_TRIM_FILMSTRIP_FRAME_COUNT,
+  CREATE_TRIM_FILMSTRIP_HEIGHT,
+  CREATE_TRIM_FILMSTRIP_RADIUS,
+  CREATE_TRIM_HANDLE_WIDTH,
+  EMPTY_FILTER_GENRES,
+  FEED_ACTION_GAP,
+  FEED_CHROME_FADE_MS,
+  FEED_CHROME_HOLD_MS,
+  FEED_CHROME_LOCK_CIRCLE_SIZE,
+  FEED_CHROME_LOCK_PULL_PX,
+  FEED_CHROME_LOCK_TRACK_TRAVEL,
+  FEED_PLAYBACK_SPEEDS,
+  FEED_PREVIEW_VIDEO_BOTTOM_CORNER_RADIUS,
+  FEED_QUICK_FILTERS,
+  FEED_ROLE_FILTER_LOOP_COPIES,
+  FEED_SPEED_DEFAULT_INDEX,
+  FEED_SPEED_PILL_HEIGHT,
+  FEED_SPEED_PILL_PADDING_V,
+  FEED_SPEED_PILL_WIDTH,
+  FEED_SPEED_ROW_HEIGHT,
+  FEED_SPEED_SEGMENT_PX,
+  FEED_SPEED_ZONE_LEFT_RATIO,
+  FEED_VIDEO_BOTTOM_CORNER_RADIUS,
+  FULLSCREEN_MESSAGE_SEND_WIDTH,
+  FULLSCREEN_MESSAGE_TICK_WIDTH,
+  JAM_JAR_FILL_EMPTY_HEIGHT,
+  JAM_JAR_FILL_FULL_HEIGHT,
+  JAM_JAR_JAM_COLOR,
+  JAM_JAR_LID_EMPTY_GAP,
+  JAM_JAR_LID_EMPTY_HEIGHT,
+  JAM_JAR_LID_FULL_GAP,
+  JAM_JAR_LID_FULL_HEIGHT,
+  LOOKING_FOR_BINOCULARS_ICON,
+  LOCATION_PICKER_MAX_VISIBLE_ROWS,
+  LOCATION_PICKER_ROW_HEIGHT,
+  LOCATION_PICKER_VISIBLE_HEIGHT,
+  MAX_ACCOUNT_CREATOR_TYPES,
+  MAX_VIDEO_GENRES,
+  MAX_VIDEO_ROLES,
+  NAV_BAR_HEIGHT,
+  NAV_BAR_ITEM_HEIGHT,
+  NAV_BAR_TOP_PADDING,
+  NOTIFY_POPOVER_WIDTH,
+  PROFILE_COLLAPSED_BAR_HEIGHT,
+  PROFILE_GRID_GAP,
+  PROFILE_GRID_ITEM_WIDTH,
+  PROFILE_TOP_FADE_EXTRA,
+  SCREEN_CONTENT_PADDING,
+  SWIPE_BACK_HIT_WIDTH,
+  TAB_SCREEN_MIN_TOP_PADDING,
+  TAB_SCREEN_TOP_PADDING,
+  TEXT_OVERLAY_BASE_FONT_SIZE,
+  TEXT_OVERLAY_CENTER_GUIDE_DWELL_MS,
+  TEXT_OVERLAY_CENTER_GUIDE_FADE_MS,
+  TEXT_OVERLAY_CENTER_PROXIMITY_THRESHOLD,
+  TEXT_OVERLAY_CENTER_SNAP_THRESHOLD,
+  TEXT_OVERLAY_MAX_WIDTH_RATIO,
+  THEME_STORAGE_KEY,
+  UNJAM_POPOVER_WIDTH,
+  WELCOME_HEADER_TAP_GUARD,
+  border,
+  dark,
+  jamBorder,
+  jamTint,
+  muted,
+  overlayIconShadow,
+  overlayTextShadow,
+  panel,
+  panelSoft,
+  viewportHeight,
+  viewportWidth,
+} from "@/theme/tokens";
+import {
+  activeThemeMode,
+  darkStyles,
+  getActivityIndicatorColor,
+  setActiveThemeMode,
+  styles,
+  type AppStyleSet,
+} from "@/theme/styles";
+import { fadeAnimatedValue, waitMs } from "@/lib/animation";
+import { clamp, formatClipDuration, getUniqueStrings, ordinal, stringParam } from "@/lib/format";
+import {
+  LOCATION_FILTER_COUNTRIES,
+  encodeLocationFilter,
+  formatProfileLocation,
+  getCountryMatchTerms,
+  getCountrySearchText,
+  getProfileLocationParts,
+  locationContainsTerm,
+  locationFilterMatches,
+  normalizeLocationText,
+  parseLocationFilter,
+} from "@/lib/location-filter";
+import {
+  FEED_ROLE_FILTER_WHEEL,
+  buildDiscoverFeedQueryKey,
+  creatorRoleTagSet,
+  feedVideoMatchesFilters,
+  isFeedFilterStateActive,
+  musicGenreTagSet,
+  normalizeVideoTag,
+  shuffleVideosWithSpacing,
+  toFeedContentFilters,
+  type FeedFilterState,
+  getUniqueVideoTags,
+} from "@/lib/feed-filters";
+import {
+  conversationFromFeedItem,
+  conversationFromRequest,
+  feedItemToPreloadedProfile,
+  getProfileFullscreenTags,
+  getProfileVideoCreatedAtMs,
+  getProfileVideoOwner,
+  getProfileVideoTags,
+  getVideoPresentation,
+  hasSentJam,
+  isPendingSentJam,
+  profileToFeedVideo,
+  profileVideoToFeedVideo,
+  sortProfileVideos,
+  sortProfileVideosByNewest,
+} from "@/lib/profile-mappers";
+import { getUnreadInboxCount, getUnreadLocalInboxCount } from "@/lib/inbox-unread";
+import {
+  PROFILE_VIDEO_DELETE_ANIMATION,
+  PROFILE_VIDEO_PIN_REORDER_ANIMATION,
+  filterOutLocallyDeletedVideos,
+  locallyDeletedProfileVideoIds,
+  pruneLocallyDeletedProfileVideoIds,
+} from "@/lib/profile-video-delete-cache";
 
-const { width: viewportWidth, height: viewportHeight } = Dimensions.get("window");
-const dark = "#0a0a0a";
-const panel = "#18181b";
-const panelSoft = "#111113";
-const border = "rgba(255,255,255,0.12)";
-const muted = "#a1a1aa";
-const WELCOME_HEADER_TAP_GUARD = 56;
-const SCREEN_CONTENT_PADDING = 22;
-
-const TAB_SCREEN_TOP_PADDING = 18;
-const TAB_SCREEN_MIN_TOP_PADDING = 28;
-const PROFILE_GRID_GAP = 4;
-const PROFILE_GRID_ITEM_WIDTH = (viewportWidth - PROFILE_GRID_GAP * 2) / 3;
-const NAV_BAR_HEIGHT = 92;
-const NAV_BAR_ITEM_HEIGHT = 58;
-const NAV_BAR_TOP_PADDING = 12;
-const FEED_ACTION_GAP = 12;
-/** Hold still this long before chrome fades for a clear video view. */
-const FEED_CHROME_HOLD_MS = 220;
-
-/** Tiny buzz when a press-and-hold gesture activates. */
 function triggerHoldHaptic() {
   void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
 }
 /** Finger travel needed while holding to fill the lock gesture (visual track stays shorter). */
-const FEED_CHROME_LOCK_PULL_PX = 130;
-/** Visual travel of the lock knob along the pull path. */
-const FEED_CHROME_LOCK_TRACK_TRAVEL = 78;
-const FEED_CHROME_LOCK_CIRCLE_SIZE = 46;
-const FEED_CHROME_FADE_MS = 180;
-/** Right-edge fraction of the feed that opens the playback-speed scrubber. */
-const FEED_SPEED_ZONE_LEFT_RATIO = 0.75;
-/** Top → bottom speed options in the hold scrubber. */
-const FEED_PLAYBACK_SPEEDS = [2, 1.5, 1, 0.5] as const;
-type FeedPlaybackSpeed = (typeof FEED_PLAYBACK_SPEEDS)[number];
-const FEED_SPEED_DEFAULT_INDEX = FEED_PLAYBACK_SPEEDS.indexOf(1);
-/** Vertical drag distance to move one speed step. */
-const FEED_SPEED_SEGMENT_PX = 42;
-/** Slightly wider than the jam/bookmark icons; still centered on the action column. */
-const FEED_SPEED_PILL_WIDTH = 38;
-const FEED_SPEED_PILL_PADDING_V = 12;
-const FEED_SPEED_ROW_HEIGHT = 32;
-const FEED_SPEED_PILL_HEIGHT =
-  FEED_SPEED_PILL_PADDING_V * 2 + FEED_SPEED_ROW_HEIGHT * FEED_PLAYBACK_SPEEDS.length;
-const FULLSCREEN_MESSAGE_SEND_WIDTH = 72;
-const FULLSCREEN_MESSAGE_TICK_WIDTH = 54;
-const MAX_ACCOUNT_CREATOR_TYPES = 3;
-const MAX_VIDEO_ROLES = 1;
-const MAX_VIDEO_GENRES = 3;
-const LOCATION_PICKER_MAX_VISIBLE_ROWS = 3;
-const LOCATION_PICKER_ROW_HEIGHT = 50;
-/** Slightly short of 3 full rows so the next option peeks — same scroll cue as role/genre lists. */
-const LOCATION_PICKER_VISIBLE_HEIGHT =
-  LOCATION_PICKER_MAX_VISIBLE_ROWS * LOCATION_PICKER_ROW_HEIGHT - Math.round(LOCATION_PICKER_ROW_HEIGHT * 0.4);
-const LOCATION_FILTER_PREFIX = "jam-location-v1:";
-const EMPTY_FILTER_GENRES: string[] = [];
-const CREATE_RECORDING_TIMER_OPTIONS = [0, 3, 10] as const;
-type RecordingTimerSeconds = (typeof CREATE_RECORDING_TIMER_OPTIONS)[number];
-const CREATE_CAMERA_CONTROLS_BOTTOM_PADDING = 24;
-const CREATE_CAMERA_RECORD_BUTTON_SIZE = 78;
-const CREATE_CAMERA_RECORD_BUTTON_BORDER_WIDTH = 4;
-const CREATE_CAMERA_FILTER_ROW_HEIGHT = 44;
-const CREATE_CAMERA_CONTROL_BUTTON_SIZE = 54;
-const CREATE_CAMERA_CONTROL_ICON_SIZE = 28;
-const CREATE_CAMERA_TOP_CONTROLS_OFFSET = 12;
-/** Pixels of drag for bias ±1 from center — two full-screen swipes to either edge. */
-const CREATE_CAMERA_EXPOSURE_DRAG_RANGE_PX = viewportHeight * 2;
-const CREATE_CAMERA_FOCUS_RETICLE_SIZE = 72;
-const CREATE_FILTER_THUMB_BORDER_WIDTH = 2;
-const CREATE_FILTER_PREVIEW_IMAGE = require("./assets/filter-preview-base.png");
-const LOOKING_FOR_BINOCULARS_ICON = require("./assets/looking-for-binoculars.png");
-const CAMERA_PINCH_ZOOM_STEP = 0.14;
-const FEED_VIDEO_BOTTOM_CORNER_RADIUS = 24;
-const FEED_PREVIEW_VIDEO_BOTTOM_CORNER_RADIUS = 12;
+
 function getFeedVideoViewport(bottomInset: number) {
   const navBarHeight = getNavBarHeight(bottomInset);
   return {
@@ -358,12 +423,15 @@ function getFeedVideoViewport(bottomInset: number) {
     height: viewportHeight - navBarHeight,
   };
 }
+
 function getCreateCameraControlsBottom(navBarHeight: number) {
   return navBarHeight + CREATE_CAMERA_CONTROLS_BOTTOM_PADDING;
 }
+
 function getCreateCameraFilterRestBottom(navBarHeight: number) {
   return (navBarHeight - CREATE_CAMERA_FILTER_ROW_HEIGHT) / 2;
 }
+
 function getCreateCameraFilterSlideDistance(navBarHeight: number) {
   return getCreateCameraFilterRestBottom(navBarHeight) + CREATE_CAMERA_FILTER_ROW_HEIGHT;
 }
@@ -377,6 +445,7 @@ let cameraPreviewActive = false;
 function setCameraPreviewActive(active: boolean) {
   cameraPreviewActive = active;
 }
+
 
 async function preloadRecentVideoThumbnail(options?: {
   force?: boolean;
@@ -473,21 +542,18 @@ async function preloadRecentVideoThumbnail(options?: {
   return recentVideoThumbnailLoadPromise;
 }
 
+
 function pinchScaleToCameraZoom(baseZoom: number, scale: number) {
   const delta = (Math.log(Math.max(scale, 0.01)) / Math.log(2)) * CAMERA_PINCH_ZOOM_STEP;
   return clamp(baseZoom + delta, 0, 1);
 }
+
 function clampTextOverlayCenterRatio(ratio: { x: number; y: number }) {
   // Full edit canvas (including letterbox bars). Keep a thin inset so the
   // overlay center stays on-screen while still allowing edge / bar placement.
   return { x: clamp(ratio.x, 0.02, 0.98), y: clamp(ratio.y, 0.02, 0.98) };
 }
-const TEXT_OVERLAY_CENTER_SNAP_THRESHOLD = 0.035;
-const TEXT_OVERLAY_CENTER_PROXIMITY_THRESHOLD = 0.09;
-const TEXT_OVERLAY_CENTER_GUIDE_DWELL_MS = 450;
-const TEXT_OVERLAY_CENTER_GUIDE_FADE_MS = 180;
-const TEXT_OVERLAY_BASE_FONT_SIZE = 30;
-const TEXT_OVERLAY_MAX_WIDTH_RATIO = 0.86;
+
 function snapTextOverlayCenterRatio(
   ratio: { x: number; y: number },
   options: { snapX: boolean; snapY: boolean },
@@ -505,94 +571,23 @@ function snapTextOverlayCenterRatio(
   };
 }
 
+
 function getCreateTextOverlayFontSize(fontScale: number) {
   return Math.max(12, Math.round(TEXT_OVERLAY_BASE_FONT_SIZE * fontScale * 10) / 10);
 }
+
 
 function getCreateTextOverlayLineHeight(fontSize: number) {
   // Slightly taller than 1.2 so script descenders / boxed text don't clip.
   return Math.round(fontSize * 1.25 * 10) / 10;
 }
 
-type CreateTextOverlayItem = {
-  id: string;
-  text: string;
-  centerRatio: { x: number; y: number };
-  fontScale: number;
-  fontId: VideoTextFontId;
-  effectId: VideoTextEffectId;
-};
 
 function createTextOverlayId() {
   return `text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function sortLocationCountries(options: readonly LocationCountryOption[]): readonly LocationCountryOption[] {
-  return [...options]
-    .sort((a, b) => a.country.localeCompare(b.country))
-    .map((option) => ({
-      ...option,
-      cities: [...option.cities].sort((a, b) => a.localeCompare(b)),
-    }));
-}
-const LOCATION_FILTER_COUNTRIES = sortLocationCountries([
-  { country: "United States", aliases: ["USA", "US", "America"], cities: ["New York", "Los Angeles", "Chicago", "Houston", "Miami"] },
-  { country: "China", cities: ["Shanghai", "Beijing", "Guangzhou", "Shenzhen", "Chengdu"] },
-  { country: "India", cities: ["Mumbai", "Delhi", "Bengaluru", "Kolkata", "Chennai"] },
-  { country: "Indonesia", cities: ["Jakarta", "Surabaya", "Bandung", "Medan", "Semarang"] },
-  { country: "Pakistan", cities: ["Karachi", "Lahore", "Faisalabad", "Rawalpindi", "Islamabad"] },
-  { country: "Brazil", cities: ["Sao Paulo", "Rio de Janeiro", "Brasilia", "Salvador", "Fortaleza"] },
-  { country: "Nigeria", cities: ["Lagos", "Kano", "Ibadan", "Abuja", "Port Harcourt"] },
-  { country: "Bangladesh", cities: ["Dhaka", "Chittagong", "Khulna", "Rajshahi", "Sylhet"] },
-  { country: "Russia", cities: ["Moscow", "Saint Petersburg", "Novosibirsk", "Yekaterinburg", "Kazan"] },
-  { country: "Mexico", cities: ["Mexico City", "Guadalajara", "Monterrey", "Puebla", "Tijuana"] },
-  { country: "Japan", cities: ["Tokyo", "Osaka", "Nagoya", "Yokohama", "Fukuoka"] },
-  { country: "Philippines", cities: ["Manila", "Quezon City", "Davao City", "Caloocan", "Cebu City"] },
-  { country: "Ethiopia", cities: ["Addis Ababa", "Dire Dawa", "Mekelle", "Gondar", "Hawassa"] },
-  { country: "Egypt", cities: ["Cairo", "Alexandria", "Giza", "Shubra El Kheima", "Port Said"] },
-  { country: "Vietnam", cities: ["Ho Chi Minh City", "Hanoi", "Da Nang", "Hai Phong", "Can Tho"] },
-  { country: "Democratic Republic of the Congo", aliases: ["DR Congo", "Congo"], cities: ["Kinshasa", "Lubumbashi", "Mbuji-Mayi", "Kananga", "Kisangani"] },
-  { country: "Turkey", cities: ["Istanbul", "Ankara", "Izmir", "Bursa", "Antalya"] },
-  { country: "Iran", cities: ["Tehran", "Mashhad", "Isfahan", "Karaj", "Shiraz"] },
-  { country: "Germany", cities: ["Berlin", "Hamburg", "Munich", "Cologne", "Frankfurt"] },
-  { country: "Thailand", cities: ["Bangkok", "Chiang Mai", "Pattaya", "Phuket", "Nakhon Ratchasima"] },
-  { country: "United Kingdom", aliases: ["UK", "Great Britain", "England", "Scotland", "Wales"], cities: ["London", "Birmingham", "Manchester", "Glasgow", "Liverpool"] },
-  { country: "France", cities: ["Paris", "Marseille", "Lyon", "Toulouse", "Nice"] },
-  { country: "Italy", cities: ["Rome", "Milan", "Naples", "Turin", "Palermo"] },
-  { country: "South Africa", cities: ["Johannesburg", "Cape Town", "Durban", "Pretoria", "Port Elizabeth"] },
-  { country: "Tanzania", cities: ["Dar es Salaam", "Mwanza", "Arusha", "Dodoma", "Mbeya"] },
-  { country: "Myanmar", cities: ["Yangon", "Mandalay", "Naypyidaw", "Mawlamyine", "Bago"] },
-  { country: "Kenya", cities: ["Nairobi", "Mombasa", "Kisumu", "Nakuru", "Eldoret"] },
-  { country: "South Korea", aliases: ["Korea"], cities: ["Seoul", "Busan", "Incheon", "Daegu", "Daejeon"] },
-  { country: "Colombia", cities: ["Bogota", "Medellin", "Cali", "Barranquilla", "Cartagena"] },
-  { country: "Spain", cities: ["Madrid", "Barcelona", "Valencia", "Seville", "Zaragoza"] },
-  { country: "Argentina", cities: ["Buenos Aires", "Cordoba", "Rosario", "Mendoza", "La Plata"] },
-  { country: "Algeria", cities: ["Algiers", "Oran", "Constantine", "Annaba", "Blida"] },
-  { country: "Sudan", cities: ["Khartoum", "Omdurman", "Nyala", "Port Sudan", "Kassala"] },
-  { country: "Uganda", cities: ["Kampala", "Gulu", "Lira", "Mbarara", "Jinja"] },
-  { country: "Iraq", cities: ["Baghdad", "Basra", "Mosul", "Erbil", "Najaf"] },
-  { country: "Ukraine", cities: ["Kyiv", "Kharkiv", "Odesa", "Dnipro", "Lviv"] },
-  { country: "Canada", cities: ["Toronto", "Montreal", "Vancouver", "Calgary", "Ottawa"] },
-  { country: "Poland", cities: ["Warsaw", "Krakow", "Lodz", "Wroclaw", "Poznan"] },
-  { country: "Morocco", cities: ["Casablanca", "Rabat", "Fes", "Marrakesh", "Tangier"] },
-  { country: "Saudi Arabia", cities: ["Riyadh", "Jeddah", "Mecca", "Medina", "Dammam"] },
-  { country: "Uzbekistan", cities: ["Tashkent", "Samarkand", "Namangan", "Andijan", "Bukhara"] },
-  { country: "Peru", cities: ["Lima", "Arequipa", "Trujillo", "Chiclayo", "Cusco"] },
-  { country: "Malaysia", cities: ["Kuala Lumpur", "George Town", "Johor Bahru", "Ipoh", "Kota Kinabalu"] },
-  { country: "Angola", cities: ["Luanda", "Huambo", "Lobito", "Benguela", "Lubango"] },
-  { country: "Mozambique", cities: ["Maputo", "Matola", "Beira", "Nampula", "Chimoio"] },
-  { country: "Ghana", cities: ["Accra", "Kumasi", "Tamale", "Takoradi", "Cape Coast"] },
-  { country: "Yemen", cities: ["Sanaa", "Aden", "Taiz", "Hodeidah", "Ibb"] },
-  { country: "Nepal", cities: ["Kathmandu", "Pokhara", "Lalitpur", "Biratnagar", "Bharatpur"] },
-  { country: "Venezuela", cities: ["Caracas", "Maracaibo", "Valencia", "Barquisimeto", "Maracay"] },
-  { country: "Netherlands", cities: ["Amsterdam", "Rotterdam", "The Hague", "Utrecht", "Eindhoven"] },
-  { country: "Sweden", cities: ["Stockholm", "Gothenburg", "Malmo", "Uppsala", "Vasteras"] },
-  { country: "Australia", cities: ["Sydney", "Melbourne", "Brisbane", "Perth", "Adelaide"] },
-]);
-const SWIPE_BACK_HIT_WIDTH = 112;
-const THEME_STORAGE_KEY = "jam.themeMode";
 
-/** First-time Near Me gate — discloses the live-location sharing coupling. */
 function confirmNearMeLiveLocationSharing(userId: string): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
@@ -626,30 +621,13 @@ function confirmNearMeLiveLocationSharing(userId: string): Promise<boolean> {
   });
 }
 
-const FEED_QUICK_FILTERS = ["vocalist", "instrumentalist", "producer"] as const;
-const FEED_ROLE_FILTER_WHEEL = [
-  ...FEED_QUICK_FILTERS,
-  ...creatorRoles.filter(
-    (role) =>
-      role !== "vocalist" && role !== "instrumentalist" && role !== "producer",
-  ),
-];
-const FEED_ROLE_FILTER_LOOP_COPIES = 3;
-const PROFILE_TOP_FADE_EXTRA = 28;
-const PROFILE_COLLAPSED_BAR_HEIGHT = 44;
-const CREATE_THUMBNAIL_FRAME_COUNT = 24;
-const CREATE_THUMBNAIL_FILMSTRIP_FRAME_HEIGHT = 76;
-const CREATE_THUMBNAIL_SELECTOR_WIDTH_SCALE = 1.45;
-const CREATE_TRIM_FILMSTRIP_FRAME_COUNT = 10;
-const CREATE_TRIM_FILMSTRIP_HEIGHT = 52;
-const CREATE_TRIM_HANDLE_WIDTH = 22;
-const CREATE_TRIM_FILMSTRIP_RADIUS = 14;
 
 function getTrimSelectionProgress(absoluteRatio: number, trimStartRatio: number, trimEndRatio: number) {
   const span = trimEndRatio - trimStartRatio;
   if (span <= 0.0001) return 0;
   return clamp(absoluteRatio - trimStartRatio, 0, span) / span;
 }
+
 
 function getTrimProgressTrackGeometry(trimLeft: number, selectionWidth: number) {
   if (selectionWidth <= 0) {
@@ -662,18 +640,16 @@ function getTrimProgressTrackGeometry(trimLeft: number, selectionWidth: number) 
   return { progressTrackLeft, progressTrackWidth };
 }
 
-const CREATE_DETAILS_PREVIEW_WIDTH = 96;
-const CREATE_DETAILS_PREVIEW_HEIGHT = 170;
-const creatorRoleTagSet = new Set(creatorRoles.map(normalizeVideoTag));
-const musicGenreTagSet = new Set(musicGenres.map(normalizeVideoTag));
-let activeThemeMode: ThemeMode = "dark";
+
 const MainTab = createBottomTabNavigator<MainTabParamList>();
+
 function getNavBarHeight(bottomInset: number) {
   return Math.max(
     NAV_BAR_HEIGHT,
     NAV_BAR_ITEM_HEIGHT + NAV_BAR_TOP_PADDING + Math.max(bottomInset, 12),
   );
 }
+
 function getJamNavigationTheme(themeMode: ThemeMode) {
   return {
     ...DarkTheme,
@@ -687,36 +663,6 @@ function getJamNavigationTheme(themeMode: ThemeMode) {
       primary: themeMode === "light" ? "#0a0a0a" : "#fff",
     },
   };
-}
-const PROFILE_VIDEO_DELETE_ANIMATION = {
-  duration: 300,
-  create: {
-    type: LayoutAnimation.Types.easeInEaseOut,
-    property: LayoutAnimation.Properties.opacity,
-  },
-  update: {
-    type: LayoutAnimation.Types.easeInEaseOut,
-  },
-  delete: {
-    type: LayoutAnimation.Types.easeInEaseOut,
-    property: LayoutAnimation.Properties.opacity,
-  },
-};
-
-/** Keeps deleted videos off the grid if a profile reload races the server delete. */
-const locallyDeletedProfileVideoIds = new Set<string>();
-
-function filterOutLocallyDeletedVideos<T extends { id: string }>(videos: T[]) {
-  if (locallyDeletedProfileVideoIds.size === 0) return videos;
-  return videos.filter((video) => !locallyDeletedProfileVideoIds.has(video.id));
-}
-
-function pruneLocallyDeletedProfileVideoIds(serverVideos: Array<{ id: string }>) {
-  if (locallyDeletedProfileVideoIds.size === 0) return;
-  const serverIds = new Set(serverVideos.map((video) => video.id));
-  for (const id of [...locallyDeletedProfileVideoIds]) {
-    if (!serverIds.has(id)) locallyDeletedProfileVideoIds.delete(id);
-  }
 }
 
 export default function App() {
@@ -734,7 +680,7 @@ export default function App() {
   }, []);
 
   const updateThemeMode = useCallback((nextThemeMode: ThemeMode) => {
-    activeThemeMode = nextThemeMode;
+    setActiveThemeMode(nextThemeMode);
     setThemeMode(nextThemeMode);
     void AsyncStorage.setItem(THEME_STORAGE_KEY, nextThemeMode);
   }, []);
@@ -743,7 +689,7 @@ export default function App() {
     void AsyncStorage.getItem(THEME_STORAGE_KEY)
       .then((savedThemeMode) => {
         if (savedThemeMode === "light" || savedThemeMode === "dark") {
-          activeThemeMode = savedThemeMode;
+          setActiveThemeMode(savedThemeMode);
           setThemeMode(savedThemeMode);
         }
       })
@@ -2106,23 +2052,6 @@ function OnboardingScreen({
   );
 }
 
-function fadeAnimatedValue(value: Animated.Value, toValue: number, duration: number) {
-  return new Promise<void>((resolve) => {
-    Animated.timing(value, {
-      toValue,
-      duration,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start(() => resolve());
-  });
-}
-
-function waitMs(ms: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 type WelcomePhase = "intro" | "position" | "messageOne" | "messageTwo";
 
 function WelcomeScreen({
@@ -2608,12 +2537,16 @@ function DiscoverScreen({
   const [filterFillActive, setFilterFillActive] = useState(false);
   const [feedQueryReloading, setFeedQueryReloading] = useState(false);
   const [feedBridge, setFeedBridge] = useState<FeedVideo[]>([]);
+  /** Remounts FlatList when the server query key changes so paused players can't stick. */
+  const [feedListKey, setFeedListKey] = useState("boot");
   const [replayToastVisible, setReplayToastVisible] = useState(false);
   const initialBootCompleteRef = useRef(!showBootOverlay);
   const feedCursorRef = useRef<FeedCursor | null>(null);
   const feedPhaseRef = useRef<FeedPhase>("unseen");
   const loadingMoreFeedRef = useRef(false);
   const filterFillGenerationRef = useRef(0);
+  /** Invalidates in-flight load / load-more when filters or near-me change. */
+  const feedReloadGenerationRef = useRef(0);
   const itemsRef = useRef<FeedVideo[]>([]);
   const listRef = useRef<FlatList<FeedVideo>>(null);
   const feedQueryKeyRef = useRef<string | null>(null);
@@ -2846,27 +2779,46 @@ function DiscoverScreen({
     return nextLocation;
   }
 
+  /** Soft reload: keep the current clip playing until the new page is ready. */
+  function beginSoftFeedQueryReload() {
+    setFeedQueryReloading(true);
+    setDiscoverFeedPhase("unseen");
+    feedCursorRef.current = null;
+    setFeedCursor(null);
+    loadingMoreFeedRef.current = false;
+    filterFillGenerationRef.current += 1;
+  }
+
+  function commitSoftFeedQueryReload(nextListKey: string, nextItems: FeedVideo[]) {
+    itemsRef.current = nextItems;
+    setItems(nextItems);
+    setFeedBridge([]);
+    setUserPausedVideoId(null);
+    setFeedListKey(nextListKey);
+    setActiveVideoId(nextItems[0]?.id ?? null);
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToOffset({ offset: 0, animated: false });
+    });
+  }
+
   async function toggleNearMe() {
     if (nearMeLoading) return;
 
     if (nearMeActive) {
+      // Keep the current clip playing; the query-key effect swaps when global feed is ready.
+      feedQueryKeyRef.current = "near-me-pending-off";
       setNearMeActive(false);
-      setActiveVideoId(null);
-      requestAnimationFrame(() => {
-        listRef.current?.scrollToOffset({ offset: 0, animated: false });
-      });
       return;
     }
 
     const confirmed = await confirmNearMeLiveLocationSharing(userId);
     if (!confirmed) return;
 
+    // Keep the current video playing while GPS + nearby page load.
+    // Invalidate the query key so a failed toggle still reloads the global feed.
+    feedQueryKeyRef.current = "near-me-pending";
     setNearMeActive(true);
     setNearMeLoading(true);
-    setActiveVideoId(null);
-    requestAnimationFrame(() => {
-      listRef.current?.scrollToOffset({ offset: 0, animated: false });
-    });
 
     try {
       // Near-me filter also turns on live location sharing so others can find you,
@@ -2907,7 +2859,9 @@ function DiscoverScreen({
     }
   }
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (options?: { commit?: boolean }) => {
+    const commit = options?.commit !== false;
+    const generation = feedReloadGenerationRef.current;
     filterFillGenerationRef.current += 1;
     setFilterFillActive(false);
     setError(null);
@@ -2916,23 +2870,31 @@ function DiscoverScreen({
     if (!initialBootCompleteRef.current) setFirstClipReady(false);
 
     let page = await fetchDiscoverPage(null, "unseen");
+    if (generation !== feedReloadGenerationRef.current) return null;
+
     // Cold start with nothing new → drop straight into replay (toast if clips exist).
     if (page.items.length === 0 && !page.nextCursor) {
       page = await enterReplayPhase();
+      if (generation !== feedReloadGenerationRef.current) return null;
     } else {
       feedCursorRef.current = page.nextCursor;
       setFeedCursor(page.nextCursor);
     }
 
     const nextItems = shuffleVideosWithSpacing(page.items);
-    itemsRef.current = nextItems;
-    setItems(nextItems);
+    if (generation !== feedReloadGenerationRef.current) return null;
+    if (commit) {
+      itemsRef.current = nextItems;
+      setItems(nextItems);
+    }
+    return nextItems;
   }, [enterReplayPhase, fetchDiscoverPage, setDiscoverFeedPhase]);
 
   const loadMoreFeed = useCallback(
     async (options?: { allowReplayTransition?: boolean }) => {
       const allowReplayTransition = options?.allowReplayTransition ?? false;
       if (loadingMoreFeedRef.current) return;
+      const generation = feedReloadGenerationRef.current;
 
       const cursor = feedCursorRef.current;
       if (!cursor) {
@@ -2941,9 +2903,11 @@ function DiscoverScreen({
         loadingMoreFeedRef.current = true;
         try {
           const page = await enterReplayPhase();
+          if (generation !== feedReloadGenerationRef.current) return;
           if (page.items.length === 0) return;
 
           setItems((current) => {
+            if (generation !== feedReloadGenerationRef.current) return current;
             const existingIds = new Set(current.map((item) => item.id));
             const fresh = page.items.filter((item) => !existingIds.has(item.id));
             if (fresh.length === 0) return current;
@@ -2952,9 +2916,13 @@ function DiscoverScreen({
             return nextItems;
           });
         } catch (err) {
-          setError(err instanceof Error ? err.message : "could not load more");
+          if (generation === feedReloadGenerationRef.current) {
+            setError(err instanceof Error ? err.message : "could not load more");
+          }
         } finally {
-          loadingMoreFeedRef.current = false;
+          if (generation === feedReloadGenerationRef.current) {
+            loadingMoreFeedRef.current = false;
+          }
         }
         return;
       }
@@ -2967,6 +2935,7 @@ function DiscoverScreen({
         const maxRounds = 4;
 
         while (nextCursor && rounds < maxRounds) {
+          if (generation !== feedReloadGenerationRef.current) return;
           const page = await fetchDiscoverPage(nextCursor);
           accumulated.push(...page.items);
           nextCursor = page.nextCursor;
@@ -2975,11 +2944,14 @@ function DiscoverScreen({
           if (accumulated.length >= FEED_PAGE_SIZE) break;
         }
 
+        if (generation !== feedReloadGenerationRef.current) return;
+
         feedCursorRef.current = nextCursor;
         setFeedCursor(nextCursor);
 
         if (accumulated.length > 0) {
           setItems((current) => {
+            if (generation !== feedReloadGenerationRef.current) return current;
             const existingIds = new Set(current.map((item) => item.id));
             const fresh = accumulated.filter((item) => !existingIds.has(item.id));
             if (fresh.length === 0) return current;
@@ -2997,8 +2969,10 @@ function DiscoverScreen({
           accumulated.length < FEED_PAGE_SIZE
         ) {
           const replayPage = await enterReplayPhase();
+          if (generation !== feedReloadGenerationRef.current) return;
           if (replayPage.items.length === 0) return;
           setItems((current) => {
+            if (generation !== feedReloadGenerationRef.current) return current;
             const existingIds = new Set(current.map((item) => item.id));
             const fresh = replayPage.items.filter((item) => !existingIds.has(item.id));
             if (fresh.length === 0) return current;
@@ -3008,9 +2982,13 @@ function DiscoverScreen({
           });
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "could not load more");
+        if (generation === feedReloadGenerationRef.current) {
+          setError(err instanceof Error ? err.message : "could not load more");
+        }
       } finally {
-        loadingMoreFeedRef.current = false;
+        if (generation === feedReloadGenerationRef.current) {
+          loadingMoreFeedRef.current = false;
+        }
       }
     },
     [enterReplayPhase, fetchDiscoverPage],
@@ -3099,34 +3077,43 @@ function DiscoverScreen({
 
     if (feedQueryKeyRef.current === null) {
       feedQueryKeyRef.current = nextKey;
+      setFeedListKey(nextKey);
       return;
     }
     if (feedQueryKeyRef.current === nextKey) return;
     feedQueryKeyRef.current = nextKey;
 
-    // Keep the current feed on screen (bridge) while the other query loads —
-    // clearing both items + bridge was flashing the empty/end-of-feed state.
-    const snapshot = itemsRef.current;
-    if (snapshot.length > 0) {
-      setFeedBridge(snapshot);
-    }
-    itemsRef.current = [];
-    setItems([]);
-    setFeedCursor(null);
-    feedCursorRef.current = null;
-    setDiscoverFeedPhase("unseen");
+    feedReloadGenerationRef.current += 1;
+    const generation = feedReloadGenerationRef.current;
+    loadingMoreFeedRef.current = false;
+    filterFillGenerationRef.current += 1;
+
     if (replayToastHideTimerRef.current) {
       clearTimeout(replayToastHideTimerRef.current);
       replayToastHideTimerRef.current = null;
     }
     replayToastOpacity.setValue(0);
     setReplayToastVisible(false);
-    setFeedQueryReloading(true);
-    setActiveVideoId(null);
 
-    void load()
-      .catch((err) => setError(err instanceof Error ? err.message : "could not load feed"))
-      .finally(() => setFeedQueryReloading(false));
+    // Keep the current clip playing; swap the list only once the new page is ready.
+    beginSoftFeedQueryReload();
+
+    void load({ commit: false })
+      .then((nextItems) => {
+        if (generation !== feedReloadGenerationRef.current) return;
+        if (!nextItems) return;
+        commitSoftFeedQueryReload(nextKey, nextItems);
+      })
+      .catch((err) => {
+        if (generation === feedReloadGenerationRef.current) {
+          setError(err instanceof Error ? err.message : "could not load feed");
+        }
+      })
+      .finally(() => {
+        if (generation === feedReloadGenerationRef.current) {
+          setFeedQueryReloading(false);
+        }
+      });
   }, [filterState, load, nearMeActive, nearMeLoading, replayToastOpacity, setDiscoverFeedPhase, userLocation]);
 
   useEffect(() => {
@@ -3157,6 +3144,8 @@ function DiscoverScreen({
     [filterState, itemsWithSavedState],
   );
 
+  const feedModeSwitching = nearMeLoading || feedQueryReloading;
+
   const searchingForFilterMatches =
     filtered.length === 0 &&
     (loading ||
@@ -3169,6 +3158,12 @@ function DiscoverScreen({
   // Keep the last non-empty feed on screen while filter paging / mode switch catches up.
   const holdingFilterBridge =
     searchingForFilterMatches && feedBridge.length > 0 && !loading;
+  /**
+   * Poster-only bridge for empty-result filter fills. Soft query reloads
+   * (Near Me, etc.) keep the live player mounted until the new page commits.
+   */
+  const suspendFeedVideo =
+    holdingFilterBridge || (feedQueryReloading && filtered.length === 0 && feedBridge.length > 0);
 
   const visibleFeed = filtered.length > 0 ? filtered : holdingFilterBridge ? feedBridge : [];
   const wasHoldingFilterBridgeRef = useRef(false);
@@ -3251,6 +3246,12 @@ function DiscoverScreen({
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
+      // Don't revive playback on the poster-only bridge — wait for the new page.
+      if (suspendFeedVideo) {
+        setActiveVideoId(null);
+        return;
+      }
+
       if (visibleFeed.length === 0) {
         setActiveVideoId(null);
         return;
@@ -3270,7 +3271,7 @@ function DiscoverScreen({
     });
 
     return () => cancelAnimationFrame(frame);
-  }, [filtered, visibleFeed]);
+  }, [filtered, suspendFeedVideo, visibleFeed]);
 
   async function refresh() {
     setRefreshing(true);
@@ -3380,7 +3381,7 @@ function DiscoverScreen({
   // Keep the active clip playing under the filter sheet — only pause for
   // full-screen routes / filter-wheel bridge holds.
   const shouldPlayFeedVideos =
-    isFocused && !activeProfile && !activeChat && !holdingFilterBridge;
+    isFocused && !activeProfile && !activeChat && !suspendFeedVideo;
 
   // Remember the clip on blur; restore active id on focus without scrolling.
   // Forced scrollToOffset remounts the cell and flashes black over the video.
@@ -3440,10 +3441,14 @@ function DiscoverScreen({
           accessibilityLabel={nearMeActive ? "near me on, sharing live location" : "near me"}
           accessibilityHint="turns on share live location to find creators nearby"
           accessibilityRole="button"
-          accessibilityState={{ selected: nearMeActive, busy: nearMeLoading }}
+          accessibilityState={{ selected: nearMeActive, busy: feedModeSwitching }}
           onPress={() => void toggleNearMe()}
         >
-          <NearMeIcon active={nearMeActive} />
+          {feedModeSwitching ? (
+            <ActivityIndicator color="#fff" size="small" />
+          ) : (
+            <NearMeIcon active={nearMeActive} />
+          )}
         </Pressable>
         <FeedRoleFilterWheel selectedRoles={roles} onSelectRole={applyFeedFilterPill} />
         <Pressable onPress={() => setFiltersOpen(true)} style={styles.feedFilterButton}>
@@ -3488,12 +3493,15 @@ function DiscoverScreen({
       ) : (
         <View style={{ height: feedItemHeight }}>
           <FlatList
+            key={feedListKey}
             ref={listRef}
             data={visibleFeed}
             keyExtractor={(item) => item.id}
             style={{ height: feedItemHeight }}
             pagingEnabled
-            scrollEnabled={!holdingFilterBridge && !feedChromeHolding && !feedSpeedHolding}
+            scrollEnabled={
+              !suspendFeedVideo && !feedModeSwitching && !feedChromeHolding && !feedSpeedHolding
+            }
             decelerationRate="fast"
             disableIntervalMomentum
             windowSize={5}
@@ -3507,13 +3515,13 @@ function DiscoverScreen({
             showsVerticalScrollIndicator={false}
             onMomentumScrollEnd={updateActiveVideo}
             onEndReached={() => {
-              if (holdingFilterBridge) return;
+              if (suspendFeedVideo || feedModeSwitching) return;
               void loadMoreFeed({ allowReplayTransition: true });
             }}
             onEndReachedThreshold={0.8}
             refreshControl={<RefreshControl tintColor={getActivityIndicatorColor()} refreshing={refreshing} onRefresh={refresh} />}
             ListFooterComponent={
-              feedCursor || holdingFilterBridge || feedPhase === "unseen" ? null : (
+              feedCursor || suspendFeedVideo || feedPhase === "unseen" ? null : (
                 <EndOfFeedState
                   filtersActive={filtersActive}
                   nearMeActive={nearMeActive}
@@ -3530,6 +3538,7 @@ function DiscoverScreen({
                 navBarHeight={0}
                 isActive={shouldPlayFeedVideos && item.id === activeVideoId}
                 paused={userPausedVideoId === item.id}
+                suspendVideo={suspendFeedVideo}
                 onPausedChange={(nextPaused) => {
                   setUserPausedVideoId(nextPaused ? item.id : null);
                 }}
@@ -3921,12 +3930,15 @@ function configureJamVideoPlayer(
   nextPlayer.staysActiveInBackground = true;
   nextPlayer.showNowPlayingNotification = false;
   nextPlayer.bufferOptions = {
-    // Start playback as soon as a tiny buffer exists (TikTok-like), instead of
-    // waiting until AVPlayer thinks stalling is unlikely.
+    // Start quickly, but keep enough forward buffer that ABR can climb to the
+    // top Cloudflare rung instead of sticking on the lowest one.
     waitsToMinimizeStalling: false,
-    preferredForwardBufferDuration: Platform.OS === "android" ? 2 : 1,
-    minBufferForPlayback: 0.5,
-    prioritizeTimeOverSizeThreshold: true,
+    // iOS: 0 = let AVPlayer choose (best for HLS quality switching).
+    // Android: ~15s target matches expo-video's quality-friendly default.
+    preferredForwardBufferDuration: Platform.OS === "android" ? 15 : 0,
+    minBufferForPlayback: 1,
+    // false = allow larger buffers so ExoPlayer can select higher bitrates.
+    prioritizeTimeOverSizeThreshold: false,
   };
 }
 
@@ -4057,21 +4069,21 @@ function JamVideoView({
   const prevShouldPlayRef = useRef(shouldPlay);
 
   const revealAfterFirstFrame = useCallback(() => {
-    if (firstFrameNotifiedRef.current) return;
-    firstFrameNotifiedRef.current = true;
     if (firstFrameClearTimeoutRef.current) {
       clearTimeout(firstFrameClearTimeoutRef.current);
     }
     // onFirstFrameRender can fire before pixels are composited — delay cover removal.
     // Prewarmed players often never re-fire onFirstFrameRender, so callers also
     // invoke this from playingChange once audio/video is actually running.
+    // Always clear freeze covers on resume — firstFrameNotified only gates the
+    // parent callback (scroll-away captures a new freeze that must be removable).
     firstFrameClearTimeoutRef.current = setTimeout(() => {
       if (appStateRef.current !== "active") {
-        // Allow a later playing/active pass to notify the parent cover.
-        firstFrameNotifiedRef.current = false;
         return;
       }
       setFreezeFrameUri(null);
+      if (firstFrameNotifiedRef.current) return;
+      firstFrameNotifiedRef.current = true;
       onFirstFrameRenderRef.current?.();
     }, 48);
   }, []);
@@ -4440,6 +4452,44 @@ function JamVideoView({
     }
   }, [captureFreezeFrame, player, revealAfterFirstFrame, shouldPlay, source]);
 
+  // If play() doesn't emit playingChange (stale native state after recycle),
+  // retry play and drop the freeze cover so scroll-back can't stay stuck.
+  useEffect(() => {
+    if (!source || !shouldPlay || appStateRef.current !== "active") return;
+    if (!freezeFrameUri) return;
+    const retryDelays = [220, 600, 1200];
+    const timeoutIds = retryDelays.map((delayMs) =>
+      setTimeout(() => {
+        if (!shouldPlayRef.current || appStateRef.current !== "active") return;
+        try {
+          if (!player.playing) player.play();
+        } catch {
+          /* native object already gone */
+        }
+        // Always clear the cover — a stuck poster looks like a frozen video.
+        revealAfterFirstFrame();
+      }, delayMs),
+    );
+    return () => {
+      for (const timeoutId of timeoutIds) clearTimeout(timeoutId);
+    };
+  }, [freezeFrameUri, player, revealAfterFirstFrame, shouldPlay, source]);
+
+  // Recover from a silent HLS stall: ready/loaded but never actually playing.
+  useEffect(() => {
+    if (!source || !shouldPlay || appStateRef.current !== "active") return;
+    const timeoutId = setTimeout(() => {
+      if (!shouldPlayRef.current || appStateRef.current !== "active") return;
+      if (player.playing) return;
+      try {
+        player.play();
+      } catch {
+        /* ignore */
+      }
+    }, 900);
+    return () => clearTimeout(timeoutId);
+  }, [player, shouldPlay, source]);
+
   useEffect(() => {
     const resumeRetryTimeouts: Array<ReturnType<typeof setTimeout>> = [];
 
@@ -4527,6 +4577,7 @@ function FeedItem({
   navBarHeight,
   isActive,
   paused = false,
+  suspendVideo = false,
   onPausedChange,
   activeFilterTags,
   chromeOpacity,
@@ -4553,6 +4604,8 @@ function FeedItem({
   isActive: boolean;
   /** Controlled pause — owned by Discover so it survives tab switches. */
   paused?: boolean;
+  /** Filter/near-me reload bridge: poster only, no live player (avoids freeze-frames). */
+  suspendVideo?: boolean;
   onPausedChange?: (paused: boolean) => void;
   /** Normalized role/genre tags from the user's discover filters. */
   activeFilterTags?: ReadonlySet<string>;
@@ -5003,31 +5056,48 @@ function FeedItem({
     >
       {source ? (
         <View style={feedVideoFrameStyle}>
-          <JamVideoView
-            source={source}
-            style={StyleSheet.absoluteFill}
-            shouldPlay={isActive && !paused}
-            isLooping
-            isMuted={false}
-            volume={1}
-            playbackRate={playbackRate}
-            onFirstFrameRender={revealFirstFrame}
-            onContentFitChange={setMediaContentFit}
-          />
-          <VideoPresentationOverlays filter={item.videoFilter} textOverlays={item.textOverlays} />
-          {posterUri && bufferingState.waitingForFirstPlay ? (
-            <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+          {suspendVideo ? (
+            posterUri ? (
               <Image
                 source={{ uri: posterUri }}
                 style={StyleSheet.absoluteFill}
-                resizeMode={mediaContentFit === "contain" ? "contain" : "cover"}
-                onLoad={(event) => {
-                  const { width, height } = event.nativeEvent.source;
-                  setMediaContentFit(contentFitForVideoSize(width, height));
-                }}
+                resizeMode="cover"
               />
-            </View>
-          ) : null}
+            ) : (
+              <View style={styles.videoPlaceholder}>
+                <Avatar size={90} />
+                <Text style={styles.h2}>{item.creatorName}</Text>
+              </View>
+            )
+          ) : (
+            <>
+              <JamVideoView
+                source={source}
+                style={StyleSheet.absoluteFill}
+                shouldPlay={isActive && !paused}
+                isLooping
+                isMuted={false}
+                volume={1}
+                playbackRate={playbackRate}
+                onFirstFrameRender={revealFirstFrame}
+                onContentFitChange={setMediaContentFit}
+              />
+              {posterUri && bufferingState.waitingForFirstPlay ? (
+                <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+                  <Image
+                    source={{ uri: posterUri }}
+                    style={StyleSheet.absoluteFill}
+                    resizeMode={mediaContentFit === "contain" ? "contain" : "cover"}
+                    onLoad={(event) => {
+                      const { width, height } = event.nativeEvent.source;
+                      setMediaContentFit(contentFitForVideoSize(width, height));
+                    }}
+                  />
+                </View>
+              ) : null}
+            </>
+          )}
+          <VideoPresentationOverlays filter={item.videoFilter} textOverlays={item.textOverlays} />
         </View>
       ) : (
         <View style={feedVideoFrameStyle}>
@@ -5037,7 +5107,7 @@ function FeedItem({
           </View>
         </View>
       )}
-      {source && showWaitingSpinner && (
+      {source && !suspendVideo && showWaitingSpinner && (
         <View pointerEvents="none" style={[styles.feedBufferingIndicator, { bottom: navBarHeight }]}>
           <ActivityIndicator color="#fff" />
         </View>
@@ -12152,22 +12222,28 @@ function InboxScreen({
         ) : tab === "requests" ? (
           <View style={styles.list}>
             {filteredRequests.map((request) => (
-              <Pressable key={request.id} style={styles.listCard} onPress={() => openRequest(request)}>
-                <Pressable onPress={() => openProfile(request.userId)} accessibilityLabel={`open ${request.creatorName}'s profile`}>
-                  <Avatar uri={request.avatarUrl} size={52} />
-                </Pressable>
-                <View style={styles.flex}>
-                  <View style={styles.row}>
-                    <Text style={styles.listTitle}>{request.creatorName}</Text>
-                    {request.proBadge ? <ProBadge kind={request.proBadge} /> : null}
-                    <Text numberOfLines={1} style={[styles.helper, styles.flex]}>
-                      {request.role} - {request.location}
-                    </Text>
-                  </View>
-                  <Text numberOfLines={1} style={styles.copy}>{request.preview}</Text>
-                </View>
-                <Text style={styles.helper}>{request.sentAt}</Text>
-              </Pressable>
+              <ConversationRow
+                key={request.id}
+                conversation={{
+                  id: request.id,
+                  userId: request.userId,
+                  creatorName: request.creatorName,
+                  avatarUrl: request.avatarUrl,
+                  role: request.role,
+                  location: request.location,
+                  lastMessage: request.preview,
+                  timestamp: request.sentAt,
+                  lastActivityAt: request.sentAt,
+                  unread: request.unreadCount > 0,
+                  unreadCount: request.unreadCount,
+                  earlyAdopter: request.earlyAdopter,
+                  proBadge: request.proBadge,
+                  unlocked: false,
+                  messages: [],
+                }}
+                onPress={() => openRequest(request)}
+                onOpenProfile={() => openProfile(request.userId)}
+              />
             ))}
             {filteredRequests.length === 0 && (
               <Text style={styles.inboxEmptyText}>
@@ -12509,8 +12585,15 @@ function MyProfileScreen({
       setVideos((current) => {
         const next = filterOutLocallyDeletedVideos(ownVideos).map((video) => {
           if (!pendingPinRanksRef.current.has(video.id)) return video;
-          const rank = pendingPinRanksRef.current.get(video.id) ?? null;
-          return { ...video, pinnedRank: rank, pinned_rank: rank };
+          const pendingRank = pendingPinRanksRef.current.get(video.id) ?? null;
+          const serverRank = getProfileVideoPinnedRank(video);
+          // Drop the pending override only once the server matches — clearing it
+          // earlier lets an in-flight focus refresh flash the video back unpinned.
+          if (serverRank === pendingRank) {
+            pendingPinRanksRef.current.delete(video.id);
+            return video;
+          }
+          return { ...video, pinnedRank: pendingRank, pinned_rank: pendingRank };
         });
         // Compare by id (not index) — pin reorder must not look like a full reload.
         if (current.length !== next.length) return next;
@@ -12665,8 +12748,13 @@ function MyProfileScreen({
   const settingsButton = (
     <Pressable
       style={styles.headerIconButton}
-      onPress={() => setSettingsOpen(true)}
+      onPressIn={() => {
+        // Open on press-in so the drawer mounts immediately; waiting for press-out
+        // made the slide-in feel flaky when the finger lingered or scrolled slightly.
+        if (!settingsOpen) setSettingsOpen(true);
+      }}
       accessibilityLabel="settings"
+      accessibilityRole="button"
     >
       <MenuIcon color={getActivityIndicatorColor()} />
     </Pressable>
@@ -13336,6 +13424,9 @@ function SettingsDrawerModal({
   const selectedNearMeRadius = normalizeNearMeRadius(profile?.near_me_radius_miles);
   const [translateX] = useState(() => new Animated.Value(drawerWidth));
   const closingRef = useRef(false);
+  /** Bumps on each open/close so late animation callbacks can't stomp a new open. */
+  const animGenerationRef = useRef(0);
+  const openAnimFrameRef = useRef<ReturnType<typeof requestAnimationFrame> | null>(null);
   const backdropOpacity = useMemo(
     () =>
       translateX.interpolate({
@@ -13353,22 +13444,43 @@ function SettingsDrawerModal({
     [translateX],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!visible) return;
 
-    const frame = requestAnimationFrame(() => {
-      closingRef.current = false;
-      setMounted(true);
-      translateX.setValue(drawerWidth);
-      Animated.timing(translateX, {
-        toValue: 0,
-        duration: 260,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }).start();
+    const generation = ++animGenerationRef.current;
+    closingRef.current = false;
+    // Mount immediately so the Modal is on-screen for the slide-in.
+    setMounted(true);
+    translateX.stopAnimation();
+    translateX.setValue(drawerWidth);
+
+    if (openAnimFrameRef.current != null) {
+      cancelAnimationFrame(openAnimFrameRef.current);
+      openAnimFrameRef.current = null;
+    }
+
+    let cancelled = false;
+    // Two frames: commit mount, then let the Modal present before animating.
+    openAnimFrameRef.current = requestAnimationFrame(() => {
+      openAnimFrameRef.current = requestAnimationFrame(() => {
+        openAnimFrameRef.current = null;
+        if (cancelled || generation !== animGenerationRef.current || closingRef.current) return;
+        Animated.timing(translateX, {
+          toValue: 0,
+          duration: 260,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }).start();
+      });
     });
 
-    return () => cancelAnimationFrame(frame);
+    return () => {
+      cancelled = true;
+      if (openAnimFrameRef.current != null) {
+        cancelAnimationFrame(openAnimFrameRef.current);
+        openAnimFrameRef.current = null;
+      }
+    };
   }, [drawerWidth, translateX, visible]);
 
   useEffect(() => {
@@ -13406,14 +13518,23 @@ function SettingsDrawerModal({
   function animateClosed(afterClose?: () => void) {
     if (closingRef.current) return;
     closingRef.current = true;
+    const generation = ++animGenerationRef.current;
+    if (openAnimFrameRef.current != null) {
+      cancelAnimationFrame(openAnimFrameRef.current);
+      openAnimFrameRef.current = null;
+    }
+    translateX.stopAnimation();
     Animated.timing(translateX, {
       toValue: drawerWidth,
       duration: 220,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
-    }).start(() => {
-      setMounted(false);
+    }).start(({ finished }) => {
+      // A newer open superseded this close — leave the drawer alone.
+      if (generation !== animGenerationRef.current) return;
       closingRef.current = false;
+      if (!finished) return;
+      setMounted(false);
       onClose();
       afterClose?.();
     });
@@ -15185,30 +15306,7 @@ function GridNavIcon({ styleSet = styles }: { styleSet?: AppStyleSet }) {
   );
 }
 
-const JAM_JAR_FILL_EMPTY_HEIGHT = 11.5;
-const JAM_JAR_FILL_FULL_HEIGHT = 21;
-const JAM_JAR_LID_EMPTY_HEIGHT = 7;
-const JAM_JAR_LID_FULL_HEIGHT = 4;
-const JAM_JAR_LID_EMPTY_GAP = -1;
-const JAM_JAR_LID_FULL_GAP = 2;
-const JAM_JAR_JAM_COLOR = "#d63438";
-const UNJAM_POPOVER_WIDTH = 200;
-const NOTIFY_POPOVER_WIDTH = 240;
-const jamTint = { backgroundColor: JAM_JAR_JAM_COLOR } as const;
-const jamBorder = { borderColor: JAM_JAR_JAM_COLOR } as const;
-// Subtle drop shadow so overlay icons stay visible on bright videos (iOS shadows follow the icon's alpha).
-const overlayIconShadow = {
-  shadowColor: "#000",
-  shadowOpacity: 0.45,
-  shadowRadius: 3.5,
-  shadowOffset: { width: 0, height: 1 },
-} as const;
 // TikTok-style text shadow for any text sitting on top of video.
-const overlayTextShadow = {
-  textShadowColor: "rgba(0,0,0,0.55)",
-  textShadowRadius: 4,
-  textShadowOffset: { width: 0, height: 1 },
-} as const;
 
 function JamJarSmoothWaveSurface({ color = "#fff" }: { color?: string }) {
   return (
@@ -15221,7 +15319,6 @@ function JamJarSmoothWaveSurface({ color = "#fff" }: { color?: string }) {
   );
 }
 
-const BOOKMARK_CREAM = "#f6e7c1";
 
 function FeedChromeLockIcon({ open, size = 20 }: { open: boolean; size?: number }) {
   return (
@@ -17363,7 +17460,10 @@ function VideoGrid({
                   onPress={() => {
                     if (pinPreviewClosingRef.current) return;
                     const target = pinMenuVideo;
-                    dismissPinMenu(() => onTogglePin?.(target));
+                    // Pin/unpin immediately so the grid settles before the preview closes.
+                    // Waiting until after the dismiss animation caused a visible reorder flash.
+                    onTogglePin?.(target);
+                    dismissPinMenu();
                   }}
                   accessibilityRole="button"
                   accessibilityLabel={pinMenuPinned ? "unpin video" : "pin video"}
@@ -17529,206 +17629,6 @@ function Toast({ text }: { text: string }) {
   );
 }
 
-function getUniqueStrings(items: readonly string[]) {
-  return Array.from(new Set(items.filter(Boolean)));
-}
-
-function normalizeLocationText(value: string) {
-  return value.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-function getCountrySearchText(option: LocationCountryOption) {
-  return [option.country, ...(option.aliases ?? []), ...option.cities].join(" ").toLowerCase();
-}
-
-function getCountryMatchTerms(option: LocationCountryOption) {
-  return [option.country, ...(option.aliases ?? [])].map(normalizeLocationText);
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function locationContainsTerm(location: string, term: string) {
-  if (!term) return false;
-  return new RegExp(`(^|[^a-z0-9])${escapeRegExp(term)}([^a-z0-9]|$)`, "i").test(location);
-}
-
-function parseLocationFilter(value: string): LocationFilterSelection[] {
-  if (!value) return [];
-
-  if (!value.startsWith(LOCATION_FILTER_PREFIX)) {
-    const normalizedValue = normalizeLocationText(value);
-    const legacyMatch = LOCATION_FILTER_COUNTRIES.find(
-      (option) =>
-        getCountryMatchTerms(option).some((term) => locationContainsTerm(normalizedValue, term)) ||
-        option.cities.some((city) => locationContainsTerm(normalizedValue, normalizeLocationText(city))),
-    );
-
-    if (!legacyMatch) return [];
-
-    const legacyCities = legacyMatch.cities.filter((city) =>
-      locationContainsTerm(normalizedValue, normalizeLocationText(city)),
-    );
-    return [{ country: legacyMatch.country, cities: legacyCities }];
-  }
-
-  try {
-    const parsed = JSON.parse(value.slice(LOCATION_FILTER_PREFIX.length));
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed.flatMap((entry): LocationFilterSelection[] => {
-      if (!entry || typeof entry.country !== "string") return [];
-      const country = LOCATION_FILTER_COUNTRIES.find((option) => option.country === entry.country);
-      if (!country) return [];
-      const validCities = Array.isArray(entry.cities)
-        ? entry.cities.filter((city: unknown): city is string => typeof city === "string" && country.cities.includes(city))
-        : [];
-      return [{ country: country.country, cities: getUniqueStrings(validCities) }];
-    });
-  } catch {
-    return [];
-  }
-}
-
-function encodeLocationFilter(selections: readonly LocationFilterSelection[]) {
-  const cleanSelections = selections
-    .map((selection) => {
-      const country = LOCATION_FILTER_COUNTRIES.find((option) => option.country === selection.country);
-      if (!country) return null;
-      const cities = getUniqueStrings(selection.cities).filter((city) => country.cities.includes(city));
-      return { country: country.country, cities };
-    })
-    .filter((selection): selection is LocationFilterSelection => Boolean(selection));
-
-  return cleanSelections.length ? `${LOCATION_FILTER_PREFIX}${JSON.stringify(cleanSelections)}` : "";
-}
-
-function toFeedContentFilters(
-  filters: Pick<FeedFilterState, "roles" | "genres" | "location" | "lookingForActive">,
-): FeedContentFilters {
-  const roles = getUniqueStrings(filters.roles);
-  const genres = getUniqueStrings(filters.genres);
-  const locations = parseLocationFilter(filters.location).map((selection) => {
-    const option = LOCATION_FILTER_COUNTRIES.find((country) => country.country === selection.country);
-    return {
-      country: selection.country,
-      cities: selection.cities,
-      country_aliases: [...(option?.aliases ?? [])],
-    };
-  });
-
-  return {
-    roles: roles.length ? roles : undefined,
-    genres: genres.length ? genres : undefined,
-    locations: locations.length ? locations : undefined,
-    lookingForOnly: filters.lookingForActive || undefined,
-  };
-}
-
-function buildDiscoverFeedQueryKey(filters: FeedFilterState) {
-  const rolesKey = [...filters.roles].map((role) => role.toLowerCase()).sort().join(",");
-  const genresKey = [...filters.genres].map((genre) => genre.toLowerCase()).sort().join(",");
-  const lookingKey = filters.lookingForActive ? "looking" : "";
-  const contentKey = `${rolesKey}|${genresKey}|${filters.location}|${lookingKey}`;
-
-  if (filters.nearMeActive && filters.userLocation) {
-    return `near:${filters.userLocation.latitude.toFixed(5)}:${filters.userLocation.longitude.toFixed(5)}:${filters.nearMeRadiusMiles}:${contentKey}`;
-  }
-
-  return `global:${contentKey}`;
-}
-
-function locationFilterMatches(itemLocation: string, filterValue: string) {
-  if (!filterValue) return true;
-
-  const normalizedItemLocation = normalizeLocationText(itemLocation);
-  const selections = parseLocationFilter(filterValue);
-
-  if (selections.length === 0) {
-    const normalizedFilter = normalizeLocationText(filterValue);
-    return normalizedItemLocation.includes(normalizedFilter) || normalizedFilter.includes(normalizedItemLocation);
-  }
-
-  return selections.some((selection) => {
-    const option = LOCATION_FILTER_COUNTRIES.find((country) => country.country === selection.country);
-    if (!option) return false;
-
-    if (selection.cities.length === 0) {
-      return getCountryMatchTerms(option).some((term) => locationContainsTerm(normalizedItemLocation, term));
-    }
-
-    return selection.cities.some((city) => locationContainsTerm(normalizedItemLocation, normalizeLocationText(city)));
-  });
-}
-
-type FeedFilterState = {
-  roles: string[];
-  genres: string[];
-  location: string;
-  nearMeActive: boolean;
-  lookingForActive: boolean;
-  userLocation: { latitude: number; longitude: number } | null;
-  nearMeRadiusMiles: NearMeRadiusMiles;
-};
-
-function feedVideoMatchesFilters(item: FeedVideo, filters: FeedFilterState) {
-  // Match video tags only — never the creator's profile role.
-  const itemRoles = item.roles.map((role) => role.toLowerCase());
-  const itemGenres = item.genres.map((genre) => genre.toLowerCase());
-  const roleMatch =
-    filters.roles.length === 0 ||
-    filters.roles.some((role) => itemRoles.includes(role.toLowerCase()));
-  const genreMatch =
-    filters.genres.length === 0 ||
-    filters.genres.some((genre) => itemGenres.includes(genre.toLowerCase()));
-  const locationMatch = !filters.location || locationFilterMatches(item.location, filters.location);
-  const lookingForMatch = !filters.lookingForActive || item.lookingFor;
-  // Near-me + role/genre are enforced server-side on new page fetches.
-  // Client filter remains so already-loaded / bridged clips stay correct instantly.
-  return roleMatch && genreMatch && locationMatch && lookingForMatch;
-}
-
-function isFeedFilterStateActive(filters: FeedFilterState) {
-  return (
-    filters.roles.length > 0 ||
-    filters.genres.length > 0 ||
-    Boolean(filters.location) ||
-    filters.nearMeActive ||
-    filters.lookingForActive
-  );
-}
-
-function getProfileLocationParts(profile?: Pick<Profile, "country" | "city" | "location"> | null) {
-  const country = profile?.country?.trim() ?? "";
-  const city = profile?.city?.trim() ?? "";
-  if (country) return { country, city };
-
-  const legacySelection = parseLocationFilter(profile?.location ?? "").at(0);
-  return {
-    country: legacySelection?.country ?? "",
-    city: legacySelection?.cities.at(0) ?? "",
-  };
-}
-
-function formatProfileLocation(country: string, city: string) {
-  const nextCountry = country.trim();
-  const nextCity = city.trim();
-  if (nextCountry && nextCity) return `${nextCity}, ${nextCountry}`;
-  return nextCountry || null;
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function formatClipDuration(durationMs: number) {
-  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
-}
-
 async function extractVideoThumbnailFrames(
   videoUri: string,
   durationMs: number,
@@ -17759,24 +17659,6 @@ async function extractVideoThumbnailFrames(
   }
 
   return frames;
-}
-
-function getVideoPresentation(video: ProfileVideo | FeedVideo) {
-  if ("videoFilter" in video || "textOverlays" in video) {
-    return {
-      filter: normalizeVideoFilter(
-        "videoFilter" in video ? video.videoFilter : "video_filter" in video ? video.video_filter : "none",
-      ),
-      textOverlays: normalizeVideoTextOverlays(
-        "textOverlays" in video ? video.textOverlays : "text_overlays" in video ? video.text_overlays : [],
-      ),
-    };
-  }
-
-  return {
-    filter: normalizeVideoFilter("video_filter" in video ? video.video_filter : "none"),
-    textOverlays: normalizeVideoTextOverlays("text_overlays" in video ? video.text_overlays : []),
-  };
 }
 
 function CreateFilterThumbImage({ uri }: { uri?: string | null }) {
@@ -17948,22 +17830,6 @@ function useSuggestions<T extends string>(items: readonly T[], query: string, se
   }, [items, query, selected]);
 }
 
-function shuffleVideosWithSpacing(videos: FeedVideo[]) {
-  const pool = [...videos];
-  const result: FeedVideo[] = [];
-
-  while (pool.length) {
-    const recentCreators = result.slice(-10).map((item) => item.userId);
-    const candidates = pool.filter((item) => !recentCreators.includes(item.userId));
-    const source = candidates.length ? candidates : pool;
-    const pick = source[Math.floor(Math.random() * source.length)];
-    result.push(pick);
-    pool.splice(pool.findIndex((item) => item.id === pick.id), 1);
-  }
-
-  return result;
-}
-
 function getVideoSource(item: FeedVideo) {
   if (item.cloudflareStreamId) return getCloudflarePlaybackUrl(item.cloudflareStreamId);
   return item.mediaUrl;
@@ -18099,232 +17965,14 @@ function getVideoCaption(video: ProfileVideo | FeedVideo) {
   return "caption" in video ? video.caption?.trim() ?? "" : "";
 }
 
-function profileToFeedVideo(
-  profile: Profile,
-  video: ProfileVideo | undefined,
-  savedByMe: boolean,
-  jammedByMe: boolean,
-  jammedMe: boolean,
-  postedVideoCount = 0,
-): FeedVideo {
-  const displayName = profile.display_name?.trim() || "creator";
-  const role = profile.creator_types?.[0] ?? "creator";
-  const tags = getProfileVideoTags(video);
-  const videoCount = Math.max(postedVideoCount, profile.video_count ?? 0);
-  const proBadge = getProBadgeKind({
-    earlyAdopter: profile.early_adopter,
-    videoCount,
-    proSubscriptionActive: profile.pro_subscription_active,
-  });
-  return {
-    id: video?.id ?? `${profile.id}-profile`,
-    userId: profile.id,
-    creatorName: displayName,
-    role,
-    location: formatProfileLocation(getProfileLocationParts(profile).country, getProfileLocationParts(profile).city) ?? "unknown",
-    avatarUrl: profile.avatar_url,
-    bio: profile.bio,
-    caption: video?.caption ?? "",
-    hashtags: video?.hashtags ?? [],
-    categories: tags.categories,
-    roles: tags.roles,
-    genres: tags.genres,
-    mediaUrl: video?.mediaUrl ?? video?.media_url ?? null,
-    cloudflareStreamId: video?.cloudflareStreamId ?? video?.cloudflare_stream_id ?? null,
-    thumbnailTimeMs: video?.thumbnailTimeMs ?? video?.thumbnail_time_ms ?? null,
-    videoFilter: normalizeVideoFilter(video?.videoFilter ?? video?.video_filter),
-    textOverlays: normalizeVideoTextOverlays(video?.textOverlays ?? video?.text_overlays),
-    lookingFor: Boolean(
-      video && ("lookingFor" in video ? video.lookingFor : "looking_for" in video ? video.looking_for : false),
-    ),
-    pinnedRank: getProfileVideoPinnedRank(video),
-    earlyAdopter: Boolean(profile.early_adopter),
-    proBadge,
-    videoCount,
-    createdAt: video?.created_at ?? new Date().toISOString(),
-    savedByMe,
-    mutual: jammedByMe && jammedMe,
-    jammedByMe,
-    jammedMe,
-  };
-}
-
-function getUnreadInboxCount(inbox: InboxData) {
-  return getUnreadLocalInboxCount(
-    inbox.requests,
-    inbox.conversations,
-    inbox.sent,
-    inbox.systemMessages,
-  );
-}
-
-function getUnreadLocalInboxCount(
-  requests: InboxRequest[],
-  conversations: Conversation[],
-  _sent: Conversation[],
-  systemMessages: InboxMessage[],
-) {
-  // Badge = distinct people with unread messages, plus system as one more "account"
-  // when any system message is unread.
-  const unreadPeople =
-    requests.filter((request) => request.unreadCount > 0).length +
-    conversations.filter((conversation) => conversation.unreadCount > 0).length;
-  const unreadSystem = systemMessages.some((message) => !message.read) ? 1 : 0;
-  return unreadPeople + unreadSystem;
-}
-
-function feedItemToPreloadedProfile(item: FeedVideo, feedItems: FeedVideo[]): PreloadedUserProfile {
-  const videos = feedItems
-    .filter((video) => video.userId === item.userId)
-    .map((video): ProfileVideo => ({
-      id: video.id,
-      userId: video.userId,
-      caption: video.caption,
-      hashtags: video.hashtags,
-      categories: video.categories,
-      roles: video.roles,
-      genres: video.genres,
-      mediaUrl: video.mediaUrl,
-      cloudflareStreamId: video.cloudflareStreamId,
-      thumbnailTimeMs: video.thumbnailTimeMs,
-      videoFilter: video.videoFilter,
-      textOverlays: video.textOverlays,
-      lookingFor: video.lookingFor,
-      pinnedRank: video.pinnedRank ?? null,
-      pinned_rank: video.pinnedRank ?? null,
-      created_at: video.createdAt,
-      creatorName: video.creatorName,
-      role: video.role,
-      location: video.location,
-      avatarUrl: video.avatarUrl,
-      earlyAdopter: video.earlyAdopter,
-      proBadge: video.proBadge,
-      savedByMe: video.savedByMe,
-      mutual: video.mutual,
-      jammedByMe: video.jammedByMe,
-      jammedMe: video.jammedMe,
-    }));
-
-  return {
-    userId: item.userId,
-    profile: {
-      id: item.userId,
-      display_name: item.creatorName,
-      bio: item.bio,
-      creator_types: [item.role],
-      location: item.location,
-      country: null,
-      city: null,
-      latitude: null,
-      longitude: null,
-      live_latitude: null,
-      live_longitude: null,
-      live_location_updated_at: null,
-      near_me_radius_miles: null,
-      avatar_url: item.avatarUrl,
-      onboarding_complete: true,
-      welcome_seen: true,
-      early_adopter: item.earlyAdopter,
-      video_count: item.videoCount,
-      pro_subscription_active: item.proBadge === "blue",
-    },
-    videos,
-    jammedByMe: item.jammedByMe || item.mutual,
-    jammedMe: item.jammedMe || item.mutual,
-  };
-}
-
-function profileVideoToFeedVideo(video: ProfileVideo | FeedVideo): FeedVideo | null {
-  if ("userId" in video && video.userId) {
-    const mediaUrl = "mediaUrl" in video && video.mediaUrl
-      ? video.mediaUrl
-      : "media_url" in video
-        ? video.media_url ?? null
-        : null;
-    const cloudflareStreamId = "cloudflareStreamId" in video && video.cloudflareStreamId
-      ? video.cloudflareStreamId
-      : "cloudflare_stream_id" in video
-        ? video.cloudflare_stream_id ?? null
-        : null;
-    const createdAt = "createdAt" in video
-      ? video.createdAt
-      : "created_at" in video
-        ? video.created_at ?? new Date().toISOString()
-        : new Date().toISOString();
-    const tags = getProfileVideoTags(video);
-    const presentation = getVideoPresentation(video);
-
-    return {
-      id: video.id,
-      userId: video.userId,
-      creatorName: video.creatorName ?? "creator",
-      role: video.role ?? "creator",
-      location: video.location ?? "unknown",
-      avatarUrl: video.avatarUrl ?? null,
-      bio: null,
-      caption: video.caption ?? "",
-      hashtags: video.hashtags ?? [],
-      categories: tags.categories,
-      roles: tags.roles,
-      genres: tags.genres,
-      mediaUrl,
-      cloudflareStreamId,
-      thumbnailTimeMs: "thumbnailTimeMs" in video
-        ? video.thumbnailTimeMs ?? null
-        : "thumbnail_time_ms" in video
-          ? video.thumbnail_time_ms ?? null
-          : null,
-      videoFilter: presentation.filter,
-      textOverlays: presentation.textOverlays,
-      lookingFor: Boolean(
-        "lookingFor" in video
-          ? video.lookingFor
-          : "looking_for" in video
-            ? (video as { looking_for?: boolean | null }).looking_for
-            : false,
-      ),
-      pinnedRank: getProfileVideoPinnedRank(video as ProfileVideo),
-      earlyAdopter: Boolean(video.earlyAdopter),
-      proBadge: "proBadge" in video ? video.proBadge ?? null : null,
-      videoCount: "videoCount" in video && typeof video.videoCount === "number" ? video.videoCount : 0,
-      createdAt,
-      savedByMe: video.savedByMe ?? true,
-      mutual: video.mutual ?? false,
-      jammedByMe: video.jammedByMe ?? false,
-      jammedMe: video.jammedMe ?? false,
-    };
+function prepareProfileGridPinReorderAnimation() {
+  if (
+    Platform.OS === "android" &&
+    UIManager.setLayoutAnimationEnabledExperimental
+  ) {
+    UIManager.setLayoutAnimationEnabledExperimental(true);
   }
-
-  return null;
-}
-
-function getProfileVideoOwner(video: ProfileVideo | FeedVideo) {
-  const feedItem = profileVideoToFeedVideo(video);
-  return {
-    creatorName: feedItem?.creatorName ?? "creator",
-    role: feedItem?.role ?? "creator",
-    location: feedItem?.location ?? "unknown",
-    avatarUrl: feedItem?.avatarUrl ?? null,
-    earlyAdopter: Boolean(feedItem?.earlyAdopter),
-    proBadge: feedItem?.proBadge ?? null,
-  };
-}
-
-/** Pinned first (rank 1–3), then newest → oldest. */
-function sortProfileVideos<T extends ProfileVideo | FeedVideo>(videos: T[]) {
-  return [...videos].sort((a, b) => {
-    const aPin = getProfileVideoPinnedRank(a as ProfileVideo);
-    const bPin = getProfileVideoPinnedRank(b as ProfileVideo);
-    const aPinned = aPin != null;
-    const bPinned = bPin != null;
-    if (aPinned !== bPinned) return aPinned ? -1 : 1;
-    if (aPinned && bPinned && aPin !== bPin) return (aPin as number) - (bPin as number);
-    return getProfileVideoCreatedAtMs(b) - getProfileVideoCreatedAtMs(a);
-  });
-}
-
-function sortProfileVideosByNewest<T extends ProfileVideo | FeedVideo>(videos: T[]) {
-  return sortProfileVideos(videos);
+  LayoutAnimation.configureNext(PROFILE_VIDEO_PIN_REORDER_ANIMATION);
 }
 
 async function toggleOwnProfileVideoPin(
@@ -18338,14 +17986,18 @@ async function toggleOwnProfileVideoPin(
   const currentlyPinned = getProfileVideoPinnedRank(video as ProfileVideo) != null;
   let previousVideos: ProfileVideo[] = [];
   let optimisticRank: number | null = null;
+  let didOptimisticReorder = false;
 
-  // Keep fetch order in state; displayVideos sorts. Avoid LayoutAnimation + avoid a
-  // second reshuffle after the server responds (that was causing pin glitches).
+  // Keep fetch order in state; displayVideos sorts. Pending ranks stay until a
+  // profile reload sees the matching server value — clearing them on API success
+  // let focus refreshes flash the thumb back to its old slot.
 
+  prepareProfileGridPinReorderAnimation();
   setVideos((current) => {
     previousVideos = current;
     if (currentlyPinned) {
       pendingPinRanks?.current.set(video.id, null);
+      didOptimisticReorder = true;
       return current.map((entry) =>
         entry.id === video.id
           ? { ...entry, pinnedRank: null, pinned_rank: null }
@@ -18369,6 +18021,7 @@ async function toggleOwnProfileVideoPin(
     }
 
     pendingPinRanks?.current.set(video.id, optimisticRank);
+    didOptimisticReorder = true;
     return current.map((entry) =>
       entry.id === video.id
         ? { ...entry, pinnedRank: optimisticRank, pinned_rank: optimisticRank }
@@ -18387,93 +18040,38 @@ async function toggleOwnProfileVideoPin(
     }
   }
 
+  if (!didOptimisticReorder) return;
+
   try {
     if (currentlyPinned) {
       await unpinProfileVideo(userId, video.id);
-      pendingPinRanks?.current.delete(video.id);
+      // Keep pending null until load() confirms the server cleared the pin.
       return;
     }
 
     const rank = await pinProfileVideo(userId, video.id);
     pendingPinRanks?.current.set(video.id, rank);
+    prepareProfileGridPinReorderAnimation();
     setVideos((current) => {
       const existing = getProfileVideoPinnedRank(
         current.find((entry) => entry.id === video.id),
       );
-      if (existing === rank) {
-        pendingPinRanks?.current.delete(video.id);
-        return current;
-      }
+      if (existing === rank) return current;
       return current.map((entry) =>
         entry.id === video.id
           ? { ...entry, pinnedRank: rank, pinned_rank: rank }
           : entry,
       );
     });
-    pendingPinRanks?.current.delete(video.id);
   } catch (err) {
     pendingPinRanks?.current.delete(video.id);
+    prepareProfileGridPinReorderAnimation();
     setVideos(() => previousVideos);
     Alert.alert(
       currentlyPinned ? "could not unpin" : "could not pin",
       err instanceof Error ? err.message : "try again",
     );
   }
-}
-
-function getProfileVideoCreatedAtMs(video: ProfileVideo | FeedVideo) {
-  const createdAt = "createdAt" in video
-    ? video.createdAt
-    : "created_at" in video
-      ? video.created_at
-      : null;
-  return createdAt ? Date.parse(createdAt) || 0 : 0;
-}
-
-function getProfileVideoTags(video: ProfileVideo | FeedVideo | undefined) {
-  const categories = getUniqueVideoTags(video?.categories?.length ? video.categories : video?.hashtags ?? []);
-  const roleSource = getUniqueVideoTags(video?.roles?.length ? video.roles : categories);
-  const genreSource = getUniqueVideoTags(video?.genres?.length ? video.genres : categories);
-  const roles = roleSource.filter((tag) => creatorRoleTagSet.has(normalizeVideoTag(tag)));
-  const genres = genreSource.filter((tag) => musicGenreTagSet.has(normalizeVideoTag(tag)));
-
-  return {
-    categories,
-    roles: getUniqueVideoTags(roles),
-    genres,
-  };
-}
-
-function getProfileFullscreenTags(video: ProfileVideo | FeedVideo | undefined) {
-  const tags = getProfileVideoTags(video);
-  const roleGenreTags = [...tags.roles, ...tags.genres];
-  return roleGenreTags.length ? getUniqueVideoTags(roleGenreTags) : tags.categories;
-}
-
-function normalizeVideoTag(tag: string) {
-  return tag.trim().replace(/^#+/, "").replace(/\s+/g, " ").toLowerCase();
-}
-
-function getUniqueVideoTags(tags: readonly string[]) {
-  const seen = new Set<string>();
-  const uniqueTags: string[] = [];
-
-  for (const tag of tags) {
-    const normalizedTag = normalizeVideoTag(tag);
-    if (!normalizedTag || seen.has(normalizedTag)) continue;
-    seen.add(normalizedTag);
-    uniqueTags.push(tag);
-  }
-
-  return uniqueTags;
-}
-
-function hasSentJam(video: ProfileVideo | FeedVideo) {
-  return Boolean(video.mutual || video.jammedByMe);
-}
-
-function isPendingSentJam(video: ProfileVideo | FeedVideo) {
-  return Boolean(video.jammedByMe && !video.mutual);
 }
 
 async function toggleSavedProfileVideo(
@@ -18543,2012 +18141,3 @@ async function deleteOwnProfileVideo(
     Alert.alert("could not delete", err instanceof Error ? err.message : "try again");
   }
 }
-
-function conversationFromRequest(request: InboxRequest): Conversation {
-  const createdAt = new Date().toISOString();
-  return {
-    id: request.userId,
-    userId: request.userId,
-    creatorName: request.creatorName,
-    avatarUrl: request.avatarUrl,
-    role: request.role,
-    location: request.location,
-    lastMessage: "reply to start jamming.",
-    timestamp: "now",
-    lastActivityAt: createdAt,
-    unread: false,
-    unreadCount: 0,
-    earlyAdopter: request.earlyAdopter,
-    proBadge: request.proBadge,
-    unlocked: false,
-    messages: [
-      {
-        id: request.id,
-        body: request.preview,
-        incoming: true,
-        createdAt,
-        video: request.video ?? null,
-      },
-    ],
-  };
-}
-
-function conversationFromFeedItem(item: FeedVideo, unlocked: boolean): Conversation {
-  const createdAt = new Date().toISOString();
-  return {
-    id: item.userId,
-    userId: item.userId,
-    creatorName: item.creatorName,
-    avatarUrl: item.avatarUrl,
-    role: item.role,
-    location: item.location,
-    lastMessage: unlocked ? "you are jamming. chat is open." : "jam sent. waiting for a reply.",
-    timestamp: "now",
-    lastActivityAt: createdAt,
-    unread: false,
-    unreadCount: 0,
-    earlyAdopter: item.earlyAdopter,
-    proBadge: item.proBadge,
-    unlocked,
-    messages: [],
-  };
-}
-
-function ordinal(value: number) {
-  const suffixes = ["th", "st", "nd", "rd"];
-  const mod100 = value % 100;
-  const suffix = suffixes[(mod100 - 20) % 10] || suffixes[mod100] || suffixes[0];
-  return `${value}${suffix}`;
-}
-
-function stringParam(value: string | string[] | undefined) {
-  if (Array.isArray(value)) return value[0];
-  return value;
-}
-
-function getActivityIndicatorColor() {
-  return activeThemeMode === "light" ? "#0a0a0a" : "#fff";
-}
-
-const baseStyles = {
-  gestureRoot: { flex: 1, backgroundColor: dark },
-  swipeBackSurface: { flex: 1, backgroundColor: dark },
-  profileStackOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: dark, zIndex: 20 },
-  fullscreenOverlay: { ...StyleSheet.absoluteFillObject, zIndex: 60, elevation: 60 },
-  app: { flex: 1, backgroundColor: dark },
-  tabScene: { backgroundColor: dark },
-  safe: { flex: 1, backgroundColor: dark },
-  safeWithNav: { flex: 1, paddingBottom: NAV_BAR_HEIGHT, backgroundColor: dark },
-  profileScrollFadeRoot: { flex: 1 },
-  profileScrollTopFade: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    zIndex: 2,
-  },
-  profileCollapsedBar: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    zIndex: 3,
-    backgroundColor: dark,
-    borderBottomWidth: 1,
-    borderBottomColor: border,
-  },
-  profileCollapsedBarContent: {
-    height: PROFILE_COLLAPSED_BAR_HEIGHT,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    paddingHorizontal: SCREEN_CONTENT_PADDING,
-  },
-  profileCollapsedBarTitle: {
-    flex: 1,
-    color: "#fff",
-    fontSize: 17,
-    fontWeight: "800",
-    letterSpacing: -0.4,
-  },
-  flex: { flex: 1 },
-  centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 14, padding: 24 },
-  authCard: { width: "100%", gap: 14 },
-  onboardingHeader: {
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  onboardingBackButton: {
-    minWidth: 40,
-    minHeight: 40,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 4,
-  },
-  onboardingBackButtonHidden: { opacity: 0 },
-  onboardingBackText: { color: "#fff", fontSize: 28, lineHeight: 30, fontWeight: "600" },
-  onboardingHeaderSpacer: { width: 40, height: 40 },
-  onboardingProgressRow: { flexDirection: "row", gap: 6, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8 },
-  onboardingProgressSegment: { flex: 1, height: 4, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.14)" },
-  onboardingProgressSegmentActive: { backgroundColor: "#fff" },
-  onboardingStepsViewport: { flex: 1, overflow: "hidden" },
-  onboardingStepsTrack: { flexDirection: "row", flex: 1 },
-  onboardingStepPanel: { width: viewportWidth },
-  onboardingContent: { flexGrow: 1, gap: 14, paddingHorizontal: 24, paddingTop: 12, paddingBottom: 24 },
-  onboardingPhotoContent: {
-    flexGrow: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingHorizontal: 24,
-    paddingBottom: 32,
-    gap: 32,
-  },
-  onboardingPhotoIntro: { alignItems: "center", gap: 8, paddingHorizontal: 12 },
-  onboardingPhotoTitle: { textAlign: "center" },
-  onboardingPhotoCopy: { textAlign: "center" },
-  onboardingFooter: { flexShrink: 0, gap: 10, paddingHorizontal: 24, paddingTop: 8, alignItems: "stretch" },
-  onboardingFooterButton: { flex: 0, width: "100%" },
-  onboardingAvatarPicker: { alignItems: "center", justifyContent: "center", gap: 20, width: "100%", maxWidth: 320 },
-  onboardingAvatarActions: { flexDirection: "row", gap: 20, alignItems: "center", justifyContent: "center" },
-  onboardingAvatarActionButton: { paddingVertical: 8, paddingHorizontal: 4 },
-  onboardingAvatarActionText: { color: "#fff", fontSize: 17, fontWeight: "700", textTransform: "lowercase" },
-  onboardingSkipButton: { minHeight: 44, alignItems: "center", justifyContent: "center" },
-  onboardingSkipText: { color: muted, fontSize: 15, fontWeight: "600", textTransform: "lowercase" },
-  welcomeStage: { flex: 1 },
-  welcomeHeaderOverlay: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    minHeight: WELCOME_HEADER_TAP_GUARD,
-    paddingTop: 8,
-    paddingHorizontal: 16,
-    zIndex: 10,
-    elevation: 10,
-  },
-  welcomeBeat: { justifyContent: "center", alignItems: "center", paddingHorizontal: 28 },
-  welcomeBeatLayer: { ...StyleSheet.absoluteFillObject },
-  welcomeIntroText: {
-    color: muted,
-    fontSize: 16,
-    textTransform: "lowercase",
-    letterSpacing: 0.4,
-    textAlign: "center",
-  },
-  welcomePositionText: { textAlign: "center" },
-  welcomePositionLayout: { flex: 1, width: "100%" },
-  welcomePositionTextWrap: { flex: 1, justifyContent: "center", alignItems: "center", paddingHorizontal: 28 },
-  welcomeForwardHint: { color: "#fff", fontSize: 28, lineHeight: 30, fontWeight: "600" },
-  welcomeForwardHintPositioned: { position: "absolute", left: 0, right: 0, textAlign: "center" },
-  welcomeMessagePage: { ...StyleSheet.absoluteFillObject, width: "100%" },
-  welcomeMessageOneLayout: { flex: 1, width: "100%" },
-  welcomeMessageOneTop: {
-    flex: 1,
-    justifyContent: "flex-end",
-    alignItems: "center",
-    paddingHorizontal: SCREEN_CONTENT_PADDING,
-    paddingBottom: 16,
-  },
-  welcomeMessageOneCenter: { paddingHorizontal: SCREEN_CONTENT_PADDING, alignItems: "center" },
-  welcomeMessageOneBottom: { flex: 1 },
-  welcomeMessageTwoContent: {
-    width: "100%",
-    paddingHorizontal: SCREEN_CONTENT_PADDING,
-    gap: 24,
-  },
-  welcomeBackTapZone: {
-    position: "absolute",
-    top: WELCOME_HEADER_TAP_GUARD,
-    bottom: 0,
-    left: 0,
-    width: viewportWidth * 0.2,
-    zIndex: 5,
-  },
-  welcomeMessageTwoButton: { flex: 0, alignSelf: "stretch" },
-  welcomeMessageOneCopy: { textAlign: "center", fontSize: 15, lineHeight: 26 },
-  welcomeCallout: {
-    color: "#fff",
-    fontSize: 34,
-    fontWeight: "800",
-    lineHeight: 42,
-    textAlign: "center",
-    letterSpacing: -0.8,
-  },
-  authLogoWrap: { alignItems: "center", justifyContent: "center" },
-  authWelcomeTo: {
-    position: "absolute",
-    bottom: "100%",
-    marginBottom: 2,
-    color: "#fff",
-    fontSize: 34,
-    fontWeight: "800",
-    letterSpacing: -1.5,
-    textAlign: "center",
-    textTransform: "lowercase",
-  },
-  logo: { color: "#fff", fontSize: 58, fontWeight: "800", letterSpacing: -3, textAlign: "center" },
-  logoSmall: { color: "#fff", fontSize: 42, fontWeight: "800", letterSpacing: -2 },
-  h1: { color: "#fff", fontSize: 34, fontWeight: "800", letterSpacing: -1.2, lineHeight: 40 },
-  h2: { color: "#fff", fontSize: 27, fontWeight: "800", letterSpacing: -0.6 },
-  subtitle: { color: muted, fontSize: 15, lineHeight: 22 },
-  copy: { color: "#d4d4d8", fontSize: 15, lineHeight: 22 },
-  copyCentered: { color: "#d4d4d8", fontSize: 15, lineHeight: 23, textAlign: "center" },
-  profileBio: { color: "#f4f4f5", fontSize: 15, lineHeight: 23, textAlign: "center" },
-  longCopy: { color: "#d4d4d8", fontSize: 17, lineHeight: 30 },
-  eyebrow: { color: muted, fontSize: 14, textTransform: "lowercase", letterSpacing: 0.4 },
-  screenContent: { padding: SCREEN_CONTENT_PADDING, gap: 16 },
-  input: { minHeight: 52, borderRadius: 18, borderWidth: 1, borderColor: border, color: "#fff", backgroundColor: panel, paddingHorizontal: 16, fontSize: 16 },
-  filterQueryRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  filterQueryInput: { flex: 1, minWidth: 0 },
-  filterResetButton: { minHeight: 52, minWidth: 52, alignItems: "center", justifyContent: "center" },
-  filterResetIcon: { color: muted, fontSize: 20, fontWeight: "600", lineHeight: 22 },
-  textArea: { minHeight: 112, paddingTop: 14, textAlignVertical: "top" },
-  primaryButton: { minHeight: 48, flex: 1, alignItems: "center", justifyContent: "center", borderRadius: 16, backgroundColor: "#fff", paddingHorizontal: 16 },
-  primaryButtonText: { color: "#000", fontSize: 16, fontWeight: "800", textTransform: "lowercase" },
-  profileJamRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    alignSelf: "center",
-    gap: 6,
-  },
-  profileActionPill: {
-    minHeight: 48,
-    minWidth: 190,
-    alignSelf: "center",
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 999,
-    backgroundColor: "#3f3f46",
-    paddingHorizontal: 24,
-  },
-  profileActionPillText: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "700",
-    textTransform: "lowercase",
-  },
-  profileJamButton: {
-    minWidth: 190,
-    height: 48,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 999,
-    backgroundColor: "#3f3f46",
-    paddingHorizontal: 24,
-  },
-  profileJamButtonJamming: { backgroundColor: "#52525b" },
-  profileJamButtonText: { color: "#fff", fontSize: 16, fontWeight: "800" },
-  profileJamButtonTextJamming: { color: "#fff" },
-  profileJamCancelButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#ef4444",
-  },
-  profileJamCancelIcon: {
-    color: "#fff",
-    fontSize: 26,
-    fontWeight: "700",
-    lineHeight: 28,
-    marginTop: -1,
-  },
-  secondaryButton: { minHeight: 48, flex: 1, alignItems: "center", justifyContent: "center", borderRadius: 16, borderWidth: 1, borderColor: border, backgroundColor: panel, paddingHorizontal: 16 },
-  secondaryButtonText: { color: "#fff", fontSize: 16, fontWeight: "700", textTransform: "lowercase" },
-  destructiveButton: { minHeight: 48, flex: 1, alignItems: "center", justifyContent: "center", borderRadius: 16, borderWidth: 1, borderColor: "rgba(252,165,165,0.45)", backgroundColor: "rgba(239,68,68,0.18)", paddingHorizontal: 16 },
-  destructiveButtonText: { color: "#fca5a5", fontSize: 16, fontWeight: "800", textTransform: "lowercase" },
-  confirmOption: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center" },
-  confirmOptionCancelText: { color: "#d4d4d8", fontSize: 16, fontWeight: "700", textTransform: "lowercase" },
-  confirmOptionDangerText: { color: "#fca5a5", fontSize: 16, fontWeight: "800", textTransform: "lowercase" },
-  disabled: { opacity: 0.45 },
-  switchText: { color: muted, textAlign: "center", marginTop: 6, textTransform: "lowercase" },
-  forgotPasswordText: {
-    color: muted,
-    textAlign: "right",
-    marginTop: -4,
-    marginBottom: 2,
-    fontSize: 14,
-    textTransform: "lowercase",
-  },
-  notice: { color: "#bbf7d0", textAlign: "center", padding: 12, borderRadius: 14, backgroundColor: "rgba(22,101,52,0.18)" },
-  error: { color: "#fca5a5", textAlign: "center" },
-  helper: { color: "#71717a", fontSize: 13, lineHeight: 18 },
-  charCount: { alignSelf: "flex-end", color: "#71717a", fontSize: 12 },
-  jamPromptMetaRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-  },
-  jamLimitReachedText: { color: "#fca5a5" },
-  loader: { marginTop: 28 },
-  sectionLabel: { color: "#8b8b95", fontSize: 12, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase", marginTop: 4 },
-  sectionLabelLight: { color: "#fff" },
-  chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: border, backgroundColor: panel },
-  chipText: { color: "#e4e4e7", fontSize: 14 },
-  categoryGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  categoryOption: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 999, borderWidth: 1, borderColor: border, backgroundColor: panelSoft },
-  categoryOptionActive: { borderColor: "#fff", backgroundColor: "#fff" },
-  categoryOptionText: { color: "#e4e4e7", fontSize: 14, fontWeight: "700" },
-  categoryOptionTextActive: { color: "#000" },
-  suggestionList: { overflow: "hidden", borderRadius: 18, borderWidth: 1, borderColor: border, backgroundColor: panel },
-  suggestionItem: { paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: border },
-  suggestionText: { color: "#e4e4e7", fontSize: 15 },
-  profileLocationPicker: { gap: 10 },
-  locationFilterList: { overflow: "hidden", borderRadius: 18, borderWidth: 1, borderColor: border, backgroundColor: panel },
-  locationCountryGroup: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: border },
-  locationOptionRow: { minHeight: 50, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 12 },
-  locationCircle: { width: 20, height: 20, alignItems: "center", justifyContent: "center", borderRadius: 10, borderWidth: 1.5, borderColor: "#fff" },
-  locationCityCircle: { width: 16, height: 16, borderRadius: 8, borderWidth: 1.25, borderColor: "#d4d4d8" },
-  locationCircleSelected: { backgroundColor: "#fff" },
-  locationCirclePartial: { backgroundColor: "transparent" },
-  locationCirclePartialFill: { width: 10, height: 10, borderRadius: 5, backgroundColor: "#fff" },
-  locationCountryText: { flex: 1, color: "#f4f4f5", fontSize: 16, fontWeight: "700" },
-  locationCityList: { gap: 2, paddingBottom: 8 },
-  locationCityRow: { minHeight: 38, flexDirection: "row", alignItems: "center", gap: 10, paddingLeft: 48, paddingRight: 16, paddingVertical: 8 },
-  locationCityText: { color: "#d4d4d8", fontSize: 14, fontWeight: "600" },
-  row: { flexDirection: "row", alignItems: "center", gap: 10 },
-  centerRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
-  headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  headerCenterSlot: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerSpacer: { width: 42, height: 42 },
-  headerIconButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center", zIndex: 1 },
-  proProgressWrap: {
-    alignItems: "center",
-    gap: 5,
-    minWidth: 72,
-  },
-  proProgressLabel: {
-    color: "#f6e7c1",
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 0.2,
-  },
-  proProgressTrack: {
-    width: 72,
-    height: 4,
-    borderRadius: 999,
-    backgroundColor: "rgba(246,231,193,0.22)",
-    overflow: "hidden",
-    flexDirection: "row",
-  },
-  proProgressFill: {
-    height: "100%",
-    borderRadius: 999,
-    backgroundColor: "#d7a435",
-  },
-  profileMenu: { position: "absolute", right: 0, top: 48, zIndex: 40, minWidth: 170, overflow: "hidden", borderRadius: 16, borderWidth: 1, borderColor: border, backgroundColor: "rgba(9,9,11,0.98)" },
-  profileMenuAnchor: { zIndex: 40 },
-  profileMenuDismiss: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 30,
-  },
-  profileMenuItem: { paddingHorizontal: 16, paddingVertical: 13 },
-  profileMenuDangerText: { color: "#fca5a5", fontSize: 15, fontWeight: "800", textTransform: "lowercase" },
-  unjamPopover: { position: "absolute", width: 200, gap: 4, padding: 12, paddingBottom: 4, borderRadius: 18, borderWidth: 1, borderColor: border, backgroundColor: "#09090b" },
-  notifyPopover: { position: "absolute", width: 240, gap: 4, padding: 12, paddingBottom: 4, borderRadius: 18, borderWidth: 1, borderColor: border, backgroundColor: "#09090b" },
-  unjamPopoverTitle: { color: "#fff", fontSize: 15, fontWeight: "800", textAlign: "center" },
-  confirmOptionYesText: { color: "#fff", fontSize: 16, fontWeight: "800", textTransform: "lowercase" },
-  profileMenuMutedText: { color: "#71717a", fontSize: 14, fontWeight: "700", textTransform: "lowercase" },
-  blockedUsersList: { gap: 10 },
-  blockedUserRow: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 18, borderWidth: 1, borderColor: border, backgroundColor: panelSoft },
-  blockedUserInfo: { flex: 1, gap: 2 },
-  unblockButton: { minHeight: 38, alignItems: "center", justifyContent: "center", borderRadius: 13, borderWidth: 1, borderColor: border, backgroundColor: panel, paddingHorizontal: 13 },
-  unblockButtonText: { color: "#fff", fontSize: 13, fontWeight: "800", textTransform: "lowercase" },
-  editAvatarButton: { alignSelf: "center", alignItems: "center", gap: 8, paddingVertical: 4 },
-  twoCol: { flexDirection: "row", gap: 10 },
-  flex1: { flex: 1 },
-  profileCentered: { alignItems: "center", gap: 7, paddingVertical: 8 },
-  profileVideoDivider: { height: StyleSheet.hairlineWidth, backgroundColor: "rgba(255,255,255,0.28)", marginTop: 4 },
-  avatarImage: { backgroundColor: panel },
-  avatarFallback: { alignItems: "center", justifyContent: "center", backgroundColor: "#27272a" },
-  avatarText: { color: "#fff", fontWeight: "800" },
-  goldBadge: { width: 15, height: 15, alignItems: "center", justifyContent: "center" },
-  goldBadgeBase: { width: 15, height: 15, borderRadius: 7.5, alignItems: "center", justifyContent: "center", overflow: "hidden", shadowColor: "#f8d363", shadowOpacity: 0.32, shadowRadius: 3, shadowOffset: { width: 0, height: 1 }, elevation: 3 },
-  goldBadgeInnerRing: { position: "absolute", width: 13.2, height: 13.2, borderRadius: 6.6, borderWidth: 1, borderColor: "#050505" },
-  checkMark: { width: 9, height: 7.2, marginLeft: 0.6, marginTop: -0.6, alignItems: "center", justifyContent: "center" },
-  checkStroke: { width: 7.5, height: 4.2, borderLeftWidth: 2.4, borderBottomWidth: 2.4, borderColor: "#020202", transform: [{ rotate: "-45deg" }] },
-  feedRoot: { flex: 1, backgroundColor: "#000" },
-  feedBootOverlay: { ...StyleSheet.absoluteFillObject, zIndex: 100, backgroundColor: "#000" },
-  uploadProgressNavWrap: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    height: 0,
-    overflow: "visible",
-    zIndex: 50,
-  },
-  uploadProgressLine: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    height: 2,
-    zIndex: 51,
-    backgroundColor: "rgba(255,255,255,0.18)",
-    overflow: "hidden",
-  },
-  uploadProgressLineFill: {
-    height: "100%",
-    backgroundColor: "#fff",
-  },
-  feedTopBar: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    zIndex: 20,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 18,
-  },
-  // Same horizontal spacing as feedTopBar, but in-flow for the inbox ScrollView.
-  inboxTopBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    marginHorizontal: -SCREEN_CONTENT_PADDING,
-    paddingHorizontal: 18,
-  },
-  feedRecentFiltersArea: { flex: 1, justifyContent: "center", overflow: "visible" },
-  feedRecentFiltersMask: { flex: 1, height: 44 },
-  feedRecentFiltersMaskElement: { flex: 1, backgroundColor: "transparent" },
-  feedRecentFiltersRow: { flexDirection: "row", alignItems: "center", paddingVertical: 8 },
-  feedRecentFilterItem: { alignItems: "center", justifyContent: "center" },
-  feedRecentFilterText: {
-    color: "#d4d4d8",
-    fontSize: 13,
-    fontWeight: "600",
-    textTransform: "lowercase",
-  },
-  feedRecentFilterTextActive: { color: "#fff", fontWeight: "700" },
-  fullscreenMessageRoot: { flex: 1, backgroundColor: "transparent" },
-  fullscreenVideoRoot: { flex: 1, backgroundColor: "transparent", justifyContent: "flex-end" },
-  fullscreenAdjacentVideo: { position: "absolute", left: 0, right: 0, height: viewportHeight, backgroundColor: "#000" },
-  fullscreenCurrentVideo: { zIndex: 2, elevation: 2 },
-  filterButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
-  inboxFilterButtonActive: {
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.28)",
-    backgroundColor: "rgba(63,63,70,0.92)",
-  },
-  feedFilterButton: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    transform: [{ translateY: -2 }],
-  },
-  feedNearMeButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
-  feedNearMeButtonActive: { opacity: 1 },
-  feedCaptionRow: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
-  filterLookingForRow: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    alignItems: "center",
-    marginBottom: -6,
-  },
-  filterLookingForControl: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  filterLookingForLabel: {
-    color: muted,
-    fontSize: 15,
-    fontWeight: "600",
-    textTransform: "lowercase",
-  },
-  filterLookingForIconSlot: {
-    minHeight: 40,
-    minWidth: 52,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  feedLookingForIcon: {
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 2,
-  },
-  feedCaptionText: { flex: 1 },
-  nearMeRadiusRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  nearMeRadiusOption: {
-    minWidth: 58,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    backgroundColor: "rgba(39,39,42,0.72)",
-    alignItems: "center",
-  },
-  nearMeRadiusOptionActive: {
-    borderColor: "rgba(255,255,255,0.28)",
-    backgroundColor: "rgba(63,63,70,0.92)",
-  },
-  nearMeRadiusOptionText: { color: "#a1a1aa", fontSize: 13, fontWeight: "600", textTransform: "lowercase" },
-  nearMeRadiusOptionTextActive: { color: "#fff" },
-  iconText: { color: "#fff", fontSize: 22, fontWeight: "700" },
-  closeIconText: { color: "#fff", fontSize: 28, fontWeight: "500", lineHeight: 30 },
-  feedItem: { width: "100%", backgroundColor: "#000", justifyContent: "flex-end", overflow: "visible" },
-  feedVideoLayer: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0 },
-  feedVideoViewportClip: {
-    overflow: "hidden",
-  },
-  feedPreviewVideoClip: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: 0,
-    overflow: "hidden",
-    borderBottomLeftRadius: FEED_PREVIEW_VIDEO_BOTTOM_CORNER_RADIUS,
-    borderBottomRightRadius: FEED_PREVIEW_VIDEO_BOTTOM_CORNER_RADIUS,
-  },
-  feedBufferingIndicator: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center" },
-  videoBufferingIndicator: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center" },
-  // TikTok-style: no full-frame dim — soft edge fades behind chrome.
-  feedTopShade: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: 0,
-    height: Math.round(viewportHeight * 0.22),
-  },
-  feedBottomShade: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    height: Math.round(viewportHeight * 0.34),
-  },
-  feedOverlayLayer: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0 },
-  feedChromeLockHud: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    zIndex: 8,
-    alignItems: "center",
-  },
-  feedSpeedHud: {
-    position: "absolute",
-    zIndex: 9,
-    alignItems: "center",
-  },
-  feedSpeedPill: {
-    width: FEED_SPEED_PILL_WIDTH,
-    height: FEED_SPEED_PILL_HEIGHT,
-    paddingVertical: FEED_SPEED_PILL_PADDING_V,
-    borderRadius: FEED_SPEED_PILL_WIDTH / 2,
-    backgroundColor: "rgba(0,0,0,0.42)",
-    borderWidth: 1.5,
-    borderColor: "rgba(255,255,255,0.55)",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  feedSpeedRow: {
-    height: FEED_SPEED_ROW_HEIGHT,
-    width: "100%",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  feedSpeedText: {
-    color: "rgba(255,255,255,0.45)",
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: -0.3,
-  },
-  feedSpeedTextSelected: {
-    color: "#fff",
-    fontSize: 12,
-    fontWeight: "800",
-  },
-  feedChromeLockTrack: {
-    width: FEED_CHROME_LOCK_CIRCLE_SIZE,
-    alignItems: "center",
-  },
-  feedChromeLockPath: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    left: 0,
-    width: FEED_CHROME_LOCK_CIRCLE_SIZE,
-    borderRadius: FEED_CHROME_LOCK_CIRCLE_SIZE / 2,
-    borderWidth: 1.5,
-    borderColor: "rgba(255,255,255,0.55)",
-    backgroundColor: "rgba(255,255,255,0.10)",
-  },
-  feedChromeLockKnob: {
-    position: "absolute",
-    top: 0,
-    width: FEED_CHROME_LOCK_CIRCLE_SIZE,
-    height: FEED_CHROME_LOCK_CIRCLE_SIZE,
-    borderRadius: FEED_CHROME_LOCK_CIRCLE_SIZE / 2,
-    borderWidth: 1.5,
-    borderColor: "rgba(255,255,255,0.92)",
-    backgroundColor: "rgba(0,0,0,0.28)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  feedChromeLockTarget: {
-    position: "absolute",
-    bottom: 0,
-    width: FEED_CHROME_LOCK_CIRCLE_SIZE,
-    height: FEED_CHROME_LOCK_CIRCLE_SIZE,
-    borderRadius: FEED_CHROME_LOCK_CIRCLE_SIZE / 2,
-    borderWidth: 1.5,
-    borderColor: "rgba(255,255,255,0.35)",
-    backgroundColor: "rgba(0,0,0,0.16)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  feedMeta: { position: "absolute", left: 18, right: 76, gap: 11 },
-  feedName: { color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3, ...overlayTextShadow },
-  feedRole: { color: "#f4f4f5", fontSize: 12, fontWeight: "600", ...overlayTextShadow },
-  caption: { color: "#fff", fontSize: 15, lineHeight: 21, ...overlayTextShadow },
-  tags: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  tag: { color: "#e4e4e7", fontSize: 14, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.10)", ...overlayTextShadow },
-  tagHighlighted: {
-    color: "#fff",
-    backgroundColor: "rgba(255,255,255,0.28)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.45)",
-  },
-  badge: { color: "#fff", fontSize: 11, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.20)", overflow: "hidden", ...overlayTextShadow },
-  actions: { position: "absolute", right: 18, gap: FEED_ACTION_GAP },
-  actionButton: { width: 56, height: 56, alignItems: "center", justifyContent: "center" },
-  actionText: { color: "#fff", fontSize: 31, lineHeight: 33, textShadowColor: "rgba(0,0,0,0.45)", textShadowRadius: 4, textShadowOffset: { width: 0, height: 1 } },
-  actionDotsText: { transform: [{ translateY: -6 }] },
-  feedMoreSheetWrap: { flex: 1, justifyContent: "flex-end" },
-  feedMoreSheetDismiss: { ...StyleSheet.absoluteFillObject },
-  feedMoreSheetCard: { margin: 14, marginBottom: 24, borderRadius: 26, borderWidth: 1, borderColor: "rgba(255,255,255,0.14)", backgroundColor: "rgba(9,9,11,0.98)", paddingVertical: 8, overflow: "hidden" },
-  feedMoreMenuItem: { paddingHorizontal: 16, paddingVertical: 13 },
-  feedMoreMenuText: { color: "#f4f4f5", fontSize: 15, fontWeight: "700", ...overlayTextShadow },
-  feedMoreMenuDangerText: { color: "#fca5a5", fontSize: 15, fontWeight: "800", ...overlayTextShadow },
-  fullscreenMessageBar: { position: "absolute", left: 0, right: 0, bottom: 0, minHeight: NAV_BAR_HEIGHT, flexDirection: "row", alignItems: "flex-start", gap: 10, paddingTop: 13, paddingHorizontal: 14, borderTopWidth: 1, borderTopColor: border, backgroundColor: "rgba(10,10,10,0.96)" },
-  fullscreenMessageInput: { flex: 1, minHeight: NAV_BAR_ITEM_HEIGHT, borderRadius: 18, borderWidth: 1, borderColor: border, color: "#fff", backgroundColor: panel, paddingHorizontal: 16, fontSize: 16 },
-  fullscreenMessageSendFrame: { minHeight: NAV_BAR_ITEM_HEIGHT },
-  fullscreenMessageSendButton: { minHeight: NAV_BAR_ITEM_HEIGHT, width: "100%", borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" },
-  fullscreenMessageSendText: { color: "#000", fontWeight: "800" },
-  fullscreenMessageSentTick: { fontSize: 19, lineHeight: 22 },
-  videoMenu: { position: "absolute", right: 52, top: 4, minWidth: 132, borderRadius: 16, borderWidth: 1, borderColor: border, backgroundColor: "rgba(9,9,11,0.94)", overflow: "hidden" },
-  videoMenuItem: { paddingHorizontal: 16, paddingVertical: 13 },
-  videoMenuDangerText: { color: "#fca5a5", fontSize: 15, fontWeight: "800", textTransform: "lowercase", ...overlayTextShadow },
-  jamJarIcon: { width: 31, height: 36, alignItems: "center", justifyContent: "flex-end" },
-  jamJarLid: { width: 23, height: 7, borderRadius: 3, borderWidth: 2, borderColor: "#fff", marginBottom: -1, overflow: "hidden" },
-  jamJarLidSent: { height: 4, borderWidth: 0, backgroundColor: "#fff", borderRadius: 2, marginBottom: 2 },
-  jamJarLidSolidFill: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "#fff",
-    borderRadius: 2,
-    margin: -1,
-  },
-  jamJarBody: { width: 27, height: 27, borderRadius: 9, borderWidth: 2, borderColor: "#fff", overflow: "hidden", justifyContent: "flex-end" },
-  jamJarAnimatedFill: {
-    width: 23,
-    alignSelf: "center",
-    backgroundColor: "#fff",
-    position: "relative",
-  },
-  jamJarSmoothWaveSurface: {
-    position: "absolute",
-    top: -4,
-    left: 0,
-    width: 23,
-    height: 5,
-  },
-  jamJarBumpWaveWrap: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  jamJarLeak: {
-    position: "absolute",
-    top: 3,
-    alignSelf: "center",
-    zIndex: 2,
-  },
-  jamJarLeakDrop: {
-    position: "absolute",
-    left: -3,
-    top: -6,
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#fff",
-  },
-  jamJarLeakDropSide: {
-    left: -2.25,
-    top: -4.5,
-    width: 4.5,
-    height: 4.5,
-    borderRadius: 2.25,
-  },
-  jamJarFill: { height: 7, backgroundColor: "#fff" },
-  jamJarFillSent: { height: 21 },
-  jamJarEmptyJam: { position: "absolute", left: 0, bottom: 0 },
-  jamJarWaveLeft: { position: "absolute", left: -3, top: -4, width: 15, height: 8, borderRadius: 8, backgroundColor: "#fff" },
-  jamJarWaveRight: { position: "absolute", right: -4, top: -2, width: 18, height: 7, borderRadius: 9, backgroundColor: "#fff" },
-  videoPlaceholder: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18, backgroundColor: "#09090b" },
-  emptyFeed: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18, padding: 28 },
-  endOfFeed: {
-    width: "100%",
-    alignSelf: "stretch",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 18,
-    paddingHorizontal: 28,
-    backgroundColor: dark,
-  },
-  endOfFeedFullscreen: {
-    flex: 1,
-    width: "100%",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 18,
-    paddingHorizontal: 28,
-    paddingBottom: NAV_BAR_HEIGHT,
-    backgroundColor: dark,
-  },
-  emptyText: { color: "#e4e4e7", fontSize: 22, lineHeight: 31, textAlign: "center", fontWeight: "700" },
-  modalShade: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.62)" },
-  topSheet: { position: "absolute", left: 0, right: 0, top: 0, gap: 10, padding: 22, paddingBottom: 26, borderBottomLeftRadius: 28, borderBottomRightRadius: 28, borderWidth: 1, borderColor: border, backgroundColor: "#09090b" },
-  topSheetScroll: { flexShrink: 1 },
-  topSheetScrollContent: { gap: 10, paddingBottom: 2 },
-  filterSheetSection: { gap: 10 },
-  bottomModalWrap: { flex: 1, justifyContent: "flex-end" },
-  bottomCard: { gap: 14, padding: 18, paddingBottom: 28, borderTopLeftRadius: 28, borderTopRightRadius: 28, borderWidth: 1, borderColor: border, backgroundColor: "#09090b" },
-  jamPromptOverlay: { flex: 1, justifyContent: "center", padding: 22 },
-  jamPromptHost: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 60,
-  },
-  chatOverlayHost: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 70,
-  },
-  chatOverlaySwipeSurface: {
-    flex: 1,
-    backgroundColor: "transparent",
-  },
-  jamPromptShade: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.42)" },
-  jamPromptCard: { gap: 14, padding: 18, borderRadius: 28, borderWidth: 1, borderColor: border, backgroundColor: "rgba(9,9,11,0.92)" },
-  confirmModalOverlay: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingHorizontal: 48,
-  },
-  confirmModalCard: {
-    width: "100%",
-    maxWidth: 260,
-    gap: 8,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: border,
-    backgroundColor: "#09090b",
-  },
-  confirmModalTitle: { color: "#fff", fontSize: 16, fontWeight: "800", textAlign: "center" },
-  confirmModalMessage: { color: "#a1a1aa", fontSize: 13, lineHeight: 18, textAlign: "center" },
-  confirmModalActions: { flexDirection: "row", gap: 6, marginTop: 2 },
-  confirmModalOption: { flex: 1, minHeight: 36, alignItems: "center", justifyContent: "center" },
-  cardTitle: { color: "#fff", fontSize: 20, fontWeight: "800" },
-  reportReasonList: { gap: 8 },
-  reportReasonButton: { minHeight: 48, justifyContent: "center", borderRadius: 16, borderWidth: 1, borderColor: border, backgroundColor: panel, paddingHorizontal: 16 },
-  reportReasonText: { color: "#fff", fontSize: 15, fontWeight: "800" },
-  smallPill: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 13, borderWidth: 1, borderColor: border, backgroundColor: panel },
-  smallPillText: { color: "#e4e4e7", fontWeight: "700" },
-  iconCircle: { width: 42, height: 42, borderRadius: 21, borderWidth: 1, borderColor: border, backgroundColor: panelSoft, alignItems: "center", justifyContent: "center" },
-  chatBackButton: { width: 36, height: 42, alignItems: "center", justifyContent: "center" },
-  previewBox: { overflow: "hidden", borderRadius: 28, borderWidth: 1, borderColor: border, backgroundColor: "#000" },
-  previewVideo: { width: "100%", aspectRatio: 9 / 16, backgroundColor: "#000" },
-  createThumbnailLoader: { alignSelf: "center", marginVertical: 8, alignItems: "center", gap: 8 },
-  createThumbnailFilmstripWrap: {
-    height: CREATE_THUMBNAIL_FILMSTRIP_FRAME_HEIGHT + 6,
-    borderRadius: 16,
-    overflow: "hidden",
-    backgroundColor: "#000",
-    borderWidth: 1,
-    borderColor: border,
-    justifyContent: "center",
-  },
-  createThumbnailFilmstripRow: { flexDirection: "row" },
-  createThumbnailFilmstripGestureArea: { flex: 1, justifyContent: "center" },
-  createThumbnailFilmstripSelector: {
-    position: "absolute",
-    top: 0,
-    borderWidth: 3,
-    borderColor: "#fff",
-    borderRadius: 8,
-    zIndex: 2,
-  },
-  createLookingForToggle: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    marginBottom: 12,
-    alignSelf: "stretch",
-  },
-  createLookingForToggleCopy: {
-    flex: 1,
-    gap: 2,
-    justifyContent: "center",
-  },
-  createLookingForToggleTitle: {
-    color: "#fff",
-    fontSize: 15,
-    fontWeight: "700",
-    textTransform: "lowercase",
-  },
-  createLookingForToggleHelper: {
-    color: "#a1a1aa",
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  createDetailsComposerRow: { flexDirection: "row", gap: 12, alignItems: "stretch" },
-  createDetailsCaptionInput: {
-    flex: 1,
-    minHeight: CREATE_DETAILS_PREVIEW_HEIGHT,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: border,
-    color: "#fff",
-    backgroundColor: panel,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 16,
-  },
-  createDetailsVideoTap: {
-    width: CREATE_DETAILS_PREVIEW_WIDTH,
-    height: CREATE_DETAILS_PREVIEW_HEIGHT,
-    borderRadius: 16,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: border,
-    backgroundColor: "#000",
-  },
-  createDetailsVideoTapImage: { width: "100%", height: "100%" },
-  createDetailsVideoTapFallback: {
-    flex: 1,
-    backgroundColor: "#18181b",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  createDetailsVideoTapBadge: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingVertical: 6,
-    backgroundColor: "rgba(0,0,0,0.55)",
-  },
-  createDetailsVideoTapBadgeText: {
-    color: "#fff",
-    fontSize: 11,
-    fontWeight: "800",
-    textAlign: "center",
-    textTransform: "lowercase",
-  },
-  createPostPreviewBackdrop: { flex: 1, backgroundColor: "#000" },
-  createPostPreviewFrame: { flex: 1, backgroundColor: "#000", overflow: "hidden" },
-  createPostPreviewVideo: { ...StyleSheet.absoluteFillObject },
-  createPostPreviewFilter: { ...StyleSheet.absoluteFillObject },
-  createPostPreviewTextOverlay: {
-    position: "absolute",
-    zIndex: 4,
-    maxWidth: "85%",
-  },
-  createPostPreviewTextOverlayText: {
-    color: "rgba(255,255,255,0.88)",
-    fontSize: TEXT_OVERLAY_BASE_FONT_SIZE,
-    lineHeight: Math.round(TEXT_OVERLAY_BASE_FONT_SIZE * 1.25),
-    textAlign: "center",
-    textShadowColor: "rgba(0,0,0,0.55)",
-    textShadowRadius: 1.5,
-    textShadowOffset: { width: 0, height: 1 },
-  },
-  createPostPreviewShade: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.18)",
-  },
-  createPostPreviewMeta: { position: "absolute", left: 18, right: 76, bottom: 122, gap: 11 },
-  createPostPreviewNavBarPlaceholder: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: "#000",
-    zIndex: 6,
-  },
-  createPostPreviewClose: {
-    position: "absolute",
-    right: 16,
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: border,
-    backgroundColor: "rgba(9,9,11,0.72)",
-    zIndex: 10,
-  },
-  createEditNextBand: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 5,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  createEditKeyboardDismissBand: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 0,
-  },
-  createEditKeyboardDismissLayer: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 1,
-  },
-  createEditNextPill: {
-    minHeight: 48,
-    minWidth: 120,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 999,
-    backgroundColor: "#fff",
-    paddingHorizontal: 28,
-    zIndex: 1,
-  },
-  createEditNextText: { color: "#000", fontSize: 16, fontWeight: "900", textTransform: "lowercase" },
-  createEditToolPanel: {
-    position: "absolute",
-    left: 18,
-    right: 72,
-    zIndex: 6,
-    gap: 10,
-    paddingHorizontal: 4,
-  },
-  createTrimToolPanel: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    zIndex: 6,
-    alignItems: "center",
-    paddingHorizontal: 18,
-  },
-  createTrimToolPanelContent: {
-    width: "100%",
-    maxWidth: 360,
-    gap: 8,
-  },
-  createEditUploadProgressWrap: {
-    position: "absolute",
-    left: 18,
-    right: 18,
-    zIndex: 6,
-  },
-  createFilterOverlay: { ...StyleSheet.absoluteFillObject },
-  createTextOverlayDraggable: {
-    position: "absolute",
-    zIndex: 2,
-    maxWidth: "85%",
-    overflow: "visible",
-  },
-  createTextOverlayPinchCapture: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 2,
-  },
-  createTextOverlaySnapGuideVertical: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    left: "50%",
-    width: 1,
-    marginLeft: -0.5,
-    backgroundColor: "#FFE566",
-    zIndex: 1,
-  },
-  createTextOverlaySnapGuideHorizontal: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: "50%",
-    height: 1,
-    marginTop: -0.5,
-    backgroundColor: "#FFE566",
-    zIndex: 1,
-  },
-  createTextOverlayPreviewText: {
-    color: "#fff",
-    fontSize: TEXT_OVERLAY_BASE_FONT_SIZE,
-    lineHeight: Math.round(TEXT_OVERLAY_BASE_FONT_SIZE * 1.25),
-    textAlign: "center",
-    flexShrink: 1,
-    textShadowColor: "rgba(0,0,0,0.55)",
-    textShadowRadius: 1.5,
-    textShadowOffset: { width: 0, height: 1 },
-  },
-  createTextOverlayInput: {
-    color: "#fff",
-    fontSize: TEXT_OVERLAY_BASE_FONT_SIZE,
-    lineHeight: Math.round(TEXT_OVERLAY_BASE_FONT_SIZE * 1.25),
-    textAlign: "center",
-    textShadowColor: "rgba(0,0,0,0.55)",
-    textShadowRadius: 1.5,
-    textShadowOffset: { width: 0, height: 1 },
-    padding: 0,
-    margin: 0,
-    minWidth: 18,
-    backgroundColor: "transparent",
-    includeFontPadding: false,
-  },
-  createTextOverlayActionMenu: {
-    position: "absolute",
-    zIndex: 8,
-    alignItems: "center",
-  },
-  createTextOverlayActionCaret: {
-    position: "absolute",
-    top: 0,
-    width: 0,
-    height: 0,
-    borderLeftWidth: 8,
-    borderRightWidth: 8,
-    borderBottomWidth: 9,
-    borderLeftColor: "transparent",
-    borderRightColor: "transparent",
-    borderBottomColor: "rgba(20,20,22,0.96)",
-    zIndex: 2,
-  },
-  createTextOverlayActionBubble: {
-    marginTop: 8,
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(20,20,22,0.96)",
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    overflow: "hidden",
-  },
-  createTextOverlayActionButton: {
-    paddingHorizontal: 18,
-    paddingVertical: 11,
-  },
-  createTextOverlayActionButtonText: {
-    color: "#fff",
-    fontSize: 14,
-    fontWeight: "800",
-    textTransform: "lowercase",
-  },
-  createTextOverlayActionEffectButton: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    minWidth: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  createTextOverlayActionEffectGlyph: {
-    color: "#fff",
-    fontSize: 18,
-    lineHeight: 24,
-    fontWeight: "900",
-    textAlign: "center",
-    includeFontPadding: false,
-  },
-  createTextOverlayActionDeleteText: {
-    color: "#f87171",
-    fontSize: 14,
-    fontWeight: "800",
-    textTransform: "lowercase",
-  },
-  createTextOverlayActionDivider: {
-    width: 1,
-    alignSelf: "stretch",
-    backgroundColor: "rgba(255,255,255,0.12)",
-  },
-  createTrimHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
-  createTrimDuration: { color: "#fff", fontSize: 14, fontWeight: "900" },
-  createTrimFilmstripOuter: {
-    position: "relative",
-    height: CREATE_TRIM_FILMSTRIP_HEIGHT,
-    justifyContent: "center",
-  },
-  createTrimFilmstrip: {
-    height: CREATE_TRIM_FILMSTRIP_HEIGHT,
-    borderRadius: CREATE_TRIM_FILMSTRIP_RADIUS,
-    overflow: "hidden",
-    backgroundColor: "#18181b",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    position: "relative",
-  },
-  createTrimFilmstripLoading: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  createTrimFilmstripFrames: {
-    flex: 1,
-    flexDirection: "row",
-  },
-  createTrimFilmstripFrame: {
-    flex: 1,
-    height: "100%",
-  },
-  createTrimFilmstripFramePlaceholder: {
-    flex: 1,
-    height: "100%",
-    backgroundColor: "#27272a",
-  },
-  createTrimFilmstripDim: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    backgroundColor: "rgba(0,0,0,0.55)",
-  },
-  createTrimFilmstripSelection: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    borderWidth: 2,
-    borderColor: "#fff",
-  },
-  createTrimProgressTrack: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    zIndex: 3,
-    overflow: "hidden",
-  },
-  createTrimProgressFill: {
-    position: "absolute",
-    left: 0,
-    top: 0,
-    bottom: 0,
-    backgroundColor: "rgba(255,255,255,0.18)",
-  },
-  createTrimPlayhead: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    left: 0,
-    width: 2,
-    backgroundColor: "#fff",
-    shadowColor: "#000",
-    shadowOpacity: 0.45,
-    shadowRadius: 2,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  createTrimHandleTab: {
-    position: "absolute",
-    top: 0,
-    width: CREATE_TRIM_HANDLE_WIDTH,
-    height: CREATE_TRIM_FILMSTRIP_HEIGHT,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#fafafa",
-    borderColor: "#fff",
-    borderTopWidth: 2,
-    borderBottomWidth: 2,
-    zIndex: 4,
-  },
-  createTrimHandleTabStart: {
-    borderRightWidth: 2,
-  },
-  createTrimHandleTabStartFlush: {
-    borderLeftWidth: 2,
-    borderTopLeftRadius: CREATE_TRIM_FILMSTRIP_RADIUS - 1,
-    borderBottomLeftRadius: CREATE_TRIM_FILMSTRIP_RADIUS - 1,
-  },
-  createTrimHandleTabEnd: {
-    borderLeftWidth: 2,
-  },
-  createTrimHandleTabEndFlush: {
-    borderRightWidth: 2,
-    borderTopRightRadius: CREATE_TRIM_FILMSTRIP_RADIUS - 1,
-    borderBottomRightRadius: CREATE_TRIM_FILMSTRIP_RADIUS - 1,
-  },
-  createFilterList: { gap: 10, paddingVertical: 2 },
-  createFilterListCompact: { gap: 10, paddingVertical: 0, paddingHorizontal: 16 },
-  createFilterOption: { width: 70, gap: 6, alignItems: "center" },
-  createFilterOptionCompact: { width: 44 },
-  createFilterThumbRing: {
-    width: 64,
-    height: 78,
-    borderRadius: 16,
-    borderWidth: CREATE_FILTER_THUMB_BORDER_WIDTH,
-    borderColor: "transparent",
-  },
-  createFilterThumbRingCompact: { width: 44, height: 44, borderRadius: 22 },
-  createFilterThumbRingActive: { borderColor: "#fff" },
-  createFilterThumbInner: {
-    flex: 1,
-    borderRadius: 16 - CREATE_FILTER_THUMB_BORDER_WIDTH,
-    overflow: "hidden",
-    backgroundColor: "#18181b",
-  },
-  createFilterThumbInnerCompact: { borderRadius: 22 - CREATE_FILTER_THUMB_BORDER_WIDTH },
-  createTextFontThumbInner: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(24,24,27,0.92)",
-    borderRadius: 22 - CREATE_FILTER_THUMB_BORDER_WIDTH,
-    overflow: "hidden",
-  },
-  createTextFontThumbSample: {
-    color: "#fff",
-    fontSize: 20,
-    fontWeight: "800",
-  },
-  createFilterThumbImage: { width: "100%", height: "100%" },
-  createFilterThumbFallback: { flex: 1, backgroundColor: "#27272a" },
-  createFilterLabel: { color: "#d4d4d8", fontSize: 12, fontWeight: "800" },
-  createFilterNameFlashRoot: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  createFilterNameFlashText: {
-    color: "#fff",
-    fontSize: 34,
-    fontWeight: "700",
-    fontFamily: Platform.select({
-      ios: "Book Antiqua",
-      android: "serif",
-      default: "Book Antiqua",
-    }),
-    letterSpacing: 0.2,
-    textAlign: "center",
-    textShadowColor: "rgba(0,0,0,0.55)",
-    textShadowRadius: 10,
-    textShadowOffset: { width: 0, height: 2 },
-  },
-  createFilterLabelCompact: { fontSize: 10 },
-  createEditUploadProgress: { height: 5, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.12)", overflow: "hidden" },
-  createCameraRoot: { flex: 1, backgroundColor: "#000" },
-  createCameraViewport: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: 0,
-    overflow: "hidden",
-    backgroundColor: "#000",
-    borderBottomLeftRadius: FEED_VIDEO_BOTTOM_CORNER_RADIUS,
-    borderBottomRightRadius: FEED_VIDEO_BOTTOM_CORNER_RADIUS,
-  },
-  createCameraPermission: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", gap: 16, padding: 28, backgroundColor: "#000" },
-  createCameraTapLayer: { ...StyleSheet.absoluteFillObject, zIndex: 1 },
-  createCameraFocusReticle: {
-    position: "absolute",
-    width: CREATE_CAMERA_FOCUS_RETICLE_SIZE,
-    height: CREATE_CAMERA_FOCUS_RETICLE_SIZE,
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 4,
-  },
-  createCameraFocusReticleCircle: {
-    width: CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.78,
-    height: CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.78,
-    borderRadius: (CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.78) / 2,
-    borderWidth: 1.5,
-    borderColor: "rgba(255,255,255,0.95)",
-    backgroundColor: "transparent",
-  },
-  createCameraExposureRail: {
-    position: "absolute",
-    right: -14,
-    top: CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.06,
-    bottom: CREATE_CAMERA_FOCUS_RETICLE_SIZE * 0.06,
-    width: 16,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  createCameraExposureLine: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    width: StyleSheet.hairlineWidth * 2,
-    backgroundColor: "rgba(255,255,255,0.95)",
-  },
-  createCameraExposureDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: "#fff",
-  },
-  createCameraFilterPreview: { zIndex: 2 },
-  createCameraScreenFlash: { zIndex: 3 },
-  createCameraCountdownOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 6,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(0,0,0,0.28)",
-  },
-  createCameraCountdownText: { color: "#fff", fontSize: 88, fontWeight: "900", letterSpacing: -2 },
-  createCameraTopBar: { position: "absolute", left: 18, right: 18, zIndex: 5, flexDirection: "row", alignItems: "center", justifyContent: "flex-start" },
-  createCameraSideRail: { position: "absolute", right: 18, zIndex: 5, gap: 16, alignItems: "center" },
-  createCameraControlButton: {
-    width: CREATE_CAMERA_CONTROL_BUTTON_SIZE,
-    height: CREATE_CAMERA_CONTROL_BUTTON_SIZE,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  createCameraSideRailText: { color: "#fff", fontSize: 16, fontWeight: "900" },
-  createCameraCloseIconText: { color: "#fff", fontSize: 32, fontWeight: "500", lineHeight: 34 },
-  createCameraFilterSheetWrap: { ...StyleSheet.absoluteFillObject, zIndex: 8 },
-  createCameraFilterDismiss: { ...StyleSheet.absoluteFillObject },
-  createCameraFilterBand: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    overflow: "hidden",
-  },
-  createTextFontPickerBand: {
-    justifyContent: "center",
-  },
-  createTextFontPickerScroll: {
-    flexGrow: 0,
-  },
-  createTextFontPickerList: {
-    gap: 10,
-    paddingHorizontal: 16,
-    alignItems: "center",
-  },
-  createCameraFilterFloat: { position: "absolute", left: 0, right: 0, alignItems: "center" },
-  createCameraBottomBar: {
-    position: "absolute",
-    left: 28,
-    right: 28,
-    zIndex: 5,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  createLibraryButton: {
-    position: "absolute",
-    left: 18,
-    zIndex: 5,
-    width: 58,
-    height: 58,
-    borderRadius: 16,
-    overflow: "hidden",
-    borderWidth: 2,
-    borderColor: "#fff",
-    backgroundColor: "rgba(24,24,27,0.72)",
-  },
-  createLibraryThumbnail: { width: "100%", height: "100%" },
-  createRecordButton: {
-    width: CREATE_CAMERA_RECORD_BUTTON_SIZE,
-    height: CREATE_CAMERA_RECORD_BUTTON_SIZE,
-    borderRadius: CREATE_CAMERA_RECORD_BUTTON_SIZE / 2,
-    borderWidth: CREATE_CAMERA_RECORD_BUTTON_BORDER_WIDTH,
-    borderColor: "#fff",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.08)",
-  },
-  createCameraHint: { position: "absolute", left: 0, right: 0, zIndex: 5, textAlign: "center", color: "#fff", fontSize: 13, fontWeight: "800", textTransform: "lowercase" },
-  progressTrack: { height: 8, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.12)", overflow: "hidden" },
-  progressFill: { height: "100%", backgroundColor: "#fff" },
-  segmented: { alignSelf: "flex-start", flexDirection: "row", borderRadius: 14, padding: 4, borderWidth: 1, borderColor: border, backgroundColor: panel },
-  segment: { paddingHorizontal: 18, paddingVertical: 9, borderRadius: 10 },
-  segmentActive: { backgroundColor: "#fff" },
-  segmentText: { color: "#d4d4d8", fontSize: 15, textTransform: "lowercase" },
-  segmentTextActive: { color: "#000", fontWeight: "800" },
-  list: { gap: 10 },
-  listCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 13, borderRadius: 22, borderWidth: 1, borderColor: border, backgroundColor: panelSoft },
-  listTitle: { color: "#fff", fontSize: 20, fontWeight: "800" },
-  conversationRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: border },
-  subdued: { opacity: 0.7 },
-  alignEnd: { alignItems: "flex-end", gap: 5 },
-  unreadDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: "#ec4899" },
-  emptyCard: { padding: 18, borderRadius: 22, borderWidth: 1, borderColor: border, backgroundColor: panelSoft },
-  profileSavedEmptyText: {
-    color: muted,
-    fontSize: 15,
-    lineHeight: 22,
-    textAlign: "center",
-    paddingVertical: 36,
-    paddingHorizontal: 16,
-  },
-  inboxEmptyText: {
-    color: muted,
-    fontSize: 15,
-    lineHeight: 22,
-    textAlign: "center",
-    paddingVertical: 28,
-    paddingHorizontal: 12,
-  },
-  chatHeader: { flexDirection: "row", alignItems: "center", gap: 12, padding: 16, borderBottomWidth: 1, borderBottomColor: border },
-  chatProfileTarget: { flexDirection: "row", alignItems: "center", gap: 12, flex: 1 },
-  chatContent: { flexGrow: 1, gap: 10, padding: 16 },
-  chatLoadOlderButton: {
-    alignSelf: "center",
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.08)",
-    marginBottom: 6,
-  },
-  chatLoadOlderText: { color: "#d4d4d8", fontSize: 13, fontWeight: "600" },
-  messageWrap: { maxWidth: "82%", gap: 6 },
-  messageWrapIn: { alignSelf: "flex-start" },
-  messageWrapOut: { alignSelf: "flex-end" },
-  bubble: { maxWidth: "100%", paddingHorizontal: 16, paddingVertical: 12, borderRadius: 22 },
-  bubbleIn: { alignSelf: "flex-start", backgroundColor: panel },
-  bubbleOut: { alignSelf: "flex-end", backgroundColor: "#fff" },
-  bubbleWithVideo: { marginTop: -22, zIndex: 1 },
-  messageVideoThumbnailWrap: { width: 190, height: 260, borderRadius: 20, overflow: "hidden", backgroundColor: "#000" },
-  messageVideoThumbnailIn: { alignSelf: "flex-start" },
-  messageVideoThumbnailOut: { alignSelf: "flex-end" },
-  messageVideoThumbnail: { width: "100%", height: "100%" },
-  bubbleText: { color: "#fff", fontSize: 15, lineHeight: 22 },
-  bubbleTextOut: { color: "#000" },
-  messageContextMenu: { alignSelf: "flex-end", minWidth: 128, borderRadius: 16, borderWidth: 1, borderColor: border, backgroundColor: "rgba(9,9,11,0.96)", overflow: "hidden" },
-  messageContextItem: { paddingHorizontal: 16, paddingVertical: 12 },
-  messageContextText: { color: "#fff", fontSize: 15, fontWeight: "700", textTransform: "lowercase" },
-  messageContextDangerText: { color: "#fca5a5", fontSize: 15, fontWeight: "800", textTransform: "lowercase" },
-  editMessageBox: { gap: 8, minWidth: 180 },
-  editMessageInput: { color: "#000", fontSize: 15, lineHeight: 22, padding: 0, minHeight: 28 },
-  editMessageActions: { flexDirection: "row", justifyContent: "flex-end", gap: 14 },
-  editMessageCancel: { color: "#52525b", fontSize: 13, fontWeight: "700", textTransform: "lowercase" },
-  editMessageSave: { color: "#000", fontSize: 13, fontWeight: "900", textTransform: "lowercase" },
-  composer: { flexDirection: "row", gap: 10, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 0, borderTopWidth: 1, borderTopColor: border },
-  chatComposerDock: {
-    backgroundColor: dark,
-  },
-  sendButton: { paddingHorizontal: 16, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" },
-  sendButtonText: { color: "#000", fontWeight: "800" },
-  profileTabSliderViewport: {
-    overflow: "hidden",
-    marginHorizontal: -SCREEN_CONTENT_PADDING,
-  },
-  profileTabSliderTrack: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-  },
-  profileTabPane: {
-    width: viewportWidth,
-    paddingHorizontal: SCREEN_CONTENT_PADDING,
-  },
-  profileLibraryTabs: {
-    alignSelf: "center",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-    marginTop: 2,
-    marginBottom: 4,
-  },
-  profileLibraryTabText: {
-    color: "#71717a",
-    fontSize: 16,
-    fontWeight: "500",
-    textTransform: "lowercase",
-  },
-  profileLibraryTabTextActive: {
-    color: "#fff",
-    fontWeight: "800",
-  },
-  profileLibraryTabDivider: {
-    width: StyleSheet.hairlineWidth,
-    height: 14,
-    backgroundColor: "#52525b",
-  },
-  grid: { width: viewportWidth, flexDirection: "row", flexWrap: "wrap", gap: PROFILE_GRID_GAP, marginTop: 8, marginHorizontal: -SCREEN_CONTENT_PADDING },
-  gridItem: {
-    width: PROFILE_GRID_ITEM_WIDTH,
-    aspectRatio: 9 / 16,
-    overflow: "hidden",
-    alignItems: "flex-end",
-    justifyContent: "flex-end",
-    padding: 8,
-    backgroundColor: "#000",
-  },
-  gridPinPreview: {
-    position: "absolute",
-    overflow: "hidden",
-    borderRadius: 16,
-    backgroundColor: "#000",
-    shadowColor: "#000",
-    shadowOpacity: 0.45,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 12,
-  },
-  gridPinPreviewDim: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "#000",
-    borderRadius: 16,
-  },
-  profileGridLoadingBlur: {
-    width: viewportWidth,
-    marginTop: 8,
-    marginHorizontal: -SCREEN_CONTENT_PADDING,
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-    backgroundColor: "rgba(39,39,42,0.72)",
-  },
-  gridThumbPlaceholder: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "#3f3f46",
-  },
-  gridPinnedBadge: {
-    position: "absolute",
-    top: 6,
-    left: 6,
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 2,
-  },
-  gridPinMenuRoot: {
-    flex: 1,
-  },
-  gridPinMenuCardWrap: {
-    position: "absolute",
-    width: 148,
-    height: 52,
-  },
-  gridPinMenuCard: {
-    width: 148,
-    height: 52,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: border,
-    backgroundColor: "rgba(9,9,11,0.96)",
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 8,
-  },
-  gridPendingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    backgroundColor: "rgba(0,0,0,0.28)",
-  },
-  gridPendingStatusText: {
-    color: "rgba(255,255,255,0.9)",
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.2,
-  },
-  gridPendingErrorOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    backgroundColor: "rgba(0,0,0,0.55)",
-    paddingHorizontal: 10,
-  },
-  gridPendingErrorText: { color: "rgba(255,255,255,0.82)", fontSize: 11, textAlign: "center" },
-  gridPendingRetryButton: {
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.35)",
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-  },
-  gridPendingRetryText: { color: "#fff", fontSize: 11, fontWeight: "700", textTransform: "lowercase" },
-  uploadProgressRingWrap: { alignItems: "center", justifyContent: "center" },
-  profilePostedToast: {
-    position: "absolute",
-    alignSelf: "center",
-    left: "28%",
-    right: "28%",
-    zIndex: 40,
-    backgroundColor: "rgba(255,255,255,0.96)",
-    borderRadius: 999,
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    alignItems: "center",
-  },
-  profilePostedToastText: { color: "#000", fontWeight: "700", fontSize: 14 },
-  feedReplayToast: {
-    position: "absolute",
-    alignSelf: "center",
-    left: 28,
-    right: 28,
-    zIndex: 40,
-    backgroundColor: "rgba(255,255,255,0.72)",
-    borderRadius: 999,
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    alignItems: "center",
-  },
-  feedReplayToastText: {
-    color: "rgba(0,0,0,0.88)",
-    fontWeight: "700",
-    fontSize: 13,
-    textAlign: "center",
-    textTransform: "lowercase",
-  },
-  gridCaption: { color: "#fff", fontSize: 11, lineHeight: 15, fontWeight: "600", ...overlayTextShadow },
-  lockedOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(10,10,10,0.28)",
-  },
-  lockedText: { color: "#fff", textAlign: "center", fontSize: 11, fontWeight: "800", ...overlayTextShadow },
-  profileLockGate: {
-    position: "absolute",
-    left: -SCREEN_CONTENT_PADDING,
-    right: -SCREEN_CONTENT_PADDING,
-    bottom: 0,
-    zIndex: 4,
-  },
-  profileLockGateMessage: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    alignItems: "center",
-    paddingHorizontal: 28,
-  },
-  profileLockGateText: {
-    color: "#fff",
-    textAlign: "center",
-    fontSize: 15,
-    lineHeight: 21,
-    fontWeight: "800",
-    ...overlayTextShadow,
-  },
-  settingsOverlay: { flex: 1, alignItems: "flex-end" },
-  settingsBackdrop: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.42)" },
-  settingsDrawer: { position: "absolute", right: 0, top: 0, bottom: 0, borderLeftWidth: 1, borderLeftColor: border, backgroundColor: "#09090b", shadowColor: "#000", shadowOpacity: 0.35, shadowRadius: 22, shadowOffset: { width: -8, height: 0 }, elevation: 16 },
-  settingsPanel: { flex: 1, backgroundColor: "#09090b", paddingHorizontal: 20 },
-  settingsPanelScroll: { flex: 1 },
-  settingsPanelScrollContent: { gap: 8, paddingBottom: 12 },
-  settingsButton: { paddingVertical: 14, paddingHorizontal: 10, borderRadius: 16 },
-  settingsToggleGroup: { marginTop: 10, gap: 0 },
-  settingsLocationGroup: { gap: 0 },
-  // Match settingsRow vertical rhythm (14) so "near me radius" sits evenly
-  // under "share live location" like light mode ↔ share live location.
-  settingsNearMeSection: { gap: 8, paddingTop: 14, paddingBottom: 14, paddingHorizontal: 10 },
-  settingsLiveLocationCopy: {
-    color: muted,
-    fontSize: 13,
-    lineHeight: 18,
-    paddingHorizontal: 10,
-    paddingBottom: 8,
-  },
-  settingsRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 14, paddingHorizontal: 10 },
-  settingsRowLabel: { flex: 1, paddingRight: 12 },
-  settingsText: { color: "#e4e4e7", fontSize: 15, textTransform: "lowercase" },
-  settingsSwitch: { alignSelf: "center" },
-  notificationSettingsSection: { gap: 4, paddingTop: 8 },
-  notificationSettingsCopy: { color: muted, fontSize: 14, lineHeight: 22, paddingHorizontal: 10, paddingBottom: 4 },
-  notificationCategoryPicker: { gap: 10, paddingTop: 4 },
-  notificationCategoryPickerHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 2,
-  },
-  notificationConfirmButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#fff",
-  },
-  notificationConfirmText: { color: "#000", fontSize: 18, lineHeight: 20, fontWeight: "800" },
-  legalTabRow: { flexDirection: "row", marginTop: 8, borderBottomWidth: 1, borderBottomColor: border },
-  legalTab: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 14,
-    borderBottomWidth: 2,
-    borderBottomColor: "transparent",
-    marginBottom: -1,
-  },
-  legalTabActive: { borderBottomColor: "#fff" },
-  legalTabText: { color: "#71717a", fontSize: 14, fontWeight: "600", textAlign: "center", textTransform: "lowercase" },
-  legalTabTextActive: { color: "#fff", fontWeight: "800" },
-  legalCopy: { color: "#a1a1aa", fontSize: 15, lineHeight: 24, paddingTop: 18 },
-  logoutButton: {
-    marginTop: 8,
-    paddingVertical: 15,
-    paddingHorizontal: 10,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: border,
-  },
-  logoutText: { color: "#fca5a5", fontSize: 15, textTransform: "lowercase" },
-  nav: { position: "absolute", left: 0, right: 0, bottom: 0, minHeight: NAV_BAR_HEIGHT, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12, paddingHorizontal: 14, borderTopWidth: 1, borderTopColor: border, backgroundColor: "rgba(10,10,10,0.96)" },
-  navItem: { height: 58, minWidth: 58, borderRadius: 18, borderWidth: 1, borderColor: border, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8, paddingHorizontal: 14 },
-  navItemActive: { minWidth: 132, borderColor: "#93c5fd", backgroundColor: panel },
-  navIcon: { color: "#fff", fontSize: 23 },
-  navLabel: { color: "#fff", fontSize: 16, textTransform: "lowercase" },
-  gridNavIcon: { width: 23, height: 23, flexDirection: "row", flexWrap: "wrap", gap: 4 },
-  gridNavCell: { width: 9, height: 9, borderWidth: 1.8, borderColor: "#fff", borderRadius: 3 },
-  mailIconWrap: { width: 33, height: 30, alignItems: "center", justifyContent: "center" },
-  mailIcon: { width: 26, height: 19, borderColor: "#fff" },
-  // Outer = black ring; inner = red fill — avoids red bleeding past the outline.
-  mailBadge: {
-    position: "absolute",
-    right: -3,
-    top: -4,
-    minWidth: 17,
-    height: 17,
-    padding: 1.5,
-    borderRadius: 999,
-    backgroundColor: "rgba(10,10,10,0.96)",
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-  },
-  mailBadgeInner: {
-    minWidth: 14,
-    minHeight: 14,
-    paddingHorizontal: 3,
-    borderRadius: 999,
-    backgroundColor: "#ef4444",
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-  },
-  mailBadgeText: { color: "#fff", fontSize: 10, lineHeight: 12, fontWeight: "900" },
-  createNav: { width: 66, height: 66, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" },
-  createNavText: { color: "#000", fontSize: 38, lineHeight: 41, fontWeight: "600" },
-  toast: { position: "absolute", top: 76, left: 18, right: 18, zIndex: 30, alignItems: "center" },
-  toastText: { color: "#fecaca", paddingHorizontal: 14, paddingVertical: 9, borderRadius: 999, overflow: "hidden", backgroundColor: "rgba(127,29,29,0.82)" },
-  inboxNotificationWrap: {
-    position: "absolute",
-    left: 18,
-    right: 18,
-    zIndex: 80,
-    alignItems: "center",
-  },
-  inboxNotificationCard: {
-    maxWidth: "100%",
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.14)",
-    backgroundColor: "rgba(9,9,11,0.94)",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  inboxNotificationText: {
-    color: "#fff",
-    fontSize: 14,
-    lineHeight: 20,
-    fontWeight: "600",
-    textAlign: "center",
-  },
-};
-
-const mediaOverlayStyleNames = new Set([
-  "topSheet",
-  "topSheetScroll",
-  "topSheetScrollContent",
-  "filterSheetSection",
-  "filterLookingForRow",
-  "filterLookingForControl",
-  "filterLookingForLabel",
-  "filterLookingForIconSlot",
-  "sectionLabelLight",
-  "locationFilterList",
-  "locationCountryGroup",
-  "locationOptionRow",
-  "locationCircle",
-  "locationCityCircle",
-  "locationCircleSelected",
-  "locationCirclePartial",
-  "locationCirclePartialFill",
-  "locationCountryText",
-  "locationCityList",
-  "locationCityRow",
-  "locationCityText",
-  "feedRoot",
-  "feedBootOverlay",
-  "feedName",
-  "feedRole",
-  "feedRecentFilterText",
-  "feedRecentFilterTextActive",
-  "caption",
-  "feedCaptionText",
-  "feedLookingForIcon",
-  "tag",
-  "badge",
-  "actionText",
-  "jamJarLid",
-  "jamJarLidSent",
-  "jamJarLidSolidFill",
-  "jamJarBody",
-  "jamJarAnimatedFill",
-  "jamJarSmoothWaveSurface",
-  "jamJarBumpWaveWrap",
-  "jamJarLeak",
-  "jamJarLeakDrop",
-  "jamJarLeakDropSide",
-  "jamJarFill",
-  "jamJarFillSent",
-  "jamJarEmptyJam",
-  "jamJarWaveLeft",
-  "jamJarWaveRight",
-  "gridCaption",
-  "lockedText",
-  "videoPlaceholder",
-  "feedTopShade",
-  "feedBottomShade",
-  "fullscreenVideoRoot",
-  "fullscreenAdjacentVideo",
-  "fullscreenMessageRoot",
-  "fullscreenMessageBar",
-  "fullscreenMessageInput",
-  "fullscreenMessageSendFrame",
-  "fullscreenMessageSendButton",
-  "fullscreenMessageSendText",
-  "fullscreenMessageSentTick",
-  "feedItem",
-  "feedVideoLayer",
-  "createEditNextBand",
-  "createEditNextPill",
-  "createEditNextText",
-  "createEditToolPanel",
-  "createTrimToolPanel",
-  "createTrimToolPanelContent",
-  "createEditUploadProgressWrap",
-  "createFilterOverlay",
-  "createTextOverlayDraggable",
-  "createTextOverlaySnapGuideVertical",
-  "createTextOverlaySnapGuideHorizontal",
-  "createTextOverlayPreviewText",
-  "createTextOverlayInput",
-  "createTextOverlayActionMenu",
-  "createTextOverlayActionCaret",
-  "createTextOverlayActionBubble",
-  "createTextOverlayActionButton",
-  "createTextOverlayActionButtonText",
-  "createTextOverlayActionEffectButton",
-  "createTextOverlayActionEffectGlyph",
-  "createTextOverlayActionDeleteText",
-  "createTextOverlayActionDivider",
-  "createTrimHeader",
-  "createTrimDuration",
-  "createTrimFilmstripOuter",
-  "createTrimFilmstrip",
-  "createTrimFilmstripLoading",
-  "createTrimFilmstripFrames",
-  "createTrimFilmstripFrame",
-  "createTrimFilmstripFramePlaceholder",
-  "createTrimFilmstripDim",
-  "createTrimFilmstripSelection",
-  "createTrimHandleTab",
-  "createTrimHandleTabStart",
-  "createTrimHandleTabStartFlush",
-  "createTrimHandleTabEnd",
-  "createTrimHandleTabEndFlush",
-  "createFilterList",
-  "createFilterOption",
-  "createFilterThumbRing",
-  "createFilterThumbRingActive",
-  "createFilterThumbInner",
-  "createFilterThumbInnerCompact",
-  "createTextFontThumbInner",
-  "createTextFontThumbSample",
-  "createFilterThumbImage",
-  "createFilterThumbFallback",
-  "createFilterLabel",
-  "createFilterNameFlashRoot",
-  "createFilterNameFlashText",
-  "createEditUploadProgress",
-  "createCameraRoot",
-  "createCameraViewport",
-  "createCameraPermission",
-  "createCameraTapLayer",
-  "createCameraFocusReticle",
-  "createCameraFocusReticleCircle",
-  "createCameraExposureRail",
-  "createCameraExposureLine",
-  "createCameraExposureDot",
-  "createCameraFilterPreview",
-  "createCameraScreenFlash",
-  "createCameraCountdownOverlay",
-  "createCameraCountdownText",
-  "createCameraTopBar",
-  "createCameraSideRail",
-  "createCameraControlButton",
-  "createCameraSideRailText",
-  "createCameraCloseIconText",
-  "createCameraFilterSheetWrap",
-  "createCameraFilterDismiss",
-  "createCameraFilterBand",
-  "createCameraFilterFloat",
-  "createCameraBottomBar",
-  "createLibraryButton",
-  "createLibraryThumbnail",
-  "createRecordButton",
-  "createCameraHint",
-]);
-
-function createLightStyles<T extends Record<string, unknown>>(source: T): T {
-  return Object.fromEntries(
-    Object.entries(source).map(([key, value]) => [
-      key,
-      mediaOverlayStyleNames.has(key) ? value : transformStyleForLightMode(value),
-    ]),
-  ) as T;
-}
-
-function transformStyleForLightMode(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(transformStyleForLightMode);
-  }
-
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, nestedValue]) => [
-        key,
-        key.toLowerCase().includes("shadow")
-          ? nestedValue
-          : transformStyleForLightMode(nestedValue),
-      ]),
-    );
-  }
-
-  if (typeof value !== "string") return value;
-  return getLightModeColor(value);
-}
-
-function getLightModeColor(value: string) {
-  const colorMap: Record<string, string> = {
-    [dark]: "#f7f7f8",
-    [panel]: "#ffffff",
-    [panelSoft]: "#f2f2f4",
-    [border]: "rgba(0,0,0,0.12)",
-    [muted]: "#52525b",
-    "#fff": "#0a0a0a",
-    "#000": "#ffffff",
-    "#09090b": "#ffffff",
-    "#27272a": "#e4e4e7",
-    "#e4e4e7": "#27272a",
-    "#d4d4d8": "#3f3f46",
-    "#8b8b95": "#52525b",
-    "#71717a": "#71717a",
-    "#52525b": "#71717a",
-    "rgba(10,10,10,0.96)": "rgba(255,255,255,0.96)",
-    "rgba(9,9,11,0.98)": "rgba(255,255,255,0.98)",
-    "rgba(9,9,11,0.96)": "rgba(255,255,255,0.96)",
-    "rgba(9,9,11,0.94)": "rgba(255,255,255,0.96)",
-    "rgba(9,9,11,0.92)": "rgba(255,255,255,0.94)",
-    "rgba(24,24,27,0.82)": "rgba(255,255,255,0.88)",
-    "rgba(255,255,255,0.14)": "rgba(0,0,0,0.14)",
-    "rgba(255,255,255,0.20)": "rgba(0,0,0,0.10)",
-    "rgba(255,255,255,0.28)": "rgba(0,0,0,0.28)",
-    "rgba(255,255,255,0.10)": "rgba(0,0,0,0.08)",
-    "rgba(0,0,0,0.42)": "rgba(0,0,0,0.18)",
-    "rgba(0,0,0,0.62)": "rgba(0,0,0,0.20)",
-    "rgba(0,0,0,0.58)": "rgba(255,255,255,0.58)",
-  };
-  return colorMap[value] ?? value;
-}
-
-type AppStyle = ViewStyle | TextStyle | ImageStyle;
-type AppNamedStyles = Record<string, AppStyle>;
-type AppStyleSet = Record<keyof typeof baseStyles, StyleProp<AppStyle>>;
-
-const darkStyles = StyleSheet.create(baseStyles as unknown as AppNamedStyles) as AppStyleSet;
-const lightStyles = StyleSheet.create(createLightStyles(baseStyles) as unknown as AppNamedStyles) as AppStyleSet;
-const styles = new Proxy(darkStyles, {
-  get(target, property: keyof typeof darkStyles) {
-    return activeThemeMode === "light" ? lightStyles[property] : target[property];
-  },
-}) as AppStyleSet;

@@ -287,7 +287,9 @@ type JamRequestRow = {
 type SavedVideoRow = {
   user_id: string;
   video_id: string;
-  created_at: string;
+  /** Prefer saved_at; created_at kept for pre-migration fallbacks. */
+  saved_at?: string;
+  created_at?: string;
 };
 
 type HiddenCreatorRow = {
@@ -981,32 +983,52 @@ export async function unpinProfileVideo(userId: string, videoId: string): Promis
   if (error) throw error;
 }
 
+async function fetchOrderedSavedVideoRows(currentUserId: string): Promise<SavedVideoRow[]> {
+  const modern = await supabase
+    .from("saved_videos")
+    .select("user_id, video_id, saved_at")
+    .eq("user_id", currentUserId)
+    .order("saved_at", { ascending: false });
+
+  if (!modern.error) {
+    return (modern.data ?? []) as SavedVideoRow[];
+  }
+
+  if (!isMissingSchemaError(modern.error)) throw modern.error;
+
+  // Pre-047: column was created_at.
+  const legacy = await supabase
+    .from("saved_videos")
+    .select("user_id, video_id, created_at")
+    .eq("user_id", currentUserId)
+    .order("created_at", { ascending: false });
+
+  if (legacy.error) {
+    if (isMissingSchemaError(legacy.error)) return fetchLocalSavedVideoRows(currentUserId);
+    throw legacy.error;
+  }
+
+  return ((legacy.data ?? []) as SavedVideoRow[]).map((row) => ({
+    ...row,
+    saved_at: row.saved_at ?? row.created_at,
+  }));
+}
+
 export async function fetchSavedVideos(currentUserId: string) {
-  const [{ data: savedVideos, error: savedVideosError }, jams, moderation] = await Promise.all([
-    supabase
-      .from("saved_videos")
-      .select("video_id, created_at")
-      .eq("user_id", currentUserId)
-      .order("created_at", { ascending: false }),
+  const [savedVideos, jams, moderation] = await Promise.all([
+    fetchOrderedSavedVideoRows(currentUserId),
     fetchRelevantJams(currentUserId),
     fetchFeedModeration(currentUserId),
   ]);
 
-  if (savedVideosError) {
-    if (isMissingSchemaError(savedVideosError)) {
-      return fetchLocalSavedVideos(currentUserId);
-    }
-    throw savedVideosError;
-  }
-
-  const savedIds = (savedVideos ?? []).map((savedVideo) => savedVideo.video_id);
+  const savedIds = savedVideos.map((savedVideo) => savedVideo.video_id);
   if (savedIds.length === 0) return [];
 
+  // Don't order videos by their own created_at — that would destroy save order.
   const videoResult = await supabase
     .from("videos")
     .select(VIDEO_COLUMNS_WITH_TAGS)
-    .in("id", savedIds)
-    .order("created_at", { ascending: false });
+    .in("id", savedIds);
   let videos = videoResult.data as VideoRow[] | null;
   let videosError = videoResult.error;
 
@@ -1014,8 +1036,7 @@ export async function fetchSavedVideos(currentUserId: string) {
     const pinRetry = await supabase
       .from("videos")
       .select(VIDEO_COLUMNS_WITH_TAGS_NO_PIN)
-      .in("id", savedIds)
-      .order("created_at", { ascending: false });
+      .in("id", savedIds);
     if (!pinRetry.error || !isMissingSchemaError(pinRetry.error)) {
       videos = pinRetry.data as VideoRow[] | null;
       videosError = pinRetry.error;
@@ -1023,8 +1044,7 @@ export async function fetchSavedVideos(currentUserId: string) {
       const tagsRetry = await supabase
         .from("videos")
         .select(VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION)
-        .in("id", savedIds)
-        .order("created_at", { ascending: false });
+        .in("id", savedIds);
       if (!tagsRetry.error || !isMissingSchemaError(tagsRetry.error)) {
         videos = tagsRetry.data as VideoRow[] | null;
         videosError = tagsRetry.error;
@@ -1032,14 +1052,12 @@ export async function fetchSavedVideos(currentUserId: string) {
         const categoryRetry = await supabase
           .from("videos")
           .select(VIDEO_COLUMNS_WITH_CATEGORIES)
-          .in("id", savedIds)
-          .order("created_at", { ascending: false });
+          .in("id", savedIds);
         if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
           const legacyRetry = await supabase
             .from("videos")
             .select(VIDEO_COLUMNS_LEGACY)
-            .in("id", savedIds)
-            .order("created_at", { ascending: false });
+            .in("id", savedIds);
           videos = legacyRetry.data as VideoRow[] | null;
           videosError = legacyRetry.error;
         } else {
@@ -1052,12 +1070,18 @@ export async function fetchSavedVideos(currentUserId: string) {
 
   if (videosError) throw videosError;
 
-  const videoRows = ((videos ?? []) as VideoRow[]).filter(
-    (video) =>
-      !moderation.hiddenUserIds.has(video.user_id) &&
-      !moderation.blockedUserIds.has(video.user_id),
+  const videoById = new Map(
+    ((videos ?? []) as VideoRow[])
+      .filter(
+        (video) =>
+          !moderation.hiddenUserIds.has(video.user_id) &&
+          !moderation.blockedUserIds.has(video.user_id),
+      )
+      .map((video) => [video.id, video]),
   );
-  const profiles = await fetchProfilesByIds(videoRows.map((video) => video.user_id));
+  const profiles = await fetchProfilesByIds(
+    [...videoById.values()].map((video) => video.user_id),
+  );
   const jammedByMe = new Set(
     jams.filter((jam) => jam.requester_id === currentUserId).map((jam) => jam.recipient_id),
   );
@@ -1066,27 +1090,46 @@ export async function fetchSavedVideos(currentUserId: string) {
   );
   const connected = getConnectedJamUserIds(jams, currentUserId);
 
-  return videoRows.map((video) =>
-    toSavedProfileVideo(video, profiles.get(video.user_id), true, jammedByMe, jammedMe, connected),
-  );
+  // Keep saved_at desc order from the saved_videos query.
+  return savedIds
+    .map((videoId) => videoById.get(videoId))
+    .filter((video): video is VideoRow => Boolean(video))
+    .map((video) =>
+      toSavedProfileVideo(video, profiles.get(video.user_id), true, jammedByMe, jammedMe, connected),
+    );
 }
 
 export async function saveVideo(currentUserId: string, videoId: string) {
-  const { error } = await supabase.from("saved_videos").upsert(
+  const savedAt = new Date().toISOString();
+  const modern = await supabase.from("saved_videos").upsert(
     {
       user_id: currentUserId,
       video_id: videoId,
+      saved_at: savedAt,
     },
     { onConflict: "user_id,video_id" },
   );
 
-  if (error && error.code !== "23505") {
-    if (isMissingSchemaError(error)) {
+  if (!modern.error || modern.error.code === "23505") return;
+
+  if (isMissingSchemaError(modern.error)) {
+    // Pre-047 schema uses created_at; insert-only path (no bump on re-save).
+    const legacy = await supabase.from("saved_videos").upsert(
+      {
+        user_id: currentUserId,
+        video_id: videoId,
+      },
+      { onConflict: "user_id,video_id" },
+    );
+    if (!legacy.error || legacy.error.code === "23505") return;
+    if (isMissingSchemaError(legacy.error)) {
       await addLocalSavedVideoId(currentUserId, videoId);
       return;
     }
-    throw error;
+    throw legacy.error;
   }
+
+  throw modern.error;
 }
 
 export async function unsaveVideo(currentUserId: string, videoId: string) {
@@ -1892,16 +1935,7 @@ export async function deleteVideo(videoId: string) {
 }
 
 async function fetchSavedVideoRows(currentUserId: string) {
-  const { data, error } = await supabase
-    .from("saved_videos")
-    .select("user_id, video_id, created_at")
-    .eq("user_id", currentUserId);
-
-  if (error) {
-    if (isMissingSchemaError(error)) return fetchLocalSavedVideoRows(currentUserId);
-    throw error;
-  }
-  return (data ?? []) as SavedVideoRow[];
+  return fetchOrderedSavedVideoRows(currentUserId);
 }
 
 async function fetchRelevantJams(currentUserId: string) {
@@ -2143,35 +2177,40 @@ async function upsertPrivateProfileGeocode(
 }
 
 async function fetchLocalSavedVideoRows(currentUserId: string) {
-  const savedVideoIds = await getLocalSavedVideoIds(currentUserId);
-  if (savedVideoIds.size === 0) return [];
+  const savedIds = [...(await getLocalSavedVideoIds(currentUserId))];
+  if (savedIds.length === 0) return [];
 
   const { data: videos, error } = await supabase
     .from("videos")
     .select("id, user_id, created_at")
-    .in("id", [...savedVideoIds]);
+    .in("id", savedIds);
 
   if (error) throw error;
 
-  return ((videos ?? []) as Array<Pick<VideoRow, "id" | "user_id" | "created_at">>).map(
-    (video) => ({
+  const videoById = new Map(
+    ((videos ?? []) as Array<Pick<VideoRow, "id" | "user_id" | "created_at">>).map((video) => [
+      video.id,
+      video,
+    ]),
+  );
+
+  return savedIds
+    .map((videoId) => videoById.get(videoId))
+    .filter((video): video is Pick<VideoRow, "id" | "user_id" | "created_at"> => Boolean(video))
+    .map((video) => ({
       user_id: currentUserId,
       video_id: video.id,
+      saved_at: video.created_at,
       created_at: video.created_at,
-    }),
-  );
+    }));
 }
 
 async function fetchLocalSavedVideos(currentUserId: string) {
-  const savedVideoIds = await getLocalSavedVideoIds(currentUserId);
-  if (savedVideoIds.size === 0) return [];
+  const savedIds = [...(await getLocalSavedVideoIds(currentUserId))];
+  if (savedIds.length === 0) return [];
 
   const [videoResult, jams, moderation] = await Promise.all([
-    supabase
-      .from("videos")
-      .select(VIDEO_COLUMNS_WITH_TAGS)
-      .in("id", [...savedVideoIds])
-      .order("created_at", { ascending: false }),
+    supabase.from("videos").select(VIDEO_COLUMNS_WITH_TAGS).in("id", savedIds),
     fetchRelevantJams(currentUserId),
     fetchFeedModeration(currentUserId),
   ]);
@@ -2182,8 +2221,7 @@ async function fetchLocalSavedVideos(currentUserId: string) {
     const tagsRetry = await supabase
       .from("videos")
       .select(VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION)
-      .in("id", [...savedVideoIds])
-      .order("created_at", { ascending: false });
+      .in("id", savedIds);
     if (!tagsRetry.error || !isMissingSchemaError(tagsRetry.error)) {
       videos = tagsRetry.data as VideoRow[] | null;
       videosError = tagsRetry.error;
@@ -2191,14 +2229,12 @@ async function fetchLocalSavedVideos(currentUserId: string) {
       const categoryRetry = await supabase
         .from("videos")
         .select(VIDEO_COLUMNS_WITH_CATEGORIES)
-        .in("id", [...savedVideoIds])
-        .order("created_at", { ascending: false });
+        .in("id", savedIds);
       if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
         const legacyRetry = await supabase
           .from("videos")
           .select(VIDEO_COLUMNS_LEGACY)
-          .in("id", [...savedVideoIds])
-          .order("created_at", { ascending: false });
+          .in("id", savedIds);
         videos = legacyRetry.data as VideoRow[] | null;
         videosError = legacyRetry.error;
       } else {
@@ -2210,12 +2246,18 @@ async function fetchLocalSavedVideos(currentUserId: string) {
 
   if (videosError) throw videosError;
 
-  const videoRows = ((videos ?? []) as VideoRow[]).filter(
-    (video) =>
-      !moderation.hiddenUserIds.has(video.user_id) &&
-      !moderation.blockedUserIds.has(video.user_id),
+  const videoById = new Map(
+    ((videos ?? []) as VideoRow[])
+      .filter(
+        (video) =>
+          !moderation.hiddenUserIds.has(video.user_id) &&
+          !moderation.blockedUserIds.has(video.user_id),
+      )
+      .map((video) => [video.id, video]),
   );
-  const profiles = await fetchProfilesByIds(videoRows.map((video) => video.user_id));
+  const profiles = await fetchProfilesByIds(
+    [...videoById.values()].map((video) => video.user_id),
+  );
   const jammedByMe = new Set(
     jams.filter((jam) => jam.requester_id === currentUserId).map((jam) => jam.recipient_id),
   );
@@ -2224,9 +2266,13 @@ async function fetchLocalSavedVideos(currentUserId: string) {
   );
   const connected = getConnectedJamUserIds(jams, currentUserId);
 
-  return videoRows.map((video) =>
-    toSavedProfileVideo(video, profiles.get(video.user_id), true, jammedByMe, jammedMe, connected),
-  );
+  // Local list is newest-saved-first (see addLocalSavedVideoId).
+  return savedIds
+    .map((videoId) => videoById.get(videoId))
+    .filter((video): video is VideoRow => Boolean(video))
+    .map((video) =>
+      toSavedProfileVideo(video, profiles.get(video.user_id), true, jammedByMe, jammedMe, connected),
+    );
 }
 
 async function removeSavedVideosByCreator(currentUserId: string, creatorUserId: string) {
@@ -2277,8 +2323,8 @@ async function getLocalSavedVideoIds(currentUserId: string) {
 
 async function addLocalSavedVideoId(currentUserId: string, videoId: string) {
   const current = await getLocalSavedVideoIds(currentUserId);
-  current.add(videoId);
-  await AsyncStorage.setItem(getLocalSavedKey(currentUserId), JSON.stringify([...current]));
+  const next = [videoId, ...[...current].filter((id) => id !== videoId)];
+  await AsyncStorage.setItem(getLocalSavedKey(currentUserId), JSON.stringify(next));
 }
 
 async function removeLocalSavedVideoId(currentUserId: string, videoId: string) {

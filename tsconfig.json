@@ -33,6 +33,8 @@
     "App.tsx",
     "index.js",
     "lib/**/*.ts",
+    "types/**/*.ts",
+    "theme/**/*.ts",
     "app/api/**/*.ts",
     "next.config.ts",
     "**/*.mts"

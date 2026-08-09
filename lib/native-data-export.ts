@@ -77,13 +77,22 @@ export async function buildAccountDataExport(): Promise<AccountDataExport> {
         .eq("user_id", userId)
         .order("created_at", { ascending: false }),
     ),
-    rowsOrEmpty(
-      supabase
+    (async () => {
+      const modern = await supabase
         .from("saved_videos")
         .select("*")
         .eq("user_id", userId)
-        .order("created_at", { ascending: false }),
-    ),
+        .order("saved_at", { ascending: false });
+      if (!modern.error) return modern.data ?? [];
+      if (!isMissingSchemaError(modern.error)) throw modern.error;
+      return rowsOrEmpty(
+        supabase
+          .from("saved_videos")
+          .select("*")
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false }),
+      );
+    })(),
     rowsOrEmpty(
       supabase
         .from("jam_requests")

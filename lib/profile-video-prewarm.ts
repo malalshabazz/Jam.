@@ -1,4 +1,5 @@
 import { createVideoPlayer, type VideoPlayer, type VideoSource } from "expo-video";
+import { Platform } from "react-native";
 
 import { extractCloudflareStreamId } from "@/lib/native-cloudflare";
 
@@ -33,9 +34,9 @@ function configurePrewarmPlayer(player: VideoPlayer) {
   player.audioMixingMode = "mixWithOthers";
   player.bufferOptions = {
     waitsToMinimizeStalling: false,
-    preferredForwardBufferDuration: 2,
-    minBufferForPlayback: 0.25,
-    prioritizeTimeOverSizeThreshold: true,
+    preferredForwardBufferDuration: Platform.OS === "android" ? 15 : 0,
+    minBufferForPlayback: 1,
+    prioritizeTimeOverSizeThreshold: false,
   };
 }
 
