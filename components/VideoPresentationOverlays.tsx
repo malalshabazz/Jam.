@@ -7,6 +7,7 @@ import {
   type TextStyle,
   type ViewStyle,
 } from "react-native";
+import { getFilterOverlayStyle, type VideoFilterId } from "@/lib/video-filters";
 import {
   getVideoTextEffectChrome,
   getVideoTextOutlineRadius,
@@ -15,11 +16,9 @@ import {
   normalizeVideoFilter,
   normalizeVideoTextEffectId,
   normalizeVideoTextOverlays,
-  type VideoFilterId,
   type VideoTextEffectId,
   type VideoTextOverlay,
 } from "@/lib/video-presentation";
-import { getFilterOverlayStyle } from "@/lib/video-filters";
 
 const FEED_TEXT_MAX_WIDTH = Math.round(Dimensions.get("window").width * 0.86);
 

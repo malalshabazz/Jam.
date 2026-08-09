@@ -48,27 +48,18 @@ import {
 import { getUnreadInboxCount, getUnreadLocalInboxCount } from "@/lib/inbox-unread";
 import { confirmNearMeLiveLocationSharing } from "@/lib/near-me-notice";
 import type { InboxTab, PreloadedUserProfile, SavedVideoController } from "@/types/app";
-import {
-  EMPTY_FILTER_GENRES,
-  TAB_SCREEN_MIN_TOP_PADDING,
-  TAB_SCREEN_TOP_PADDING,
-} from "@/theme/tokens";
+import { EMPTY_FILTER_GENRES } from "@/theme/tokens";
 import { getActivityIndicatorColor, styles } from "@/theme/styles";
 import { Avatar } from "@/components/ui/avatar";
 import { GoldBadge, ProBadge } from "@/components/ui/badges";
+import { JamSystemAvatar } from "@/components/ui/jam-system-avatar";
 import { ChatModal } from "@/components/chat/chat-modal";
 import { DmModal } from "@/components/chat/dm-modal";
 import { UserProfileModal } from "@/components/profile/user-profile-modal";
 import { NearMeIcon } from "@/components/icons/near-me-icon";
 import { FeedFilterIcon } from "@/components/icons/feed-filter-icon";
 import { FilterSheet } from "@/components/discover/filter-sheet";
-
-function getTabScreenContentStyle(topInset: number) {
-  return [
-    styles.screenContent,
-    { paddingTop: Math.max(topInset + TAB_SCREEN_TOP_PADDING, TAB_SCREEN_MIN_TOP_PADDING) },
-  ];
-}
+import { getTabScreenContentStyle } from "@/components/ui/tab-screen-content-style";
 
 function SegmentedTabs({
   tabs,
@@ -127,7 +118,7 @@ function ConversationRow({
 function SystemRow({ message, onPress }: { message: InboxMessage; onPress: () => void }) {
   return (
     <Pressable style={styles.conversationRow} onPress={onPress}>
-      <Avatar label={message.sender_avatar ?? "jam."} size={52} />
+      <JamSystemAvatar size={52} />
       <View style={styles.flex}>
         <View style={styles.row}>
           <Text style={styles.listTitle}>{message.sender_name}</Text>

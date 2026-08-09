@@ -1,12 +1,8 @@
 import { Platform, type TextStyle } from "react-native";
 import {
-  getFilterOverlayStyle,
   normalizeVideoFilter as normalizeVideoFilterFromCatalog,
   type VideoFilterId,
 } from "@/lib/video-filters";
-
-export type { VideoFilterId };
-export { getFilterOverlayStyle };
 
 export const TEXT_OVERLAY_MIN_FONT_SCALE = 0.55;
 export const TEXT_OVERLAY_MAX_FONT_SCALE = 2.4;

@@ -1,5 +1,5 @@
 import { useFocusEffect } from "@react-navigation/native";
-import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import {
   Alert,
   Animated,
@@ -12,7 +12,6 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import Svg, { Path } from "react-native-svg";
 import {
   blockUser,
   deleteMessage,
@@ -68,11 +67,7 @@ import {
 } from "@/lib/profile-video-delete-cache";
 import { deleteOwnProfileVideo } from "@/lib/delete-own-profile-video";
 import type { SavedVideoController, ThemeMode } from "@/types/app";
-import {
-  TAB_SCREEN_MIN_TOP_PADDING,
-  TAB_SCREEN_TOP_PADDING,
-  viewportWidth,
-} from "@/theme/tokens";
+import { viewportWidth } from "@/theme/tokens";
 import { getActivityIndicatorColor, styles } from "@/theme/styles";
 import { AccountSettingsModal } from "@/components/account-settings-modal";
 import { FeedReportModal } from "@/components/discover/feed-report-modal";
@@ -93,41 +88,9 @@ import { Avatar } from "@/components/ui/avatar";
 import { EmptyCard } from "@/components/ui/empty-card";
 import { LoadingScreen } from "@/components/ui/loading-screen";
 import { ProBadge, ProProgressBar } from "@/components/ui/badges";
-
-function MenuIcon({ color = "#fff" }: { color?: string }) {
-  return (
-    <Svg width={22} height={16} viewBox="0 0 22 16" fill="none">
-      <Path d="M1 1h20" stroke={color} strokeWidth={2} strokeLinecap="round" />
-      <Path d="M1 8h20" stroke={color} strokeWidth={2} strokeLinecap="round" />
-      <Path d="M1 15h20" stroke={color} strokeWidth={2} strokeLinecap="round" />
-    </Svg>
-  );
-}
-
-function getTabScreenContentStyle(topInset: number) {
-  return [
-    styles.screenContent,
-    { paddingTop: Math.max(topInset + TAB_SCREEN_TOP_PADDING, TAB_SCREEN_MIN_TOP_PADDING) },
-  ];
-}
-
-function TabLogoHeader({
-  right,
-  center,
-}: {
-  right?: ReactNode;
-  center?: ReactNode;
-}) {
-  return (
-    <View style={styles.headerRow}>
-      <Text style={styles.logoSmall}>jam.</Text>
-      <View style={styles.headerCenterSlot} pointerEvents="box-none">
-        {center}
-      </View>
-      {right ?? <View style={styles.headerSpacer} />}
-    </View>
-  );
-}
+import { MenuIcon } from "@/components/icons/menu-icon";
+import { TabLogoHeader } from "@/components/ui/tab-logo-header";
+import { getTabScreenContentStyle } from "@/components/ui/tab-screen-content-style";
 
 function ProfileLibraryTabs({
   active,

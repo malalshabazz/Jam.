@@ -23,6 +23,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { setActiveInboxChatUserId } from "@/lib/active-inbox-chat";
 import { Avatar } from "@/components/ui/avatar";
+import { JamSystemAvatar } from "@/components/ui/jam-system-avatar";
 import { SwipeBackSurface } from "@/components/ui/swipe-back-surface";
 import { FeedReportModal } from "@/components/discover/feed-report-modal";
 import { ProfileVideoFullscreenModal } from "@/components/profile/profile-video-fullscreen-modal";
@@ -273,7 +274,6 @@ export function ChatModal({
 
   const isSystem = "sender_name" in active;
   const title = isSystem ? active.sender_name : active.creatorName;
-  const systemAvatarLabel = isSystem ? active.sender_avatar ?? "jam." : undefined;
   const avatarUri = isSystem ? null : active.avatarUrl;
   const profileUserId = isSystem ? null : active.userId;
   const messages = isSystem
@@ -507,7 +507,7 @@ export function ChatModal({
                 hitSlop={10}
                 style={styles.chatProfileTarget}
               >
-                <Avatar uri={avatarUri} label={systemAvatarLabel} size={44} />
+                <Avatar uri={avatarUri} size={44} />
                 <View>
                   <Text style={styles.cardTitle}>{title}</Text>
                   <Text style={styles.helper}>{canSend ? "messages unlocked" : "waiting for a jam"}</Text>
@@ -515,7 +515,7 @@ export function ChatModal({
               </Pressable>
             ) : (
               <>
-                <Avatar label={systemAvatarLabel ?? "jam."} size={44} />
+                <JamSystemAvatar size={44} />
                 <View>
                   <Text style={styles.cardTitle}>{title}</Text>
                   <Text style={styles.helper}>system message</Text>

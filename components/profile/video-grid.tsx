@@ -17,7 +17,6 @@ import {
   View,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
-import { EmptyCard } from "@/components/ui/empty-card";
 import {
   PinIcon,
   PIN_MENU_CARD_HEIGHT,
@@ -339,11 +338,7 @@ export function VideoGrid({
   }, [showLockGate, videos.length, updateLockMessagePosition]);
 
   if (videos.length === 0) {
-    // Saved tab: plain centered copy. Videos tab keeps the bordered empty card.
-    if (privateCopy) {
-      return <Text style={styles.profileSavedEmptyText}>no videos yet</Text>;
-    }
-    return <EmptyCard text="no videos yet" />;
+    return <Text style={styles.profileSavedEmptyText}>no videos yet</Text>;
   }
 
   return (

@@ -17,10 +17,10 @@ import {
   isVideoBakeAvailable,
   needsPresentationBake,
 } from "@/lib/bake-video-presentation";
+import type { VideoFilterId } from "@/lib/video-filters";
 import {
   normalizeVideoFilter,
   normalizeVideoTextOverlays,
-  type VideoFilterId,
   type VideoTextOverlay,
 } from "@/lib/video-presentation";
 

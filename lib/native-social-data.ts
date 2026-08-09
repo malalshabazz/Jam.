@@ -6,10 +6,10 @@ import { deleteCloudflareVideo, getCloudflarePlaybackUrl } from "@/lib/native-cl
 import { creatorRoles, musicGenres } from "@/lib/options";
 import { getProBadgeKind, type ProBadgeKind } from "@/lib/pro-entitlements";
 import { supabase } from "@/lib/native-supabase";
+import type { VideoFilterId } from "@/lib/video-filters";
 import {
   normalizeVideoFilter,
   normalizeVideoTextOverlays,
-  type VideoFilterId,
   type VideoTextOverlay,
 } from "@/lib/video-presentation";
 

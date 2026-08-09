@@ -1,12 +1,11 @@
 import { getVideoUploadErrorDetails, logVideoUploadStep } from "@/lib/native-cloudflare";
 import type { NativeVideoAsset } from "@/lib/native-cloudflare";
-import { getFilterOverlayStyle } from "@/lib/video-filters";
+import { getFilterOverlayStyle, type VideoFilterId } from "@/lib/video-filters";
 import {
   getVideoTextEffectChrome,
   getVideoTextOutlineRadius,
   getVideoTextOverlayFontFamily,
   getVideoTextOverlayFontWeight,
-  type VideoFilterId,
   type VideoTextOverlay,
 } from "@/lib/video-presentation";
 import { parseCssColor, writeSolidRgbPngFile } from "@/lib/solid-color-png";

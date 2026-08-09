@@ -1389,7 +1389,7 @@ const baseStyles = {
   createCameraHint: { position: "absolute", left: 0, right: 0, zIndex: 5, textAlign: "center", color: "#fff", fontSize: 13, fontWeight: "800", textTransform: "lowercase" },
   progressTrack: { height: 8, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.12)", overflow: "hidden" },
   progressFill: { height: "100%", backgroundColor: "#fff" },
-  segmented: { alignSelf: "flex-start", flexDirection: "row", borderRadius: 14, padding: 4, borderWidth: 1, borderColor: border, backgroundColor: panel },
+  segmented: { alignSelf: "flex-start", flexDirection: "row", borderRadius: 14, padding: 4, backgroundColor: "#27272a" },
   segment: { paddingHorizontal: 18, paddingVertical: 9, borderRadius: 10 },
   segmentActive: { backgroundColor: "#fff" },
   segmentText: { color: "#d4d4d8", fontSize: 15, textTransform: "lowercase" },

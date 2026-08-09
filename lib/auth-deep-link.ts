@@ -1,9 +1,7 @@
 import * as Linking from "expo-linking";
 import { stringParam } from "@/lib/format";
 import { supabase } from "@/lib/native-supabase";
-import type { AuthDeepLinkResult, AuthMode } from "@/types/app";
-
-export type { AuthDeepLinkResult, AuthMode };
+import type { AuthDeepLinkResult } from "@/types/app";
 
 export async function handleAuthDeepLink(url: string | null): Promise<AuthDeepLinkResult> {
   if (!url) return null;

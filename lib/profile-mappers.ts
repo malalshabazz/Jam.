@@ -18,8 +18,6 @@ import {
   normalizeVideoTag,
 } from "@/lib/feed-filters";
 
-export { getUniqueVideoTags, normalizeVideoTag };
-
 export function getVideoPresentation(video: ProfileVideo | FeedVideo) {
   if ("videoFilter" in video || "textOverlays" in video) {
     return {
