@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { geocodeProfileLocation } from "@/lib/geocode";
+import { publishJamRelationship } from "@/lib/jam-relationship-sync";
 import { deleteCloudflareVideo, getCloudflarePlaybackUrl } from "@/lib/native-cloudflare";
 import { creatorRoles, musicGenres } from "@/lib/options";
 import { getProBadgeKind, type ProBadgeKind } from "@/lib/pro-entitlements";
@@ -1347,6 +1348,12 @@ export async function removeJamConnection(otherUserId: string) {
     }
     throw error;
   }
+
+  publishJamRelationship({
+    userId: otherUserId,
+    jammedByMe: false,
+    jammedMe: false,
+  });
 }
 
 export async function fetchRelationshipState(currentUserId: string, otherUserId: string) {
@@ -1439,7 +1446,33 @@ export async function sendJamRequest(recipientUserId: string, body: string, sour
     }
     throw error;
   }
+
+  await publishFreshJamRelationship(recipientUserId, {
+    jammedByMe: true,
+    jammedMe: false,
+  });
+
   return data as MessageRow;
+}
+
+/** Push DB-backed relationship state to any open feed/profile UI. */
+async function publishFreshJamRelationship(
+  otherUserId: string,
+  fallback: { jammedByMe: boolean; jammedMe: boolean },
+) {
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      publishJamRelationship({ userId: otherUserId, ...fallback });
+      return;
+    }
+    const relationship = await fetchRelationshipState(user.id, otherUserId);
+    publishJamRelationship({ userId: otherUserId, ...relationship });
+  } catch {
+    publishJamRelationship({ userId: otherUserId, ...fallback });
+  }
 }
 
 export async function sendMessage(recipientUserId: string, body: string) {

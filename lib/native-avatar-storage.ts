@@ -39,7 +39,9 @@ export async function uploadNativeProfileAvatar(userId: string, asset: NativeAva
 
 function getPublicAvatarUrl(objectPath: string) {
   const { data } = supabase.storage.from(AVATAR_BUCKET).getPublicUrl(objectPath);
-  return data.publicUrl;
+  // Upserts keep the same storage path; bust caches so clients load the new image.
+  const separator = data.publicUrl.includes("?") ? "&" : "?";
+  return `${data.publicUrl}${separator}v=${Date.now()}`;
 }
 
 async function removePreviousAvatars(userId: string, keepPath: string) {

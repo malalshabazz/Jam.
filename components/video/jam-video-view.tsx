@@ -79,22 +79,48 @@ function configureJamVideoPlayer(
   nextPlayer.volume = options.volume;
   nextPlayer.timeUpdateEventInterval = options.timeUpdateIntervalSec;
   nextPlayer.audioMixingMode = "duckOthers";
-  // Keep the decoder warm while backgrounded (paused). Needs the expo-video
-  // background-playback plugin in standalone/dev builds; still helps in Expo Go
-  // when the host app already allows audio background modes.
-  nextPlayer.staysActiveInBackground = true;
+  // Never keep audio alive after navigate-away / app background. Playback is
+  // resumed explicitly when the surface is active again.
+  nextPlayer.staysActiveInBackground = false;
   nextPlayer.showNowPlayingNotification = false;
   nextPlayer.bufferOptions = {
-    // Start quickly, but keep enough forward buffer that ABR can climb to the
-    // top Cloudflare rung instead of sticking on the lowest one.
-    waitsToMinimizeStalling: false,
+    // Wait until the player is actually ready before decoding A/V — starting
+    // early (especially on adopted prewarm players) caused choppy audio.
+    waitsToMinimizeStalling: true,
     // iOS: 0 = let AVPlayer choose (best for HLS quality switching).
     // Android: ~15s target matches expo-video's quality-friendly default.
     preferredForwardBufferDuration: Platform.OS === "android" ? 15 : 0,
-    minBufferForPlayback: 1,
+    minBufferForPlayback: 2,
     // false = allow larger buffers so ExoPlayer can select higher bitrates.
     prioritizeTimeOverSizeThreshold: false,
   };
+}
+
+/** Only start once the native player reports ready — prevents choppy first audio. */
+function playJamVideoPlayerWhenReady(player: VideoPlayer) {
+  try {
+    if (player.status !== "readyToPlay") return false;
+    player.play();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Fully silence and detach background persistence before release/unmount. */
+function stopJamVideoPlayer(player: VideoPlayer) {
+  try {
+    player.pause();
+  } catch {
+    /* already gone */
+  }
+  try {
+    player.muted = true;
+    player.volume = 0;
+    player.staysActiveInBackground = false;
+  } catch {
+    /* already gone */
+  }
 }
 
 export function JamVideoView({
@@ -178,9 +204,25 @@ export function JamVideoView({
     status: "idle",
   });
   // Adopt a grid-prewarmed player once on mount (pair with key={video.id} at call site).
-  const [prewarmedPlayer] = useState<VideoPlayer | null>(() =>
-    adoptPrewarmed && source ? adoptPrewarmedProfileVideoPlayer(source) : null,
-  );
+  // Configure immediately so unmute/volume are applied before any play attempt.
+  const [prewarmedPlayer] = useState<VideoPlayer | null>(() => {
+    if (!adoptPrewarmed || !source) return null;
+    const adopted = adoptPrewarmedProfileVideoPlayer(source);
+    if (!adopted) return null;
+    try {
+      configureJamVideoPlayer(adopted, {
+        isLooping,
+        isMuted,
+        volume,
+        timeUpdateIntervalSec,
+      });
+      // Prewarm players buffer muted from 0 — ensure we start clean for fullscreen.
+      adopted.currentTime = 0;
+    } catch {
+      /* native configure can fail if the entry was already torn down */
+    }
+    return adopted;
+  });
   const hookPlayer = useVideoPlayer(prewarmedPlayer ? null : videoSource, (nextPlayer) => {
     configureJamVideoPlayer(nextPlayer, {
       isLooping,
@@ -208,16 +250,19 @@ export function JamVideoView({
     }
   }, [isLooping, isMuted, prewarmedPlayer, timeUpdateIntervalSec, volume]);
 
+  // Hard-stop on unmount so audio cannot continue after navigating away.
   useEffect(() => {
-    if (!prewarmedPlayer) return;
     return () => {
-      try {
-        prewarmedPlayer.release();
-      } catch {
-        /* already released */
+      stopJamVideoPlayer(player);
+      if (prewarmedPlayer) {
+        try {
+          prewarmedPlayer.release();
+        } catch {
+          /* already released */
+        }
       }
     };
-  }, [prewarmedPlayer]);
+  }, [player, prewarmedPlayer]);
 
   const hasTrim =
     (trimStartRatio ?? 0) > 0.001 || (trimEndRatio ?? 1) < 0.999;
@@ -397,7 +442,7 @@ export function JamVideoView({
         wasScrubbingRef.current = false;
         player.currentTime = trimStartRatioRef.current * player.duration;
         if (shouldPlay) {
-          player.play();
+          playJamVideoPlayerWhenReady(player);
         }
       }
       return;
@@ -418,7 +463,7 @@ export function JamVideoView({
     const startSec = trimStartRatioRef.current * player.duration;
     player.currentTime = startSec;
     if (shouldPlay) {
-      player.play();
+      playJamVideoPlayerWhenReady(player);
     }
   }, [player, shouldPlay, trimPlaybackResumeSignal]);
 
@@ -517,15 +562,14 @@ export function JamVideoView({
       return;
     }
 
-    // Only auto-resume while the app is foregrounded. Backgrounding clears the
-    // native surface; we cover that with a freeze-frame and resume on AppState.
+    // Only auto-resume once ready and while the app is foregrounded.
     if (
       status === "readyToPlay" &&
       shouldPlayRef.current &&
       appStateRef.current === "active" &&
       scrubToRatioRef.current == null
     ) {
-      player.play();
+      playJamVideoPlayerWhenReady(player);
     }
   });
 
@@ -559,7 +603,7 @@ export function JamVideoView({
       if (hasActiveTrim && endSec > startSec + 0.05 && currentTime >= endSec - 0.08) {
         player.currentTime = startSec;
         if (shouldPlay && appStateRef.current === "active") {
-          player.play();
+          playJamVideoPlayerWhenReady(player);
         }
       }
     }
@@ -581,34 +625,40 @@ export function JamVideoView({
 
   useEffect(() => {
     if (!source || !shouldPlay || appStateRef.current !== "active") {
-      // TikTok-style: pause in place and keep the same surface attached.
+      // Pause in place and fully silence so swipe-away / inactive pages can't leak audio.
       prevShouldPlayRef.current = shouldPlay;
-      if (player.playing) {
-        const freezeAt = Math.max(
-          0,
-          player.currentTime || playbackStatusRef.current.positionMillis / 1000,
-        );
+      const freezeAt = Math.max(
+        0,
+        player.currentTime || playbackStatusRef.current.positionMillis / 1000,
+      );
+      if (player.playing || playbackStatusRef.current.isPlaying) {
         freezePositionRef.current = freezeAt;
-        player.pause();
-        // Cover the surface while the tab is hidden — native layers often go black.
         captureFreezeFrame(freezeAt);
       }
+      stopJamVideoPlayer(player);
       return;
     }
 
     prevShouldPlayRef.current = true;
-    // Keep any freeze cover up until playingChange/first-frame clears it.
-    if (!player.playing) {
-      player.play();
-    } else {
-      // Already playing (common with adopted prewarm players) — no playingChange
-      // will fire, so clear the open cover here.
-      revealAfterFirstFrame();
+    // Hard-stop silences the player; restore prop audio before starting again.
+    try {
+      player.muted = isMuted;
+      player.volume = volume;
+    } catch {
+      /* ignore */
     }
-  }, [captureFreezeFrame, player, revealAfterFirstFrame, shouldPlay, source]);
+    // Keep any freeze cover up until playingChange/first-frame clears it.
+    // Never play() before readyToPlay — that was the choppy-audio path.
+    if (player.playing) {
+      // Already playing (rare with gated start) — no playingChange will fire.
+      revealAfterFirstFrame();
+    } else {
+      playJamVideoPlayerWhenReady(player);
+    }
+  }, [captureFreezeFrame, isMuted, player, revealAfterFirstFrame, shouldPlay, source, volume]);
 
   // If play() doesn't emit playingChange (stale native state after recycle),
-  // retry play and drop the freeze cover so scroll-back can't stay stuck.
+  // retry play once ready and drop the freeze cover so scroll-back can't stay stuck.
   useEffect(() => {
     if (!source || !shouldPlay || appStateRef.current !== "active") return;
     if (!freezeFrameUri) return;
@@ -616,10 +666,8 @@ export function JamVideoView({
     const timeoutIds = retryDelays.map((delayMs) =>
       setTimeout(() => {
         if (!shouldPlayRef.current || appStateRef.current !== "active") return;
-        try {
-          if (!player.playing) player.play();
-        } catch {
-          /* native object already gone */
+        if (!player.playing) {
+          playJamVideoPlayerWhenReady(player);
         }
         // Always clear the cover — a stuck poster looks like a frozen video.
         revealAfterFirstFrame();
@@ -636,11 +684,7 @@ export function JamVideoView({
     const timeoutId = setTimeout(() => {
       if (!shouldPlayRef.current || appStateRef.current !== "active") return;
       if (player.playing) return;
-      try {
-        player.play();
-      } catch {
-        /* ignore */
-      }
+      playJamVideoPlayerWhenReady(player);
     }, 900);
     return () => clearTimeout(timeoutId);
   }, [player, shouldPlay, source]);
@@ -660,14 +704,14 @@ export function JamVideoView({
       if (appStateRef.current !== "active") return;
 
       if (!shouldPlayRef.current) {
-        player.pause();
+        stopJamVideoPlayer(player);
         return;
       }
 
       setFreezeFrameUri(null);
       // Never seek on resume — seeking forces an HLS rebuffer and is why return
       // from background felt slow compared to TikTok.
-      player.play();
+      playJamVideoPlayerWhenReady(player);
     };
 
     const syncPlaybackWithAppState = (nextState: AppStateStatus) => {
@@ -679,8 +723,7 @@ export function JamVideoView({
         if (!source || previousState !== "active") return;
         const freezeAt = Math.max(0, player.currentTime || playbackStatusRef.current.positionMillis / 1000);
         freezePositionRef.current = freezeAt;
-        // Pause only — keep the player instance warm via staysActiveInBackground.
-        player.pause();
+        stopJamVideoPlayer(player);
         captureFreezeFrame(freezeAt);
         return;
       }
@@ -688,6 +731,13 @@ export function JamVideoView({
       if (nextState !== "active") return;
 
       clearResumeRetries();
+      // Restore mute/volume from props before resume — stopJamVideoPlayer silenced the player.
+      try {
+        player.muted = isMuted;
+        player.volume = volume;
+      } catch {
+        /* ignore */
+      }
       resumeForegroundPlayback();
       requestAnimationFrame(resumeForegroundPlayback);
       for (const delayMs of [16, 48, 120]) {
@@ -700,7 +750,7 @@ export function JamVideoView({
       clearResumeRetries();
       subscription.remove();
     };
-  }, [captureFreezeFrame, player, source]);
+  }, [captureFreezeFrame, isMuted, player, source, volume]);
 
   return (
     <View style={[style, { backgroundColor: surfaceColor }]}>
