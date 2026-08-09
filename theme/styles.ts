@@ -1634,6 +1634,28 @@ const baseStyles = {
     textAlign: "center",
     textTransform: "lowercase",
   },
+  proMembershipToastRoot: {
+    flex: 1,
+  },
+  proMembershipToast: {
+    position: "absolute",
+    alignSelf: "center",
+    left: 28,
+    right: 28,
+    zIndex: 40,
+    backgroundColor: "rgba(255,255,255,0.72)",
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    alignItems: "center",
+  },
+  proMembershipToastText: {
+    color: "rgba(0,0,0,0.88)",
+    fontWeight: "700",
+    fontSize: 13,
+    textAlign: "center",
+    textTransform: "lowercase",
+  },
   gridCaption: { color: "#fff", fontSize: 11, lineHeight: 15, fontWeight: "600", ...overlayTextShadow },
   lockedOverlay: {
     ...StyleSheet.absoluteFillObject,
