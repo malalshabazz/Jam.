@@ -131,11 +131,9 @@ function stopJamVideoPlayer(
     /* already gone */
   }
   if (options?.clearSource) {
-    try {
-      player.replace(null);
-    } catch {
+    void player.replaceAsync(null).catch(() => {
       /* already gone / replace unsupported mid-teardown */
-    }
+    });
   }
 }
 
