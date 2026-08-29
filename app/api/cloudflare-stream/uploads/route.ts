@@ -93,6 +93,7 @@ export async function POST(request: NextRequest) {
     return createTusDirectUpload({
       accountId,
       apiToken,
+      supabase,
       userId: user.id,
       maxDurationSeconds,
       allowedMaxDurationSeconds,
@@ -167,6 +168,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const claimError = await recordStreamUploadClaim(supabase, user.id, data.result.uid);
+  if (claimError) return claimError;
+
   return Response.json({
     cloudflareStreamId: data.result.uid,
     uploadUrl: data.result.uploadURL,
@@ -178,6 +182,7 @@ export async function POST(request: NextRequest) {
 async function createTusDirectUpload(input: {
   accountId: string;
   apiToken: string;
+  supabase: AuthedSupabase;
   userId: string;
   maxDurationSeconds: number;
   allowedMaxDurationSeconds: number;
@@ -286,6 +291,22 @@ async function createTusDirectUpload(input: {
       { error: "Could not claim upload ownership." },
       { status: 502 },
     );
+  }
+
+  const claimError = await recordStreamUploadClaim(
+    input.supabase,
+    input.userId,
+    cloudflareStreamId,
+  );
+  if (claimError) {
+    await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${input.accountId}/stream/${cloudflareStreamId}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${input.apiToken}` },
+      },
+    ).catch(() => undefined);
+    return claimError;
   }
 
   return Response.json({
@@ -536,6 +557,49 @@ function createAuthenticatedClient(accessToken: string) {
       },
     },
   );
+}
+
+type AuthedSupabase = ReturnType<typeof createAuthenticatedClient>;
+
+/** Record that this user may publish the given Stream UID via createVideo. */
+async function recordStreamUploadClaim(
+  supabase: AuthedSupabase,
+  userId: string,
+  streamId: string,
+): Promise<Response | null> {
+  const { error } = await supabase.from("stream_upload_claims").insert({
+    cloudflare_stream_id: streamId,
+    user_id: userId,
+  });
+
+  if (!error) return null;
+
+  // Already claimed — allow only if this user owns the claim.
+  if (error.code === "23505") {
+    const { data: existing } = await supabase
+      .from("stream_upload_claims")
+      .select("user_id")
+      .eq("cloudflare_stream_id", streamId)
+      .maybeSingle<{ user_id: string }>();
+    if (existing?.user_id === userId) return null;
+    return Response.json({ error: "Upload already claimed." }, { status: 409 });
+  }
+
+  // Migration not applied yet — don't block uploads; insert policy still old.
+  if (
+    error.code === "42P01" ||
+    /stream_upload_claims|does not exist|schema cache/i.test(error.message ?? "")
+  ) {
+    logUploadApiStep("stream claim skipped", { reason: "missing-table", streamId });
+    return null;
+  }
+
+  logUploadApiStep("stream claim failed", {
+    streamId,
+    code: error.code,
+    message: error.message,
+  });
+  return Response.json({ error: "Could not claim upload." }, { status: 500 });
 }
 
 function logUploadApiStep(step: string, details?: Record<string, unknown>) {

@@ -300,5 +300,16 @@ export async function POST(request: NextRequest) {
     headers: { Authorization: `Bearer ${apiToken}` },
   }).catch(() => undefined);
 
+  // Transfer publish claim from source → clipped asset.
+  await supabase.from("stream_upload_claims").insert({
+    cloudflare_stream_id: clippedId,
+    user_id: user.id,
+  });
+  await supabase
+    .from("stream_upload_claims")
+    .delete()
+    .eq("cloudflare_stream_id", sourceId)
+    .eq("user_id", user.id);
+
   return Response.json({ cloudflareStreamId: clippedId });
 }
