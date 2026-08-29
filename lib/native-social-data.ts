@@ -1039,53 +1039,10 @@ export async function fetchSavedVideos(currentUserId: string) {
   if (savedIds.length === 0) return [];
 
   // Don't order videos by their own created_at — that would destroy save order.
-  const videoResult = await supabase
-    .from("videos")
-    .select(VIDEO_COLUMNS_WITH_TAGS)
-    .in("id", savedIds);
-  let videos = videoResult.data as VideoRow[] | null;
-  let videosError = videoResult.error;
-
-  if (videosError && isMissingSchemaError(videosError)) {
-    const pinRetry = await supabase
-      .from("videos")
-      .select(VIDEO_COLUMNS_WITH_TAGS_NO_PIN)
-      .in("id", savedIds);
-    if (!pinRetry.error || !isMissingSchemaError(pinRetry.error)) {
-      videos = pinRetry.data as VideoRow[] | null;
-      videosError = pinRetry.error;
-    } else {
-      const tagsRetry = await supabase
-        .from("videos")
-        .select(VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION)
-        .in("id", savedIds);
-      if (!tagsRetry.error || !isMissingSchemaError(tagsRetry.error)) {
-        videos = tagsRetry.data as VideoRow[] | null;
-        videosError = tagsRetry.error;
-      } else {
-        const categoryRetry = await supabase
-          .from("videos")
-          .select(VIDEO_COLUMNS_WITH_CATEGORIES)
-          .in("id", savedIds);
-        if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
-          const legacyRetry = await supabase
-            .from("videos")
-            .select(VIDEO_COLUMNS_LEGACY)
-            .in("id", savedIds);
-          videos = legacyRetry.data as VideoRow[] | null;
-          videosError = legacyRetry.error;
-        } else {
-          videos = categoryRetry.data as VideoRow[] | null;
-          videosError = categoryRetry.error;
-        }
-      }
-    }
-  }
-
-  if (videosError) throw videosError;
+  const videos = await fetchVideoRowsByIds(savedIds);
 
   const videoById = new Map(
-    ((videos ?? []) as VideoRow[])
+    videos
       .filter(
         (video) =>
           !moderation.hiddenUserIds.has(video.user_id) &&
@@ -2107,6 +2064,18 @@ async function fetchFeedVideoRowsPage(
 async function fetchVideoRowsByIds(videoIds: string[]): Promise<VideoRow[]> {
   if (videoIds.length === 0) return [];
 
+  // Prefer security-definer RPC so discover/saved hydration still works when
+  // jam-gated RLS only exposes a creator's top-3 profile preview via SELECT.
+  const rpc = await supabase.rpc("fetch_videos_by_ids_for_viewer", {
+    p_ids: videoIds,
+  });
+  if (!rpc.error) {
+    return (rpc.data ?? []) as unknown as VideoRow[];
+  }
+  if (!isMissingSchemaError(rpc.error)) {
+    throw rpc.error;
+  }
+
   const columnSets = [
     VIDEO_COLUMNS_WITH_TAGS,
     VIDEO_COLUMNS_WITH_TAGS_NO_PIN,
@@ -2228,15 +2197,10 @@ async function fetchLocalSavedVideoRows(currentUserId: string) {
   const savedIds = [...(await getLocalSavedVideoIds(currentUserId))];
   if (savedIds.length === 0) return [];
 
-  const { data: videos, error } = await supabase
-    .from("videos")
-    .select("id, user_id, created_at")
-    .in("id", savedIds);
-
-  if (error) throw error;
+  const videos = await fetchVideoRowsByIds(savedIds);
 
   const videoById = new Map(
-    ((videos ?? []) as Array<Pick<VideoRow, "id" | "user_id" | "created_at">>).map((video) => [
+    videos.map((video) => [
       video.id,
       video,
     ]),
@@ -2244,7 +2208,7 @@ async function fetchLocalSavedVideoRows(currentUserId: string) {
 
   return savedIds
     .map((videoId) => videoById.get(videoId))
-    .filter((video): video is Pick<VideoRow, "id" | "user_id" | "created_at"> => Boolean(video))
+    .filter((video): video is VideoRow => Boolean(video))
     .map((video) => ({
       user_id: currentUserId,
       video_id: video.id,
@@ -2257,45 +2221,14 @@ async function fetchLocalSavedVideos(currentUserId: string) {
   const savedIds = [...(await getLocalSavedVideoIds(currentUserId))];
   if (savedIds.length === 0) return [];
 
-  const [videoResult, jams, moderation] = await Promise.all([
-    supabase.from("videos").select(VIDEO_COLUMNS_WITH_TAGS).in("id", savedIds),
+  const [videos, jams, moderation] = await Promise.all([
+    fetchVideoRowsByIds(savedIds),
     fetchRelevantJams(currentUserId),
     fetchFeedModeration(currentUserId),
   ]);
-  let videos = videoResult.data as VideoRow[] | null;
-  let videosError = videoResult.error;
-
-  if (videosError && isMissingSchemaError(videosError)) {
-    const tagsRetry = await supabase
-      .from("videos")
-      .select(VIDEO_COLUMNS_WITH_TAGS_NO_PRESENTATION)
-      .in("id", savedIds);
-    if (!tagsRetry.error || !isMissingSchemaError(tagsRetry.error)) {
-      videos = tagsRetry.data as VideoRow[] | null;
-      videosError = tagsRetry.error;
-    } else {
-      const categoryRetry = await supabase
-        .from("videos")
-        .select(VIDEO_COLUMNS_WITH_CATEGORIES)
-        .in("id", savedIds);
-      if (categoryRetry.error && isMissingSchemaError(categoryRetry.error)) {
-        const legacyRetry = await supabase
-          .from("videos")
-          .select(VIDEO_COLUMNS_LEGACY)
-          .in("id", savedIds);
-        videos = legacyRetry.data as VideoRow[] | null;
-        videosError = legacyRetry.error;
-      } else {
-        videos = categoryRetry.data as VideoRow[] | null;
-        videosError = categoryRetry.error;
-      }
-    }
-  }
-
-  if (videosError) throw videosError;
 
   const videoById = new Map(
-    ((videos ?? []) as VideoRow[])
+    videos
       .filter(
         (video) =>
           !moderation.hiddenUserIds.has(video.user_id) &&
@@ -2326,17 +2259,28 @@ async function fetchLocalSavedVideos(currentUserId: string) {
 async function removeSavedVideosByCreator(currentUserId: string, creatorUserId: string) {
   if (!currentUserId || !creatorUserId || currentUserId === creatorUserId) return;
 
-  const { data: creatorVideos, error: videosError } = await supabase
-    .from("videos")
-    .select("id")
-    .eq("user_id", creatorUserId);
-
-  if (videosError) {
-    if (isMissingSchemaError(videosError)) return;
-    throw videosError;
+  const rpc = await supabase.rpc("fetch_creator_video_ids_for_moderation", {
+    p_creator_id: creatorUserId,
+  });
+  let videoIds: string[] = [];
+  if (!rpc.error) {
+    videoIds = ((rpc.data ?? []) as unknown[])
+      .map((id) => (typeof id === "string" ? id : null))
+      .filter((id): id is string => Boolean(id));
+  } else if (isMissingSchemaError(rpc.error)) {
+    const { data: creatorVideos, error: videosError } = await supabase
+      .from("videos")
+      .select("id")
+      .eq("user_id", creatorUserId);
+    if (videosError) {
+      if (isMissingSchemaError(videosError)) return;
+      throw videosError;
+    }
+    videoIds = ((creatorVideos ?? []) as Array<{ id: string }>).map((video) => video.id);
+  } else {
+    throw rpc.error;
   }
 
-  const videoIds = ((creatorVideos ?? []) as Array<{ id: string }>).map((video) => video.id);
   if (videoIds.length === 0) return;
 
   const { error } = await supabase
