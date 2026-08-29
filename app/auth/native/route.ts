@@ -1,9 +1,20 @@
+import {
+  DEFAULT_AUTH_RETURN_URL,
+  sanitizeAuthReturnUrl,
+} from "@/lib/auth-return-url";
+
 /**
  * HTTPS bridge for Supabase auth emails (password reset, confirm, etc.).
  * Supabase redirects here with tokens in the query/hash; this page forwards
- * into the native app via the `return` deep link (jam:// or exp://).
+ * into the native app via the `return` deep link (jam:// or exp:// only).
  */
-export function GET() {
+export function GET(request: Request) {
+  const incoming = new URL(request.url);
+  const safeReturn = sanitizeAuthReturnUrl(incoming.searchParams.get("return"));
+  // Safe to embed: JSON.stringify escapes quotes/newlines for a JS string literal.
+  const safeReturnLiteral = JSON.stringify(safeReturn);
+  const defaultReturnLiteral = JSON.stringify(DEFAULT_AUTH_RETURN_URL);
+
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -69,8 +80,35 @@ export function GET() {
   </main>
   <script>
     (function () {
+      var ALLOWED = /^(jam|exp|exps|exp\\+[a-z0-9._-]+)$/i;
+      var DEFAULT_RETURN = ${defaultReturnLiteral};
+
+      function sanitizeReturn(raw) {
+        if (raw == null) return DEFAULT_RETURN;
+        var candidate = String(raw).trim();
+        if (!candidate) return DEFAULT_RETURN;
+        try {
+          candidate = decodeURIComponent(candidate);
+        } catch (e) {
+          return DEFAULT_RETURN;
+        }
+        candidate = candidate.trim();
+        if (!candidate || /[\\r\\n\\0]/.test(candidate)) return DEFAULT_RETURN;
+        var parsed;
+        try {
+          parsed = new URL(candidate);
+        } catch (e) {
+          return DEFAULT_RETURN;
+        }
+        var protocol = parsed.protocol.replace(/:$/, "").toLowerCase();
+        if (!ALLOWED.test(protocol)) return DEFAULT_RETURN;
+        if (parsed.username || parsed.password) return DEFAULT_RETURN;
+        return candidate;
+      }
+
+      // Prefer server-sanitized return; re-check client-side as defense in depth.
+      var returnTo = sanitizeReturn(${safeReturnLiteral});
       var params = new URLSearchParams(window.location.search);
-      var returnTo = params.get("return") || "jam://auth";
       params.delete("return");
       var qs = params.toString();
       var hash = window.location.hash || "";
