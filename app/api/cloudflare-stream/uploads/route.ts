@@ -93,6 +93,7 @@ export async function POST(request: NextRequest) {
     return createTusDirectUpload({
       accountId,
       apiToken,
+      userId: user.id,
       maxDurationSeconds,
       allowedMaxDurationSeconds,
       requestedDuration: body.maxDurationSeconds ?? null,
@@ -120,6 +121,9 @@ export async function POST(request: NextRequest) {
         body: JSON.stringify({
           maxDurationSeconds,
           requireSignedURLs: false,
+          // Ownership tags used by clip/delete APIs to prevent Stream IDOR.
+          creator: user.id,
+          meta: { jam_user_id: user.id },
         }),
       },
     );
@@ -174,6 +178,7 @@ export async function POST(request: NextRequest) {
 async function createTusDirectUpload(input: {
   accountId: string;
   apiToken: string;
+  userId: string;
   maxDurationSeconds: number;
   allowedMaxDurationSeconds: number;
   requestedDuration: number | null;
@@ -188,6 +193,7 @@ async function createTusDirectUpload(input: {
   });
 
   // Tus metadata: key + space + base64(value). Omit requiresignedurls (default false).
+  // Custom ownership is set via Stream edit after create — TUS metadata only allows reserved keys.
   const metadata = `maxDurationSeconds ${Buffer.from(String(input.maxDurationSeconds), "utf8").toString("base64")}`;
 
   let response: Response;
@@ -248,6 +254,37 @@ async function createTusDirectUpload(input: {
         cloudflareErrorCode: cloudflareError?.code,
       },
       { status: response.status || 500 },
+    );
+  }
+
+  // Bind the placeholder Stream asset to this Jam user before the client uploads bytes.
+  const ownershipResponse = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${input.accountId}/stream/${cloudflareStreamId}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.apiToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        creator: input.userId,
+        meta: { jam_user_id: input.userId },
+      }),
+    },
+  ).catch(() => null);
+
+  if (!ownershipResponse?.ok) {
+    // Best-effort cleanup so we don't leave an unowned upload slot.
+    await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${input.accountId}/stream/${cloudflareStreamId}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${input.apiToken}` },
+      },
+    ).catch(() => undefined);
+    return Response.json(
+      { error: "Could not claim upload ownership." },
+      { status: 502 },
     );
   }
 

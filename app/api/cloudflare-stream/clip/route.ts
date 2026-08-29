@@ -9,9 +9,52 @@ type CloudflareVideoResponse = {
   result?: {
     uid?: string;
     duration?: number;
+    creator?: string | null;
+    meta?: Record<string, string | undefined> | null;
     status?: { state?: string; errorReasonText?: string | null };
   };
 };
+
+/**
+ * Clip + source-delete must only run on Stream assets the caller owns.
+ * Published rows are checked in `videos`; pending uploads rely on Stream
+ * `creator` / `meta.jam_user_id` set at direct-upload time.
+ */
+async function assertCallerOwnsStreamSource(input: {
+  supabase: ReturnType<typeof createAuthenticatedClient>;
+  userId: string;
+  sourceId: string;
+  sourceCreator: string | null | undefined;
+  sourceMeta: Record<string, string | undefined> | null | undefined;
+}): Promise<Response | null> {
+  const { data: videoRows, error } = await input.supabase
+    .from("videos")
+    .select("user_id")
+    .eq("cloudflare_stream_id", input.sourceId)
+    .limit(20);
+
+  if (error) {
+    return Response.json({ error: "Could not verify video ownership." }, { status: 500 });
+  }
+
+  if (videoRows && videoRows.length > 0) {
+    const foreignOwner = videoRows.some(
+      (row) => typeof row.user_id === "string" && row.user_id !== input.userId,
+    );
+    if (foreignOwner) {
+      return Response.json({ error: "You do not own this video." }, { status: 403 });
+    }
+    return null;
+  }
+
+  const streamOwner =
+    input.sourceCreator?.trim() || input.sourceMeta?.jam_user_id?.trim() || "";
+  if (!streamOwner || streamOwner !== input.userId) {
+    return Response.json({ error: "You do not own this video." }, { status: 403 });
+  }
+
+  return null;
+}
 
 function cloudflareErrorMessage(data: CloudflareVideoResponse, fallback: string) {
   return (
@@ -162,6 +205,15 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const ownershipError = await assertCallerOwnsStreamSource({
+    supabase,
+    userId: user.id,
+    sourceId,
+    sourceCreator: sourceVideo?.creator,
+    sourceMeta: sourceVideo?.meta,
+  });
+  if (ownershipError) return ownershipError;
+
   const { startTimeSeconds, endTimeSeconds, durationSeconds } = normalizeClipRange(
     rawStartTimeSeconds,
     rawEndTimeSeconds,
@@ -202,7 +254,11 @@ export async function POST(request: NextRequest) {
           endTimeSeconds,
           requireSignedURLs: false,
           ...(thumbnailTimestampPct != null ? { thumbnailTimestampPct } : {}),
-          meta: { name: `jam-clip-${user.id.slice(0, 8)}` },
+          creator: user.id,
+          meta: {
+            name: `jam-clip-${user.id.slice(0, 8)}`,
+            jam_user_id: user.id,
+          },
         }),
       },
     );
