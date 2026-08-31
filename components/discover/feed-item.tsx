@@ -17,6 +17,7 @@ import {
   JamVideoView,
   type JamVideoPlaybackStatus,
 } from "@/components/video/jam-video-view";
+import { JamSlideshowView } from "@/components/video/jam-slideshow-view";
 import {
   getCloudflareFreezeFrameUri,
   getFeedPosterSource,
@@ -118,7 +119,10 @@ export function FeedItem({
   onReport: () => void;
 }) {
   const source = getVideoSource(item);
-  const posterUri = getFeedPosterSource(item);
+  const isSlideshow = item.mediaType === "slideshow" && item.imageUrls.length > 0;
+  const posterUri = isSlideshow
+    ? item.imageUrls[0] ?? item.mediaUrl
+    : getFeedPosterSource(item);
   // Mid-clip cover when restoring a filter session — start poster would flash t≈0.
   const resumeCoverUri =
     resumePositionSec != null && resumePositionSec > 0.25 && source
@@ -158,6 +162,7 @@ export function FeedItem({
     waitingForFirstPlay: Boolean(source),
   }));
   const [showWaitingSpinner, setShowWaitingSpinner] = useState(false);
+  const [posterFailed, setPosterFailed] = useState(false);
   const [mediaContentFit, setMediaContentFit] = useState<VideoContentFit>("cover");
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [saveScale] = useState(() => new Animated.Value(1));
@@ -198,6 +203,7 @@ export function FeedItem({
 
   useEffect(() => {
     if (waitingCoverUri) {
+      setPosterFailed(false);
       void Image.prefetch(waitingCoverUri);
     }
   }, [waitingCoverUri]);
@@ -210,6 +216,7 @@ export function FeedItem({
   useEffect(() => {
     setBufferingState({ source, waitingForFirstPlay: Boolean(source) });
     setShowWaitingSpinner(false);
+    setPosterFailed(false);
     setMediaContentFit("cover");
   }, [source]);
 
@@ -228,6 +235,7 @@ export function FeedItem({
       Boolean(source) &&
       isActive &&
       !paused &&
+      !suspendVideo &&
       bufferingState.source === source &&
       bufferingState.waitingForFirstPlay;
 
@@ -236,32 +244,19 @@ export function FeedItem({
       return;
     }
 
-    // Only show spinner if the poster isn't covering the wait.
-    const spinnerTimer = setTimeout(() => setShowWaitingSpinner(!waitingCoverUri), 450);
-    // If audio is running but onFirstFrameRender never arrives (known for some
-    // HLS sources / surface mismatches), drop the poster so we don't sit on a
-    // black thumb forever. Give resume seeks a bit longer before forcing reveal.
-    const stuckPosterTimer = setTimeout(
-      () => {
-        setBufferingState((current) => {
-          if (current.source !== source || !current.waitingForFirstPlay) return current;
-          return { source, waitingForFirstPlay: false };
-        });
-      },
-      resumeCoverUri ? 1800 : 900,
-    );
+    // Keep the poster up for the whole wait — never drop to a black VideoView.
+    // Spinner appears only if first frame is slow (poor network / cold HLS).
+    const spinnerTimer = setTimeout(() => setShowWaitingSpinner(true), 800);
     return () => {
       clearTimeout(spinnerTimer);
-      clearTimeout(stuckPosterTimer);
     };
   }, [
     bufferingState.source,
     bufferingState.waitingForFirstPlay,
     isActive,
     paused,
-    resumeCoverUri,
     source,
-    waitingCoverUri,
+    suspendVideo,
   ]);
 
   useEffect(() => {
@@ -392,13 +387,15 @@ export function FeedItem({
     }, FEED_CHROME_HOLD_MS);
   }
 
-  function handleFeedTouchMove(pageY: number) {
+  function handleFeedTouchMove(pageY: number, locationX?: number) {
     const startY = chromeTouchStartYRef.current;
     if (startY == null) return;
     const dy = pageY - startY;
+    const startX = chromeTouchStartXRef.current;
+    const dx = startX != null && locationX != null ? locationX - startX : 0;
 
     if (!chromeHoldingRef.current && !speedHoldingRef.current) {
-      if (Math.abs(dy) > 12) {
+      if (Math.abs(dy) > 12 || Math.abs(dx) > 12) {
         chromeTouchMovedRef.current = true;
         clearChromeHoldTimer();
       }
@@ -456,11 +453,15 @@ export function FeedItem({
       setMoreMenuOpen(false);
       return;
     }
-    if (!source) return;
+    if (!source && !isSlideshow) return;
     onPausedChange?.(!paused);
   }
 
   function handleFeedPress() {
+    if (chromeTouchMovedRef.current) {
+      chromeTouchMovedRef.current = false;
+      return;
+    }
     if (chromeSuppressPressRef.current) {
       chromeSuppressPressRef.current = false;
       return;
@@ -567,6 +568,9 @@ export function FeedItem({
     action();
   }
 
+  const showStaticCover = !isActive || bufferingState.waitingForFirstPlay;
+  const staticCoverUri = waitingCoverUri ?? posterUri;
+
   // Match create/camera: cover the feed viewport above the tab bar, not the full screen.
   const feedVideoFrameStyle = [
     styles.feedVideoLayer,
@@ -581,11 +585,44 @@ export function FeedItem({
       onPressIn={(event) =>
         handleFeedTouchStart(event.nativeEvent.locationX, event.nativeEvent.pageY)
       }
-      onTouchMove={(event) => handleFeedTouchMove(event.nativeEvent.pageY)}
+      onTouchMove={(event) =>
+        handleFeedTouchMove(event.nativeEvent.pageY, event.nativeEvent.locationX)
+      }
       onPressOut={handleFeedTouchEnd}
       delayLongPress={FEED_CHROME_HOLD_MS + 400}
     >
-      {source ? (
+      {isSlideshow ? (
+        <View style={feedVideoFrameStyle}>
+          {suspendVideo ? (
+            posterUri ? (
+              <Image
+                source={{ uri: posterUri }}
+                style={StyleSheet.absoluteFill}
+                resizeMode="cover"
+              />
+            ) : (
+              <View style={styles.videoPlaceholder}>
+                <Avatar size={90} />
+                <Text style={styles.h2}>{item.creatorName}</Text>
+              </View>
+            )
+          ) : (
+            <JamSlideshowView
+              imageUrls={item.imageUrls}
+              audioUrl={item.audioUrl}
+              shouldPlay={isActive && !paused}
+              isActive={isActive}
+              style={StyleSheet.absoluteFill}
+              onFirstImageLoad={revealFirstFrame}
+            />
+          )}
+          {isActive && paused && !suspendVideo ? (
+            <View pointerEvents="none" style={styles.feedPausedPlayOverlay}>
+              <FeedPausedPlayIcon />
+            </View>
+          ) : null}
+        </View>
+      ) : source ? (
         <View style={feedVideoFrameStyle}>
           {suspendVideo ? (
             posterUri ? (
@@ -624,20 +661,28 @@ export function FeedItem({
                 onFirstFrameRender={revealFirstFrame}
                 onContentFitChange={setMediaContentFit}
               />
-              {waitingCoverUri && bufferingState.waitingForFirstPlay ? (
+              {showStaticCover ? (
                 <View
                   pointerEvents="none"
-                  style={[StyleSheet.absoluteFill, { backgroundColor: "#000" }]}
+                  style={[StyleSheet.absoluteFill, { backgroundColor: "#09090b" }]}
                 >
-                  <Image
-                    source={{ uri: waitingCoverUri }}
-                    style={StyleSheet.absoluteFill}
-                    resizeMode={mediaContentFit === "contain" ? "contain" : "cover"}
-                    onLoad={(event) => {
-                      const { width, height } = event.nativeEvent.source;
-                      setMediaContentFit(contentFitForVideoSize(width, height));
-                    }}
-                  />
+                  {staticCoverUri && !posterFailed ? (
+                    <Image
+                      source={{ uri: staticCoverUri }}
+                      style={StyleSheet.absoluteFill}
+                      resizeMode={mediaContentFit === "contain" ? "contain" : "cover"}
+                      onLoad={(event) => {
+                        const { width, height } = event.nativeEvent.source;
+                        setMediaContentFit(contentFitForVideoSize(width, height));
+                      }}
+                      onError={() => setPosterFailed(true)}
+                    />
+                  ) : (
+                    <View style={styles.videoPlaceholder}>
+                      <Avatar uri={item.avatarUrl} size={90} />
+                      <Text style={styles.h2}>{item.creatorName}</Text>
+                    </View>
+                  )}
                 </View>
               ) : null}
             </>

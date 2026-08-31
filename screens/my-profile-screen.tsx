@@ -14,8 +14,6 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   blockUser,
-  deleteMessage,
-  editMessage,
   fetchMyVideos,
   fetchProfile,
   fetchSavedVideos,
@@ -25,16 +23,17 @@ import {
   pinProfileVideo,
   reportVideo,
   sendJamRequest,
-  sendMessage,
   unpinProfileVideo,
-  type ChatMessage,
-  type Conversation,
   type FeedVideo,
-  type InboxMessage,
   type Profile,
   type ProfileVideo,
   type ReportReason,
 } from "@/lib/native-social-data";
+import {
+  pendingSlideshowToProfileVideo,
+  retryPendingSlideshowUpload,
+  usePendingSlideshowUploads,
+} from "@/lib/pending-slideshow-uploads";
 import {
   isPendingProfileVideoId,
   pendingUploadToProfileVideo,
@@ -44,6 +43,7 @@ import {
 } from "@/lib/pending-video-uploads";
 import {
   getProBadgeKind,
+  hasProFeatures,
   shouldShowProProgress,
 } from "@/lib/pro-entitlements";
 import {
@@ -69,9 +69,7 @@ import { deleteOwnProfileVideo } from "@/lib/delete-own-profile-video";
 import type { SavedVideoController, ThemeMode } from "@/types/app";
 import { viewportWidth } from "@/theme/tokens";
 import { getActivityIndicatorColor, styles } from "@/theme/styles";
-import { AccountSettingsModal } from "@/components/account-settings-modal";
 import { FeedReportModal } from "@/components/discover/feed-report-modal";
-import { ChatModal } from "@/components/chat/chat-modal";
 import { DmModal } from "@/components/chat/dm-modal";
 import { UserProfileModal } from "@/components/profile/user-profile-modal";
 import { EditProfileModal } from "@/components/profile/edit-profile-modal";
@@ -84,7 +82,7 @@ import {
 import { ProfileVideoFullscreenModal } from "@/components/profile/profile-video-fullscreen-modal";
 import { VideoGrid } from "@/components/profile/video-grid";
 import { openProfileVideoFullscreen } from "@/components/video/jam-video-view";
-import { Avatar } from "@/components/ui/avatar";
+import { ExpandableAvatar } from "@/components/ui/expandable-avatar";
 import { EmptyCard } from "@/components/ui/empty-card";
 import { LoadingScreen } from "@/components/ui/loading-screen";
 import { ProBadge, ProProgressBar } from "@/components/ui/badges";
@@ -307,11 +305,9 @@ export function MyProfileScreen({
   const [fullscreenIndex, setFullscreenIndex] = useState<number | null>(null);
   const [ownFullscreenIndex, setOwnFullscreenIndex] = useState<number | null>(null);
   const [activeDm, setActiveDm] = useState<FeedVideo | null>(null);
-  const [activeChat, setActiveChat] = useState<Conversation | InboxMessage | null>(null);
   const [profileUserId, setProfileUserId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
   const [profileHeaderCollapsed, setProfileHeaderCollapsed] = useState(false);
   const [reportItem, setReportItem] = useState<FeedVideo | null>(null);
   const [reportSubmitting, setReportSubmitting] = useState(false);
@@ -324,12 +320,17 @@ export function MyProfileScreen({
   const insets = useSafeAreaInsets();
   const { savedVideoIds, setVideoSaved, refreshSavedVideos } = savedVideoController;
   const pendingUploads = usePendingVideoUploads();
+  const pendingSlideshowUploads = usePendingSlideshowUploads();
   const pendingProfileVideos = useMemo(
-    () =>
-      pendingUploads
+    () => [
+      ...pendingUploads
         .filter((upload) => upload.userId === userId)
         .map(pendingUploadToProfileVideo),
-    [pendingUploads, userId],
+      ...pendingSlideshowUploads
+        .filter((upload) => upload.userId === userId)
+        .map(pendingSlideshowToProfileVideo),
+    ],
+    [pendingSlideshowUploads, pendingUploads, userId],
   );
   const displayVideos = useMemo(
     () =>
@@ -479,9 +480,6 @@ export function MyProfileScreen({
     });
     setProfileUserId((current) => (current === creatorUserId ? null : current));
     setActiveDm((current) => (current?.userId === creatorUserId ? null : current));
-    setActiveChat((current) =>
-      current && !("sender_name" in current) && current.userId === creatorUserId ? null : current,
-    );
   }
 
   function hideSavedCreator(item: FeedVideo) {
@@ -536,6 +534,7 @@ export function MyProfileScreen({
     proSubscriptionActive: visibleProfile?.pro_subscription_active,
   };
   const proBadge = getProBadgeKind(proEntitlement);
+  const hasPro = hasProFeatures(proEntitlement);
   const showProProgress = Boolean(visibleProfile) && shouldShowProProgress(proEntitlement);
   const showVideosGridLoading = videosLoading && displayVideos.length === 0;
   const showSavedGridLoading = videosLoading && saved.length === 0;
@@ -583,7 +582,7 @@ export function MyProfileScreen({
         {visibleProfile ? (
           <>
             <View style={styles.profileCentered}>
-              <Avatar uri={visibleProfile.avatar_url} size={78} />
+              <ExpandableAvatar uri={visibleProfile.avatar_url} size={78} />
               <ProfileNameAnchor>
                 <View style={styles.centerRow}>
                   <Text style={styles.h2}>{visibleProfile.display_name ?? "your profile"}</Text>
@@ -635,7 +634,13 @@ export function MyProfileScreen({
                   showPendingUploadState
                   prewarmVisibleVideos={activeTab === "videos"}
                   allowPinning
-                  onRetryPendingUpload={retryPendingVideoUpload}
+                  onRetryPendingUpload={(uploadId) => {
+                    if (uploadId.startsWith("ss-")) {
+                      retryPendingSlideshowUpload(uploadId);
+                      return;
+                    }
+                    retryPendingVideoUpload(uploadId);
+                  }}
                   onPinPreviewChange={setPinPreviewActive}
                   ensurePinItemVisible={(rect) =>
                     profileScrollRef.current?.ensureWindowRectVisible(rect) ?? Promise.resolve()
@@ -687,6 +692,8 @@ export function MyProfileScreen({
           onSave={() => undefined}
           onMessage={() => undefined}
           ownVideoActions={{
+            userId,
+            insightsLocked: !hasPro,
             onDelete: (video) => {
               Alert.alert("delete video?", "this removes it from your profile.", [
                 { text: "cancel", style: "cancel" },
@@ -698,6 +705,20 @@ export function MyProfileScreen({
                   },
                 },
               ]);
+            },
+            onEdited: (updated) => {
+              setVideos((current) =>
+                current.map((entry) => (entry.id === updated.id ? { ...entry, ...updated } : entry)),
+              );
+            },
+            onShared: () => onInboxChanged(),
+            onInsights: () => {
+              Alert.alert(
+                hasPro ? "insights" : "insights · pro",
+                hasPro
+                  ? "video insights are coming soon."
+                  : "unlock jam. pro to see views, saves, and more for your posts.",
+              );
             },
           }}
         />
@@ -794,11 +815,6 @@ export function MyProfileScreen({
               onInboxChanged={onInboxChanged}
               onUnjammed={(removedUserId) => {
                 setProfileUserId(null);
-                setActiveChat((current) =>
-                  current && !("sender_name" in current) && current.userId === removedUserId
-                    ? null
-                    : current,
-                );
                 setActiveDm((current) => (current?.userId === removedUserId ? null : current));
                 onInboxChanged();
               }}
@@ -806,122 +822,12 @@ export function MyProfileScreen({
                 removeCreatorFromSaved(blockedUserId);
                 setProfileUserId(null);
                 setFullscreenIndex(null);
-                setActiveChat((current) =>
-                  current && !("sender_name" in current) && current.userId === blockedUserId
-                    ? null
-                    : current,
-                );
                 setActiveDm((current) => (current?.userId === blockedUserId ? null : current));
                 onInboxChanged();
               }}
             />
           ) : null
         }
-      />
-      <ChatModal
-        active={activeChat}
-        currentUserId={userId}
-        savedVideoController={savedVideoController}
-        onClose={() => setActiveChat(null)}
-        onOpenProfile={(nextUserId) => {
-          setProfileUserId(nextUserId);
-        }}
-        onInboxChanged={onInboxChanged}
-        onSend={async (conversation, body) => {
-          const optimisticId = `local-${conversation.userId}-${Date.now()}`;
-          const optimisticMessage: ChatMessage = {
-            id: optimisticId,
-            body,
-            incoming: false,
-            createdAt: new Date().toISOString(),
-          };
-
-          setActiveChat((current) => {
-            if (!current || "sender_name" in current || current.userId !== conversation.userId) {
-              return current;
-            }
-
-            return {
-              ...current,
-              lastMessage: body,
-              timestamp: "now",
-              unread: false,
-              messages: [...current.messages, optimisticMessage],
-            };
-          });
-
-          try {
-            const savedMessage = conversation.unlocked
-              ? await sendMessage(conversation.userId, body)
-              : await sendJamRequest(conversation.userId, body);
-            const unlocksFromReply = !conversation.unlocked && conversation.messages.some((message) => message.incoming);
-
-            setActiveChat((current) => {
-              if (!current || "sender_name" in current || current.userId !== conversation.userId) {
-                return current;
-              }
-
-              return {
-                ...current,
-                unlocked: current.unlocked || unlocksFromReply,
-                lastMessage: savedMessage.body,
-                messages: current.messages.map((message) =>
-                  message.id === optimisticId
-                    ? {
-                        id: message.id,
-                        serverId: savedMessage.id,
-                        body: savedMessage.body,
-                        incoming: false,
-                        createdAt: savedMessage.created_at,
-                      }
-                    : message,
-                ),
-              };
-            });
-            if (unlocksFromReply || !conversation.unlocked) onInboxChanged();
-          } catch (err) {
-            setActiveChat((current) => {
-              if (!current || "sender_name" in current || current.userId !== conversation.userId) {
-                return current;
-              }
-
-              const nextMessages = current.messages.filter((message) => message.id !== optimisticId);
-              return {
-                ...current,
-                messages: nextMessages,
-                lastMessage: nextMessages.at(-1)?.body ?? conversation.lastMessage,
-              };
-            });
-            Alert.alert("could not send", err instanceof Error ? err.message : "try again");
-          }
-        }}
-        onEditMessage={async (messageId, body) => {
-          const updated = await editMessage(messageId, body);
-          setActiveChat((current) => {
-            if (!current || "sender_name" in current) return current;
-            return {
-              ...current,
-              messages: current.messages.map((message) =>
-                message.id === messageId ? { ...message, body: updated.body } : message,
-              ),
-              lastMessage: current.lastMessage === current.messages.find((message) => message.id === messageId)?.body
-                ? updated.body
-                : current.lastMessage,
-            };
-          });
-        }}
-        onDeleteMessage={async (messageId) => {
-          await deleteMessage(messageId);
-          setActiveChat((current) => {
-            if (!current || "sender_name" in current) return current;
-            const nextMessages = current.messages.filter((message) => message.id !== messageId);
-            return {
-              ...current,
-              messages: nextMessages,
-              lastMessage: nextMessages.at(-1)?.body ?? "",
-            };
-          });
-        }}
       />
       <DmModal
         item={activeDm}
@@ -947,18 +853,12 @@ export function MyProfileScreen({
           void openJamFromProfile(profileFeedItem);
         }}
         onUnjammed={(removedUserId) => {
-          setActiveChat((current) =>
-            current && !("sender_name" in current) && current.userId === removedUserId ? null : current,
-          );
           setActiveDm((current) => (current?.userId === removedUserId ? null : current));
           setProfileUserId(null);
           onInboxChanged();
         }}
         onBlocked={(blockedUserId) => {
           removeCreatorFromSaved(blockedUserId);
-          setActiveChat((current) =>
-            current && !("sender_name" in current) && current.userId === blockedUserId ? null : current,
-          );
           setActiveDm((current) => (current?.userId === blockedUserId ? null : current));
           setProfileUserId(null);
           onInboxChanged();
@@ -981,23 +881,11 @@ export function MyProfileScreen({
         onThemeModeChange={onThemeModeChange}
         profile={profile}
         onClose={() => setSettingsOpen(false)}
-        onAccount={() => {
-          setAccountSettingsOpen(true);
-        }}
         onProfileUpdated={(nextProfile) => {
           setProfile(nextProfile);
           onProfileChanged(nextProfile);
         }}
         onLoggedOut={onLoggedOut}
-      />
-      <AccountSettingsModal
-        visible={accountSettingsOpen}
-        themeMode={themeMode}
-        onClose={() => setAccountSettingsOpen(false)}
-        onDeleted={() => {
-          setAccountSettingsOpen(false);
-          void onLoggedOut();
-        }}
       />
       <FeedReportModal
         item={reportItem}

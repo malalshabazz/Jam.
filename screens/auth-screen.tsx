@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getAuthEmailRedirectUrl, supabase } from "@/lib/native-supabase";
+import { clearPasswordRecoveryPending } from "@/lib/password-recovery";
 import type { AuthMode } from "@/types/app";
 import { AUTH_PASSWORD_MIN_LENGTH } from "@/theme/tokens";
 import { styles } from "@/theme/styles";
@@ -31,9 +32,11 @@ function authSubtitle(mode: AuthMode) {
 export function AuthScreen({
   onAuthenticated,
   passwordRecovery = false,
+  onPasswordRecoveryCancelled,
 }: {
   onAuthenticated: (userId: string) => Promise<void>;
   passwordRecovery?: boolean;
+  onPasswordRecoveryCancelled?: () => void;
 }) {
   const [mode, setMode] = useState<AuthMode>(passwordRecovery ? "reset" : "login");
   const [email, setEmail] = useState("");
@@ -52,7 +55,15 @@ export function AuthScreen({
       setMessage(null);
       setPassword("");
       setConfirmPassword("");
+      return;
     }
+
+    // When recovery ends (cancel / sign-out / successful route), leave reset UI.
+    setMode((current) => (current === "reset" ? "login" : current));
+    setPassword("");
+    setConfirmPassword("");
+    setError(null);
+    setMessage(null);
   }, [passwordRecovery]);
 
   useEffect(() => {
@@ -253,6 +264,20 @@ export function AuthScreen({
           {mode === "reset" && !passwordRecovery ? (
             <Pressable onPress={() => switchMode("login")}>
               <Text style={styles.switchText}>back to log in</Text>
+            </Pressable>
+          ) : null}
+
+          {mode === "reset" && passwordRecovery ? (
+            <Pressable
+              onPress={() => {
+                void (async () => {
+                  await clearPasswordRecoveryPending();
+                  onPasswordRecoveryCancelled?.();
+                  await supabase.auth.signOut();
+                })();
+              }}
+            >
+              <Text style={styles.switchText}>cancel password reset</Text>
             </Pressable>
           ) : null}
         </View>

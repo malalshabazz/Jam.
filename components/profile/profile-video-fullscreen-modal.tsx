@@ -22,6 +22,9 @@ import {
 } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ProfileFullscreenFeedItem } from "@/components/profile/profile-fullscreen-feed-item";
+import { OwnVideoActionsBar } from "@/components/profile/own-video-actions-bar";
+import { OwnVideoEditModal } from "@/components/profile/own-video-edit-modal";
+import { OwnVideoShareModal } from "@/components/profile/own-video-share-modal";
 import { ensureVideoAspectCached } from "@/components/video/aspect-cache";
 import { getNavBarHeight } from "@/lib/nav-bar";
 import type { FeedVideo, ProfileVideo } from "@/lib/native-social-data";
@@ -77,7 +80,12 @@ export function ProfileVideoFullscreenModal({
   onOpenProfile?: (video: ProfileVideo | FeedVideo) => void;
   getSavedForVideo?: (video: ProfileVideo | FeedVideo) => boolean;
   ownVideoActions?: {
+    userId: string;
     onDelete: (video: ProfileVideo | FeedVideo) => void;
+    onEdited?: (video: ProfileVideo) => void;
+    onShared?: () => void;
+    onInsights: (video: ProfileVideo | FeedVideo) => void;
+    insightsLocked?: boolean;
   };
   onNotInterested?: (video: ProfileVideo | FeedVideo) => void;
   onBlock?: (video: ProfileVideo | FeedVideo) => void;
@@ -116,6 +124,8 @@ export function ProfileVideoFullscreenModal({
   const [chromeHolding, setChromeHolding] = useState(false);
   const [chromeLocked, setChromeLocked] = useState(false);
   const [speedHolding, setSpeedHolding] = useState(false);
+  const [editVideo, setEditVideo] = useState<ProfileVideo | FeedVideo | null>(null);
+  const [shareVideo, setShareVideo] = useState<ProfileVideo | FeedVideo | null>(null);
   const insets = useSafeAreaInsets();
   // Keep the fullscreen tree mounted briefly after close so players receive
   // shouldPlay=false and hard-stop before unmount (prevents leaked background audio).
@@ -123,6 +133,15 @@ export function ProfileVideoFullscreenModal({
   const activeVideos = visible ? sessionVideos : videos;
   const pageHeight = viewportHeight;
   const video = activeVideos[index] ?? activeVideos[0] ?? null;
+  const currentIsSlideshow = Boolean(
+    video &&
+      (("mediaType" in video && video.mediaType === "slideshow") ||
+        ("media_type" in video && video.media_type === "slideshow")) &&
+      (
+        ("imageUrls" in video && Array.isArray(video.imageUrls) && video.imageUrls.length > 0) ||
+        ("image_urls" in video && Array.isArray(video.image_urls) && video.image_urls.length > 0)
+      ),
+  );
   const showMessageBar = Boolean(onSendMessage && !ownVideoActions);
   const messageBarHeight = getNavBarHeight(insets.bottom);
   const messageBarInset = showMessageBar ? messageBarHeight + keyboardOffset : 0;
@@ -134,6 +153,7 @@ export function ProfileVideoFullscreenModal({
   const currentFeedItem = video ? profileVideoToFeedVideo(video) : null;
   const currentPendingSentJam = Boolean(currentFeedItem && isPendingSentJam(currentFeedItem));
   const chromeInteractive = !chromeHolding && !chromeLocked;
+  const ownActionSheetOpen = Boolean(editVideo || shareVideo);
   const safeInitialIndex = Math.min(
     Math.max(initialIndex, 0),
     Math.max(activeVideos.length - 1, 0),
@@ -240,6 +260,8 @@ export function ProfileVideoFullscreenModal({
     if (!visible) {
       wasVisibleRef.current = false;
       setActiveVideoId(null);
+      setEditVideo(null);
+      setShareVideo(null);
       const timer = setTimeout(() => setContentMounted(false), 80);
       return () => clearTimeout(timer);
     }
@@ -469,7 +491,7 @@ export function ProfileVideoFullscreenModal({
       pointerEvents={visible ? "auto" : "none"}
     >
       <PanGestureHandler
-        enabled={visible && !profileOverlayOpen}
+        enabled={visible && !profileOverlayOpen && !currentIsSlideshow && !ownActionSheetOpen}
         activeOffsetX={14}
         failOffsetY={[-22, 22]}
         onGestureEvent={onHorizontalGestureEvent}
@@ -494,7 +516,8 @@ export function ProfileVideoFullscreenModal({
             keyExtractor={(item) => item.id}
             style={{ flex: 1 }}
             pagingEnabled
-            scrollEnabled={visible && !chromeHolding && !speedHolding && !profileOverlayOpen}
+            directionalLockEnabled
+            scrollEnabled={visible && !chromeHolding && !speedHolding && !profileOverlayOpen && !ownActionSheetOpen}
             decelerationRate="fast"
             disableIntervalMomentum
             showsVerticalScrollIndicator={false}
@@ -524,7 +547,7 @@ export function ProfileVideoFullscreenModal({
                 video={item}
                 height={pageHeight}
                 owner={getOwnerForVideo ? getOwnerForVideo(item) : owner}
-                isActive={visible && item.id === activeVideoId}
+                isActive={visible && item.id === activeVideoId && !editVideo}
                 videoBottomInset={videoBottomInset}
                 actionsBottom={actionsBottom}
                 metaBottom={metaBottom}
@@ -549,6 +572,10 @@ export function ProfileVideoFullscreenModal({
                 onNotInterested={onNotInterested}
                 onBlock={onBlock}
                 onReport={onReport}
+                swipeBackEnabled
+                swipeBackTranslateX={translateX}
+                swipeBackTranslateY={horizontalTranslateY}
+                onSwipeBackStateChange={handleHorizontalStateChange}
               />
             )}
           />
@@ -607,9 +634,53 @@ export function ProfileVideoFullscreenModal({
               </Animated.View>
             </Animated.View>
           ) : null}
+          {ownVideoActions && video ? (
+            <Animated.View
+              pointerEvents={chromeInteractive && !ownActionSheetOpen ? "auto" : "none"}
+              style={[
+                styles.fullscreenMessageBar,
+                {
+                  height: messageBarHeight,
+                  bottom: 0,
+                  paddingBottom: Math.max(insets.bottom, 12),
+                  opacity: chromeOpacity,
+                },
+              ]}
+            >
+              <OwnVideoActionsBar
+                insightsLocked={Boolean(ownVideoActions.insightsLocked)}
+                onDelete={() => ownVideoActions.onDelete(video)}
+                onEdit={() => setEditVideo(video)}
+                onShare={() => setShareVideo(video)}
+                onInsights={() => ownVideoActions.onInsights(video)}
+              />
+            </Animated.View>
+          ) : null}
         </Animated.View>
       </PanGestureHandler>
       {profileOverlay}
+      {ownVideoActions ? (
+        <>
+          <OwnVideoEditModal
+            visible={Boolean(editVideo)}
+            video={editVideo}
+            onClose={() => setEditVideo(null)}
+            onSaved={(updated) => {
+              setSessionVideos((current) =>
+                current.map((entry) => (entry.id === updated.id ? { ...entry, ...updated } : entry)),
+              );
+              ownVideoActions.onEdited?.(updated);
+            }}
+          />
+          <OwnVideoShareModal
+            visible={Boolean(shareVideo)}
+            userId={ownVideoActions.userId}
+            video={shareVideo}
+            onClose={() => setShareVideo(null)}
+            onShared={() => ownVideoActions.onShared?.()}
+          />
+        </>
+      ) : null}
     </View>
   );
 

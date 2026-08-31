@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Modal, Pressable, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
@@ -6,7 +6,7 @@ import {
   TAB_SCREEN_TOP_PADDING,
 } from "@/theme/tokens";
 import { styles } from "@/theme/styles";
-import { SwipeBackSurface } from "@/components/ui/swipe-back-surface";
+import { SwipeBackSurface, type SwipeBackSurfaceHandle } from "@/components/ui/swipe-back-surface";
 
 export function TermsAndPoliciesModal({
   visible,
@@ -16,6 +16,7 @@ export function TermsAndPoliciesModal({
   onClose: () => void;
 }) {
   const insets = useSafeAreaInsets();
+  const swipeBackRef = useRef<SwipeBackSurfaceHandle>(null);
   const [activeTab, setActiveTab] = useState<"terms" | "privacy">("terms");
 
   useEffect(() => {
@@ -23,8 +24,19 @@ export function TermsAndPoliciesModal({
   }, [visible]);
 
   return (
-    <Modal animationType="none" transparent visible={visible} onRequestClose={onClose}>
-      <SwipeBackSurface resetKey={visible ? "terms-and-policies" : null} onBack={onClose} style={styles.flex} enterFromRight>
+    <Modal
+      animationType="none"
+      transparent
+      visible={visible}
+      onRequestClose={() => swipeBackRef.current?.dismiss()}
+    >
+      <SwipeBackSurface
+        ref={swipeBackRef}
+        resetKey={visible ? "terms-and-policies" : null}
+        onBack={onClose}
+        style={styles.flex}
+        enterFromRight
+      >
         <View style={styles.safe}>
           <ScrollView
             contentContainerStyle={[
@@ -38,7 +50,7 @@ export function TermsAndPoliciesModal({
           >
             <View style={styles.headerRow}>
               <Text style={styles.cardTitle}>terms and policies</Text>
-              <Pressable onPress={onClose}>
+              <Pressable onPress={() => swipeBackRef.current?.dismiss()}>
                 <Text style={styles.helper}>done</Text>
               </Pressable>
             </View>

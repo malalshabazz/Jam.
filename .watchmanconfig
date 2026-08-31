@@ -1,0 +1,16 @@
+{
+  "ignore_dirs": [
+    ".git",
+    ".next",
+    ".expo",
+    ".vercel",
+    "dist",
+    "supabase",
+    "android",
+    "ios",
+    "coverage",
+    "node_modules/next",
+    "node_modules/eas-cli",
+    "node_modules/.cache"
+  ]
+}

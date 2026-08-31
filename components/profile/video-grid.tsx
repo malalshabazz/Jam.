@@ -33,6 +33,10 @@ import {
   type ProfileVideo,
 } from "@/lib/native-social-data";
 import {
+  getPendingSlideshowUploadById,
+  usePendingSlideshowUploads,
+} from "@/lib/pending-slideshow-uploads";
+import {
   getPendingUploadById,
   getPendingUploadIdFromProfileVideoId,
   isPendingProfileVideoId,
@@ -47,6 +51,30 @@ import {
   viewportHeight,
   viewportWidth,
 } from "@/theme/tokens";
+
+function resolvePendingGridUpload(videoId: string) {
+  if (!isPendingProfileVideoId(videoId)) return null;
+  const uploadId = getPendingUploadIdFromProfileVideoId(videoId);
+  const videoUpload = getPendingUploadById(uploadId);
+  if (videoUpload) {
+    return {
+      id: videoUpload.id,
+      progress: videoUpload.progress,
+      phase: videoUpload.phase,
+      presentationBaked: Boolean(videoUpload.presentationBaked),
+    };
+  }
+  const slideshowUpload = getPendingSlideshowUploadById(uploadId);
+  if (slideshowUpload) {
+    return {
+      id: slideshowUpload.id,
+      progress: Math.round(slideshowUpload.progress * 100),
+      phase: slideshowUpload.phase,
+      presentationBaked: true,
+    };
+  }
+  return null;
+}
 
 export function VideoGrid({
   videos,
@@ -88,6 +116,7 @@ export function VideoGrid({
   onVideoPress?: (video: ProfileVideo | FeedVideo, index: number) => void;
 }) {
   usePendingVideoUploads();
+  usePendingSlideshowUploads();
   const lockGateRef = useRef<View>(null);
   const lockMessageRef = useRef<View>(null);
   const lockMessageHeightRef = useRef(48);
@@ -348,9 +377,7 @@ export function VideoGrid({
         {videos.map((video, index) => {
           const isLocked = Boolean(locked && index >= 3);
           const pendingUpload =
-            showPendingUploadState && isPendingProfileVideoId(video.id)
-              ? getPendingUploadById(getPendingUploadIdFromProfileVideoId(video.id))
-              : null;
+            showPendingUploadState ? resolvePendingGridUpload(video.id) : null;
           const isPendingFailed = pendingUpload?.phase === "failed";
           const isPinned = getProfileVideoPinnedRank(video as ProfileVideo) != null;
           const canPin =

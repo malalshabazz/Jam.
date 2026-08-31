@@ -95,6 +95,14 @@ export function profileToFeedVideo(
       video && ("lookingFor" in video ? video.lookingFor : "looking_for" in video ? video.looking_for : false),
     ),
     pinnedRank: getProfileVideoPinnedRank(video),
+    mediaType: video?.mediaType === "slideshow" || video?.media_type === "slideshow" ? "slideshow" : "video",
+    imageUrls: Array.isArray(video?.imageUrls)
+      ? video.imageUrls
+      : Array.isArray(video?.image_urls)
+        ? video.image_urls
+        : [],
+    audioUrl: video?.audioUrl ?? video?.audio_url ?? null,
+    audioDurationMs: video?.audioDurationMs ?? video?.audio_duration_ms ?? null,
     earlyAdopter: Boolean(profile.early_adopter),
     proBadge,
     videoCount,
@@ -125,6 +133,14 @@ export function feedItemToPreloadedProfile(item: FeedVideo, feedItems: FeedVideo
       lookingFor: video.lookingFor,
       pinnedRank: video.pinnedRank ?? null,
       pinned_rank: video.pinnedRank ?? null,
+      mediaType: video.mediaType,
+      media_type: video.mediaType,
+      imageUrls: video.imageUrls,
+      image_urls: video.imageUrls,
+      audioUrl: video.audioUrl,
+      audio_url: video.audioUrl,
+      audioDurationMs: video.audioDurationMs,
+      audio_duration_ms: video.audioDurationMs,
       created_at: video.createdAt,
       creatorName: video.creatorName,
       role: video.role,
@@ -217,6 +233,24 @@ export function profileVideoToFeedVideo(video: ProfileVideo | FeedVideo): FeedVi
             : false,
       ),
       pinnedRank: getProfileVideoPinnedRank(video as ProfileVideo),
+      mediaType:
+        ("mediaType" in video && video.mediaType === "slideshow") ||
+        ("media_type" in video && (video as { media_type?: string }).media_type === "slideshow")
+          ? "slideshow"
+          : "video",
+      imageUrls: Array.isArray((video as ProfileVideo).imageUrls)
+        ? ((video as ProfileVideo).imageUrls as string[])
+        : Array.isArray((video as ProfileVideo).image_urls)
+          ? ((video as ProfileVideo).image_urls as string[])
+          : [],
+      audioUrl:
+        (video as ProfileVideo).audioUrl ??
+        (video as ProfileVideo).audio_url ??
+        null,
+      audioDurationMs:
+        (video as ProfileVideo).audioDurationMs ??
+        (video as ProfileVideo).audio_duration_ms ??
+        null,
       earlyAdopter: Boolean(video.earlyAdopter),
       proBadge: "proBadge" in video ? video.proBadge ?? null : null,
       videoCount: "videoCount" in video && typeof video.videoCount === "number" ? video.videoCount : 0,

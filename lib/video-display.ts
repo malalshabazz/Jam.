@@ -6,7 +6,21 @@ import {
   getCloudflareThumbnailUrl,
 } from "@/lib/native-cloudflare";
 import type { FeedVideo, ProfileVideo } from "@/lib/native-social-data";
+import { getLocalPosterForVideo } from "@/lib/pending-video-uploads";
 import { getExpoVideoSource as getPrewarmExpoVideoSource } from "@/lib/profile-video-prewarm";
+
+function isLikelyImageUri(uri: string | null | undefined) {
+  if (!uri) return false;
+  if (
+    uri.startsWith("file:") ||
+    uri.startsWith("content:") ||
+    uri.startsWith("ph://") ||
+    uri.startsWith("assets-library:")
+  ) {
+    return true;
+  }
+  return /\.(jpe?g|png|webp|heic|gif)(\?|$)/i.test(uri);
+}
 
 export function getVideoSource(item: FeedVideo) {
   if (item.cloudflareStreamId) return getCloudflarePlaybackUrl(item.cloudflareStreamId);
@@ -15,10 +29,21 @@ export function getVideoSource(item: FeedVideo) {
 
 /** Near-start poster for feed transitions — matches playback from the beginning. */
 export function getFeedPosterSource(item: FeedVideo) {
+  const localPoster = getLocalPosterForVideo(item.id);
+  if (localPoster) return localPoster;
+
   const streamId = item.cloudflareStreamId || extractCloudflareStreamId(item.mediaUrl);
-  if (!streamId) return null;
-  // 100ms avoids a pure black camera-open frame while staying at the start of the clip.
-  return getCloudflareThumbnailUrl(streamId, 100, { height: 1280 });
+  if (!streamId) {
+    // Local / pending uploads may only have a still image URI.
+    return isLikelyImageUri(item.mediaUrl) ? item.mediaUrl : null;
+  }
+
+  // Prefer the editor-chosen frame; fall back to an early frame (avoid t=0 black).
+  const preferredTimeMs =
+    typeof item.thumbnailTimeMs === "number" && Number.isFinite(item.thumbnailTimeMs)
+      ? item.thumbnailTimeMs
+      : 100;
+  return getCloudflareThumbnailUrl(streamId, Math.max(100, preferredTimeMs), { height: 1280 });
 }
 
 export function getCloudflareFreezeFrameUri(source: string, timeSec: number) {

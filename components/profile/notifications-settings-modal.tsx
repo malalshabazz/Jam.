@@ -236,10 +236,10 @@ export function NotificationsSettingsModal({
                       {preferences.categoryAlerts.map((subscription) => (
                         <Pressable
                           key={categoryAlertKey(subscription)}
-                          style={styles.chip}
+                          style={styles.notificationChip}
                           onPress={() => removeCategoryAlert(subscription)}
                         >
-                          <Text style={styles.chipText}>{formatCategoryAlertLabel(subscription)} ×</Text>
+                          <Text style={styles.notificationChipText}>{formatCategoryAlertLabel(subscription)} ×</Text>
                         </Pressable>
                       ))}
                     </View>

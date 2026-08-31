@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getAllowedMaxVideoSeconds } from "@/lib/pro-entitlements";
+import { createServiceRoleClient } from "@/lib/supabase-admin";
 
 type CloudflareDirectUploadResponse = {
   success: boolean;
@@ -77,6 +78,8 @@ export async function POST(request: NextRequest) {
     allowedMaxDurationSeconds,
     Boolean(body.allowLongerSource),
   );
+  const allowLongerSource =
+    Boolean(body.allowLongerSource) && maxDurationSeconds > allowedMaxDurationSeconds;
   const uploadLength =
     typeof body.uploadLength === "number" && Number.isFinite(body.uploadLength)
       ? Math.max(0, Math.floor(body.uploadLength))
@@ -93,10 +96,10 @@ export async function POST(request: NextRequest) {
     return createTusDirectUpload({
       accountId,
       apiToken,
-      supabase,
       userId: user.id,
       maxDurationSeconds,
       allowedMaxDurationSeconds,
+      allowLongerSource,
       requestedDuration: body.maxDurationSeconds ?? null,
       uploadLength,
     });
@@ -168,13 +171,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const claimError = await recordStreamUploadClaim(supabase, user.id, data.result.uid);
+  const claimError = await recordStreamUploadClaim(user.id, data.result.uid, {
+    allowedPublishSeconds: allowedMaxDurationSeconds,
+    // CF enforces maxDurationSeconds on the asset when we did not raise the source cap.
+    publishable: !allowLongerSource,
+  });
   if (claimError) return claimError;
 
   return Response.json({
     cloudflareStreamId: data.result.uid,
     uploadUrl: data.result.uploadURL,
     maxDurationSeconds,
+    allowedPublishSeconds: allowedMaxDurationSeconds,
     protocol: "basic",
   });
 }
@@ -182,10 +190,10 @@ export async function POST(request: NextRequest) {
 async function createTusDirectUpload(input: {
   accountId: string;
   apiToken: string;
-  supabase: AuthedSupabase;
   userId: string;
   maxDurationSeconds: number;
   allowedMaxDurationSeconds: number;
+  allowLongerSource: boolean;
   requestedDuration: number | null;
   uploadLength: number;
 }) {
@@ -294,9 +302,12 @@ async function createTusDirectUpload(input: {
   }
 
   const claimError = await recordStreamUploadClaim(
-    input.supabase,
     input.userId,
     cloudflareStreamId,
+    {
+      allowedPublishSeconds: input.allowedMaxDurationSeconds,
+      publishable: !input.allowLongerSource,
+    },
   );
   if (claimError) {
     await fetch(
@@ -313,6 +324,7 @@ async function createTusDirectUpload(input: {
     cloudflareStreamId,
     uploadUrl,
     maxDurationSeconds: input.maxDurationSeconds,
+    allowedPublishSeconds: input.allowedMaxDurationSeconds,
     protocol: "tus",
   });
 }
@@ -535,7 +547,8 @@ function getMaxDurationSeconds(
 
   const requested = Math.ceil(requestedDuration);
   if (allowLongerSource && requested > allowedMaxDurationSeconds) {
-    // Source may be longer when the client will clip to the allowed output length.
+    // Source may be longer when the client will clip to the allowed *publish* length.
+    // Publish still requires a publishable claim (clip or duration check).
     return Math.min(SOURCE_UPLOAD_CAP_SECONDS, Math.max(allowedMaxDurationSeconds, requested));
   }
 
@@ -559,30 +572,56 @@ function createAuthenticatedClient(accessToken: string) {
   );
 }
 
-type AuthedSupabase = ReturnType<typeof createAuthenticatedClient>;
-
-/** Record that this user may publish the given Stream UID via createVideo. */
+/** Record that this user uploaded a Stream UID (publishable only when within entitlement). */
 async function recordStreamUploadClaim(
-  supabase: AuthedSupabase,
   userId: string,
   streamId: string,
+  options: {
+    allowedPublishSeconds: number;
+    publishable: boolean;
+  },
 ): Promise<Response | null> {
-  const { error } = await supabase.from("stream_upload_claims").insert({
+  const admin = createServiceRoleClient();
+  if (!admin) {
+    return Response.json({ error: "Upload claiming is not configured." }, { status: 500 });
+  }
+
+  const payload = {
     cloudflare_stream_id: streamId,
     user_id: userId,
-  });
+    allowed_publish_seconds: options.allowedPublishSeconds,
+    status: options.publishable ? "publishable" : "uploaded",
+  };
+
+  const { error } = await admin.from("stream_upload_claims").insert(payload);
 
   if (!error) return null;
 
   // Already claimed — allow only if this user owns the claim.
   if (error.code === "23505") {
-    const { data: existing } = await supabase
+    const { data: existing } = await admin
       .from("stream_upload_claims")
       .select("user_id")
       .eq("cloudflare_stream_id", streamId)
       .maybeSingle<{ user_id: string }>();
     if (existing?.user_id === userId) return null;
     return Response.json({ error: "Upload already claimed." }, { status: 409 });
+  }
+
+  // Pre-050 schema without status columns — retry bare claim.
+  if (/allowed_publish_seconds|status|schema cache|column/i.test(error.message ?? "")) {
+    const legacy = await admin.from("stream_upload_claims").insert({
+      cloudflare_stream_id: streamId,
+      user_id: userId,
+    });
+    if (!legacy.error || legacy.error.code === "23505") return null;
+    if (
+      legacy.error.code === "42P01" ||
+      /stream_upload_claims|does not exist|schema cache/i.test(legacy.error.message ?? "")
+    ) {
+      logUploadApiStep("stream claim skipped", { reason: "missing-table", streamId });
+      return null;
+    }
   }
 
   // Migration not applied yet — don't block uploads; insert policy still old.

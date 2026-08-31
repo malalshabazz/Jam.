@@ -4,13 +4,34 @@ import { createConnection } from "node:net";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-const args = process.argv.slice(2);
+const args = process.argv.slice(2).filter(
+  (arg) => arg !== "--warm" && arg !== "--tunnel",
+);
+const warmBundle =
+  process.argv.includes("--warm") || process.env.JAM_WARM_IOS_BUNDLE === "1";
+const useTunnel =
+  process.argv.includes("--tunnel") || process.env.JAM_DEV_TUNNEL === "1";
 const metroPort = Number(process.env.RCT_METRO_PORT ?? 8081);
 const iosBundleUrl =
-  `http://127.0.0.1:${metroPort}/index.bundle?platform=ios&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.bytecode=1&transform.routerRoot=app&unstable_transformProfile=hermes-stable`;
+  `http://127.0.0.1:${metroPort}/index.bundle?platform=ios&dev=true&hot=true&lazy=true&transform.engine=hermes&transform.bytecode=1&transform.routerRoot=app&unstable_transformProfile=hermes-stable`;
 
 function sleep(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+/**
+ * Undo node_modules ↔ node_modules.nosync symlink layout (breaks Metro),
+ * and warn if iCloud has evicted dependency files.
+ */
+function ensureNodeModulesNotOnICloud() {
+  try {
+    execSync("node scripts/ensure-node-modules-nosync.mjs", {
+      stdio: "inherit",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Could not check node_modules layout: ${message}`);
+  }
 }
 
 function isPortInUse(port) {
@@ -64,24 +85,29 @@ function getLanIp() {
   return null;
 }
 
-async function waitForMetro(timeoutMs = 1_200_000) {
+async function waitForMetro(timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
   let polls = 0;
 
   while (Date.now() < deadline) {
     try {
       const response = await fetch(`http://127.0.0.1:${metroPort}/status`);
-      if (response.ok) return true;
+      if (response.ok) {
+        const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+        console.log(`Metro ready (${elapsedSeconds}s).`);
+        return true;
+      }
     } catch {
       // Metro is still starting.
     }
 
     polls += 1;
-    if (polls % 15 === 0) {
+    if (polls === 1 || polls % 5 === 0) {
       console.log("Still waiting for Metro to start…");
     }
 
-    await sleep(2000);
+    await sleep(1000);
   }
 
   return false;
@@ -108,17 +134,17 @@ function warnAboutNodeVersion() {
 
 async function warmIosBundle() {
   console.log(
-    "Pre-building the iOS bundle. Do not scan the QR code yet — the first compile can take several minutes.",
+    "Pre-building the iOS bundle (JAM_WARM_IOS_BUNDLE / --warm). First compile can take a few minutes.",
   );
 
-  await sleep(3000);
+  await sleep(1000);
 
   const startedAt = Date.now();
-  const maxAttempts = 3;
+  const maxAttempts = 2;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 900_000);
+    const timeoutId = setTimeout(() => controller.abort(), 180_000);
 
     try {
       const response = await fetch(iosBundleUrl, { signal: controller.signal });
@@ -129,7 +155,7 @@ async function warmIosBundle() {
       await response.arrayBuffer();
       const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
       console.log("");
-      console.log(`Bundle ready (${elapsedSeconds}s). Scan the QR code in Expo Go now.`);
+      console.log(`Bundle ready (${elapsedSeconds}s). Open the Jam dev client now.`);
       console.log("");
       return;
     } catch (error) {
@@ -138,7 +164,7 @@ async function warmIosBundle() {
         console.warn(
           `Bundle pre-build attempt ${attempt} failed (${message}). Retrying…`,
         );
-        await sleep(4000 * attempt);
+        await sleep(2000 * attempt);
       } else {
         throw error;
       }
@@ -150,6 +176,7 @@ async function warmIosBundle() {
 
 async function main() {
   warnAboutNodeVersion();
+  ensureNodeModulesNotOnICloud();
 
   const runningExpoStarts = countRunningExpoStarts();
   if (runningExpoStarts > 0) {
@@ -169,27 +196,42 @@ async function main() {
   }
 
   const lanIp = getLanIp();
-  if (!lanIp) {
+  if (!useTunnel && !lanIp) {
     console.error("Could not find a LAN IP address for Expo.");
+    console.error("Use tunnel mode instead: npm run dev:tunnel");
     process.exit(1);
   }
 
-  console.log(`Starting Expo with LAN host ${lanIp}`);
+  if (useTunnel) {
+    console.log("Starting Expo with tunnel (works across networks / guest Wi‑Fi).");
+  } else {
+    console.log(`Starting Expo with LAN host ${lanIp}`);
+  }
+  if (!warmBundle) {
+    console.log(
+      "Skipping iOS pre-warm (faster startup). Pass --warm or JAM_WARM_IOS_BUNDLE=1 to pre-build.",
+    );
+  }
 
   const localExpoBin = resolve("node_modules/expo/bin/cli");
   const expoBin = existsSync(localExpoBin) ? localExpoBin : "expo";
+  const hostArgs = useTunnel ? ["--tunnel"] : ["--host", "lan"];
+  const env = {
+    ...process.env,
+    EXPO_NO_TELEMETRY: "1",
+    EXPO_NO_DEPENDENCY_VALIDATION: "1",
+  };
+  if (!useTunnel && lanIp) {
+    env.EXPO_PACKAGER_HOSTNAME = lanIp;
+    env.REACT_NATIVE_PACKAGER_HOSTNAME = lanIp;
+  }
 
   const child = spawn(
     existsSync(localExpoBin) ? process.execPath : expoBin,
-    [...(existsSync(localExpoBin) ? [expoBin] : []), "start", "--host", "lan", ...args],
+    [...(existsSync(localExpoBin) ? [expoBin] : []), "start", ...hostArgs, ...args],
     {
       stdio: "inherit",
-      env: {
-        ...process.env,
-        EXPO_NO_TELEMETRY: "1",
-        EXPO_PACKAGER_HOSTNAME: lanIp,
-        REACT_NATIVE_PACKAGER_HOSTNAME: lanIp,
-      },
+      env,
     },
   );
 
@@ -209,7 +251,19 @@ async function main() {
   const ready = await waitForMetro();
   if (!ready) {
     console.warn(
-      "Metro did not start within 20 minutes. Check the terminal for errors.",
+      "Metro did not start within 2 minutes. Check the terminal for errors.",
+    );
+    return;
+  }
+
+  if (!warmBundle) {
+    console.log("Scan the QR code / open the Jam dev client when ready.");
+    console.log("");
+    console.log(
+      "If the phone says offline / failed to load: phone + Mac on same Wi‑Fi,",
+    );
+    console.log(
+      "Settings → Jam → Local Network = ON, or Ctrl+C and run: npm run dev:tunnel",
     );
     return;
   }
@@ -220,7 +274,7 @@ async function main() {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`Could not pre-build the iOS bundle: ${message}`);
     console.warn(
-      "Wait until the terminal shows 'iOS Bundled', then scan the QR code or shake your phone and tap Reload.",
+      "Wait until the terminal shows 'iOS Bundled', then open the Jam dev client.",
     );
   }
 }

@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { assertCallerOwnsStreamId } from "@/lib/cloudflare-stream-ownership";
 
 type CloudflareVideoResponse = {
   success: boolean;
@@ -87,6 +88,15 @@ export async function POST(request: NextRequest) {
   if (!streamId) {
     return Response.json({ error: "Missing stream id." }, { status: 400 });
   }
+
+  const ownershipError = await assertCallerOwnsStreamId({
+    supabase,
+    userId: user.id,
+    streamId,
+    accountId,
+    apiToken,
+  });
+  if (ownershipError) return ownershipError;
 
   try {
     const ready = await waitForStreamReady(accountId, apiToken, streamId);

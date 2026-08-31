@@ -24,7 +24,7 @@ import {
   LOCATION_PICKER_VISIBLE_HEIGHT,
   viewportHeight,
 } from "@/theme/tokens";
-import { styles } from "@/theme/styles";
+import { darkStyles, styles } from "@/theme/styles";
 import type { LocationCountryOption, LocationFilterSelection } from "@/types/app";
 import { ChipRow } from "@/components/ui/chip-row";
 import { PrimaryButton } from "@/components/ui/primary-button";
@@ -41,7 +41,8 @@ export function FilterSheet({
   selectedRoles,
   selectedGenres,
   selectedLocation,
-  lookingForActive,
+  lookingForActive = false,
+  showLookingFor = false,
   includeGenres = true,
   onClose,
   onApply,
@@ -50,13 +51,14 @@ export function FilterSheet({
   selectedRoles: string[];
   selectedGenres: string[];
   selectedLocation: string;
-  /** When provided, shows the looking-for control as draft state until apply. */
+  /** Applied looking-for state; draft until Apply. */
   lookingForActive?: boolean;
+  /** When true, shows the looking-for control (discover + inbox). */
+  showLookingFor?: boolean;
   includeGenres?: boolean;
   onClose: () => void;
   onApply: (roles: string[], genres: string[], location: string, lookingFor: boolean) => void;
 }) {
-  const showLookingFor = lookingForActive !== undefined;
   const [roles, setRoles] = useState(selectedRoles);
   const [genres, setGenres] = useState(selectedGenres);
   const [lookingForDraft, setLookingForDraft] = useState(Boolean(lookingForActive));
@@ -433,7 +435,7 @@ export function FilterSheet({
               nestedScrollEnabled
               keyboardShouldPersistTaps="handled"
               style={[
-                styles.locationFilterList,
+                darkStyles.locationFilterList,
                 { maxHeight: LOCATION_PICKER_VISIBLE_HEIGHT },
               ]}
             >
@@ -444,27 +446,27 @@ export function FilterSheet({
                 const isPartiallySelected = Boolean(selection && selection.cities.length > 0);
 
                 return (
-                  <View key={option.country} style={styles.locationCountryGroup}>
-                    <Pressable style={styles.locationOptionRow} onPress={() => toggleCountry(option)}>
+                  <View key={option.country} style={darkStyles.locationCountryGroup}>
+                    <Pressable style={darkStyles.locationOptionRow} onPress={() => toggleCountry(option)}>
                       <View
                         style={[
-                          styles.locationCircle,
-                          isCountrySelected && styles.locationCircleSelected,
-                          isPartiallySelected && styles.locationCirclePartial,
+                          darkStyles.locationCircle,
+                          isCountrySelected && darkStyles.locationCircleSelected,
+                          isPartiallySelected && darkStyles.locationCirclePartial,
                         ]}
                       >
-                        {isPartiallySelected && <View style={styles.locationCirclePartialFill} />}
+                        {isPartiallySelected && <View style={darkStyles.locationCirclePartialFill} />}
                       </View>
-                      <Text style={styles.locationCountryText}>{option.country}</Text>
+                      <Text style={darkStyles.locationCountryText}>{option.country}</Text>
                     </Pressable>
                     {isExpanded && (
-                      <View style={styles.locationCityList}>
+                      <View style={darkStyles.locationCityList}>
                         {option.cities.map((city) => {
                           const isCitySelected = Boolean(selection?.cities.includes(city));
                           return (
-                            <Pressable key={city} style={styles.locationCityRow} onPress={() => toggleCity(option, city)}>
-                              <View style={[styles.locationCityCircle, isCitySelected && styles.locationCircleSelected]} />
-                              <Text style={styles.locationCityText}>{city}</Text>
+                            <Pressable key={city} style={darkStyles.locationCityRow} onPress={() => toggleCity(option, city)}>
+                              <View style={[darkStyles.locationCityCircle, isCitySelected && darkStyles.locationCircleSelected]} />
+                              <Text style={darkStyles.locationCityText}>{city}</Text>
                             </Pressable>
                           );
                         })}

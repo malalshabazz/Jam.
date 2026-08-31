@@ -158,7 +158,7 @@ export function JamVideoView({
   adoptPrewarmed = false,
   /** Cover with a thumbnail when pausing (scroll-away). Off for in-place user pause. */
   showFreezeFrameOnPause = true,
-  surfaceColor = "#000",
+  surfaceColor = "#09090b",
   onDurationResolved,
   onPlaybackStatusUpdate,
   onFirstFrameRender,
@@ -358,6 +358,7 @@ export function JamVideoView({
 
       const cloudflareUri = getCloudflareFreezeFrameUri(source, atTimeSec);
       if (cloudflareUri) {
+        // Set immediately so swipe-away never exposes a blank VideoView while prefetching.
         setFreezeFrameUri(cloudflareUri);
         void Image.prefetch(cloudflareUri);
         return;
@@ -798,6 +799,12 @@ export function JamVideoView({
   }, []);
 
   useEffect(() => {
+    // True background teardown is owned by the AppState listener. "inactive"
+    // (Control Center / notification shade) must keep the surface painted.
+    if (appStateRef.current === "inactive") {
+      return;
+    }
+
     if (!source || !shouldPlay || appStateRef.current !== "active") {
       // Pause in place and fully silence so swipe-away / inactive pages can't leak audio.
       prevShouldPlayRef.current = shouldPlay;
@@ -805,12 +812,9 @@ export function JamVideoView({
         0,
         player.currentTime || playbackStatusRef.current.positionMillis / 1000,
       );
-      // Thumbnail covers are for scroll-away / background — not tap-to-pause.
-      // Loading a CF thumb a beat later was swapping the paused frame.
-      if (
-        showFreezeFrameOnPause &&
-        (player.playing || playbackStatusRef.current.isPlaying)
-      ) {
+      // Cover BEFORE pause — pausing can blank the native VideoView on iOS, and a
+      // late Cloudflare thumb load used to leave a black gap during feed swipes.
+      if (showFreezeFrameOnPause) {
         freezePositionRef.current = freezeAt;
         captureFreezeFrame(freezeAt);
       }
@@ -939,9 +943,8 @@ export function JamVideoView({
         return;
       }
 
-      setFreezeFrameUri(null);
-      // Never seek on resume — seeking forces an HLS rebuffer and is why return
-      // from background felt slow compared to TikTok.
+      // Keep any freeze/poster cover until first frame — clearing it here caused
+      // a black flash when returning from Control Center / background.
       playJamVideoPlayerWhenReady(player);
     };
 
@@ -949,20 +952,38 @@ export function JamVideoView({
       const previousState = appStateRef.current;
       appStateRef.current = nextState;
 
-      if (nextState === "inactive" || nextState === "background") {
-        clearResumeRetries();
+      // Control Center / notification shade → "inactive". Stopping the player
+      // blanks the VideoView (black flash) until a remote freeze thumb loads.
+      // Only mute under the shade; tear down on true background.
+      if (nextState === "inactive") {
         if (!source || previousState !== "active") return;
-        const freezeAt = Math.max(0, player.currentTime || playbackStatusRef.current.positionMillis / 1000);
+        try {
+          player.muted = true;
+          player.volume = 0;
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+
+      if (nextState === "background") {
+        clearResumeRetries();
+        if (!source || previousState === "background") return;
+        const freezeAt = Math.max(
+          0,
+          player.currentTime || playbackStatusRef.current.positionMillis / 1000,
+        );
         freezePositionRef.current = freezeAt;
-        stopJamVideoPlayer(player);
+        // Set cover before pausing so the surface never sits uncovered.
         captureFreezeFrame(freezeAt);
+        stopJamVideoPlayer(player);
         return;
       }
 
       if (nextState !== "active") return;
 
       clearResumeRetries();
-      // Restore mute/volume from props before resume — stopJamVideoPlayer silenced the player.
+      // Restore mute/volume from props before resume — background stop silenced the player.
       try {
         player.muted = isMuted;
         player.volume = volume;

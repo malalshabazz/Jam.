@@ -15,7 +15,7 @@ import { ChatModal } from "@/components/chat/chat-modal";
 import { DmModal } from "@/components/chat/dm-modal";
 import { FeedReportModal } from "@/components/discover/feed-report-modal";
 import { BellIcon } from "@/components/icons/bell-icon";
-import { Avatar } from "@/components/ui/avatar";
+import { ExpandableAvatar } from "@/components/ui/expandable-avatar";
 import { ProBadge, ProProgressBar } from "@/components/ui/badges";
 import { EmptyCard } from "@/components/ui/empty-card";
 import { ProfileJamButton } from "@/components/ui/profile-jam-button";
@@ -474,7 +474,7 @@ export function UserProfileModal({
           accessibilityState={{ selected: notifyOnPost }}
         >
           <Animated.View style={{ transform: [{ scale: notifyScale }] }}>
-            <BellIcon filled={notifyOnPost} />
+            <BellIcon filled={notifyOnPost} color={getActivityIndicatorColor()} />
           </Animated.View>
         </Pressable>
       </View>
@@ -550,7 +550,7 @@ export function UserProfileModal({
             ) : visibleProfile ? (
               <>
                 <View style={styles.profileCentered}>
-                  <Avatar uri={visibleProfile.avatar_url} size={78} />
+                  <ExpandableAvatar uri={visibleProfile.avatar_url} size={78} />
                   <ProfileNameAnchor>
                     <View style={styles.centerRow}>
                       <Text style={styles.h2}>{displayName}</Text>

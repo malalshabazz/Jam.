@@ -291,7 +291,46 @@ export async function probeHlsVideoSize(
   }
 }
 
-function getCloudflareStreamApiEndpoint(action: "clip" | "videos") {
+/** Sum EXTINF from a Cloudflare HLS playlist so thumbnail filmstrips match clip length. */
+export async function probeHlsDurationMs(manifestUrl: string): Promise<number | null> {
+  try {
+    const streamId = extractCloudflareStreamId(manifestUrl);
+    const probeUrl = streamId
+      ? getCloudflareStreamManifestUrl(streamId)
+      : manifestUrl.split("?")[0] || manifestUrl;
+    const response = await fetch(probeUrl);
+    if (!response.ok) return null;
+    let text = await response.text();
+    if (text.includes("#EXT-X-STREAM-INF")) {
+      const lines = text.split("\n");
+      let mediaUri: string | null = null;
+      for (let i = 0; i < lines.length; i++) {
+        if (!lines[i].startsWith("#EXT-X-STREAM-INF")) continue;
+        const next = lines[i + 1]?.trim();
+        if (next && !next.startsWith("#")) {
+          mediaUri = next;
+          break;
+        }
+      }
+      if (!mediaUri) return null;
+      const mediaUrl = mediaUri.startsWith("http")
+        ? mediaUri
+        : new URL(mediaUri, probeUrl).toString();
+      const mediaResponse = await fetch(mediaUrl);
+      if (!mediaResponse.ok) return null;
+      text = await mediaResponse.text();
+    }
+    let durationSeconds = 0;
+    for (const match of text.matchAll(/#EXTINF:([0-9.]+)/g)) {
+      durationSeconds += Number(match[1]);
+    }
+    return durationSeconds > 0 ? Math.round(durationSeconds * 1000) : null;
+  } catch {
+    return null;
+  }
+}
+
+function getCloudflareStreamApiEndpoint(action: "clip" | "videos" | "publish-check" | "ready") {
   if (!cloudflareUploadEndpoint) return "";
   try {
     const url = new URL(cloudflareUploadEndpoint);
@@ -313,10 +352,70 @@ export function getCloudflareClipEndpoint() {
   return getCloudflareStreamApiEndpoint("clip");
 }
 
+export function getCloudflarePublishCheckEndpoint() {
+  return getCloudflareStreamApiEndpoint("publish-check");
+}
+
 export function getCloudflareVideoDeleteEndpoint() {
   // Prefer the deployed uploads endpoint (DELETE + { videoId }). /videos may 404 on older hosts.
   if (cloudflareUploadEndpoint) return cloudflareUploadEndpoint;
   return getCloudflareStreamApiEndpoint("videos");
+}
+
+/**
+ * Ensures the Stream asset is within the account duration entitlement and marks
+ * the upload claim publishable. Required before createVideo when H5 gates apply.
+ */
+export async function assertStreamPublishable(cloudflareStreamId: string) {
+  const endpoint = getCloudflarePublishCheckEndpoint();
+  if (!endpoint) {
+    // Local/dev without upload endpoint — skip server gate.
+    return;
+  }
+
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) {
+    throw new Error("Log in again before uploading.");
+  }
+
+  let response: Response;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ cloudflareStreamId }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Checking video length took too long. Try again.");
+    }
+    throw new Error("Could not verify video length. Check your connection and try again.");
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const data = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    publishable?: boolean;
+    skipped?: boolean;
+  };
+
+  if (response.status === 404) {
+    // Older deploy without publish-check — don't block.
+    return;
+  }
+
+  if (!response.ok || (data.publishable !== true && !data.skipped)) {
+    throw new Error(data.error ?? "Video is longer than your account allows. Trim before posting.");
+  }
 }
 
 function sleep(ms: number) {

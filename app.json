@@ -17,10 +17,15 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Jam uses your camera so you can record videos for your profile and feed.",
         "NSMicrophoneUsageDescription": "Jam uses your microphone so your videos can include sound.",
-        "NSPhotoLibraryUsageDescription": "Jam lets you choose videos and profile photos from your library.",
+        "NSPhotoLibraryUsageDescription": "Jam lets you choose videos, photos, and audio from your library.",
         "NSLocationWhenInUseUsageDescription": "Jam uses your location to show creators near you and share your live location when enabled in settings.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Jam updates your live location for nearby creators while share live location is enabled in settings.",
         "NSLocationAlwaysUsageDescription": "Jam updates your live location for nearby creators while share live location is enabled in settings.",
+        "NSLocalNetworkUsageDescription": "Jam needs local network access to load the development server on your computer.",
+        "NSBonjourServices": [
+          "_expo._tcp",
+          "_http._tcp"
+        ],
         "NSAppTransportSecurity": {
           "NSExceptionDomains": {
             "upload.cloudflarestream.com": {
@@ -89,10 +94,11 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Jam lets you choose videos and profile photos from your library.",
+          "photosPermission": "Jam lets you choose videos, photos, and profile images from your library.",
           "cameraPermission": "Jam uses your camera so you can record videos."
         }
       ],
+      "expo-document-picker",
       [
         "expo-media-library",
         {

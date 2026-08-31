@@ -55,7 +55,7 @@ import {
   type ProfileVideo,
   type ReportReason,
 } from "@/lib/native-social-data";
-import { getProBadgeKind, type ProBadgeKind } from "@/lib/pro-entitlements";
+import { getProBadgeKind, hasProFeatures, type ProBadgeKind } from "@/lib/pro-entitlements";
 import {
   profileToFeedVideo,
   profileVideoToFeedVideo,
@@ -572,49 +572,54 @@ export function ChatModal({
                     message.incoming ? styles.messageWrapIn : styles.messageWrapOut,
                   ]}
                 >
-                  {message.video && !isEditing ? (
-                    <MessageVideoThumbnail
-                      video={message.video}
-                      incoming={message.incoming}
-                      onPress={() => void openAttachedVideo(message.video!)}
-                    />
-                  ) : null}
-                  <Pressable
-                    disabled={message.incoming}
-                    onLongPress={() => openMessageMenu(message)}
-                    style={[
-                      styles.bubble,
-                      message.incoming ? styles.bubbleIn : styles.bubbleOut,
-                      message.video && !isEditing ? styles.bubbleWithVideo : null,
-                    ]}
-                  >
-                    {isEditing ? (
-                      <View style={styles.editMessageBox}>
-                        <TextInput
-                          value={editDraft}
-                          onChangeText={setEditDraft}
-                          multiline
-                          autoFocus
-                          style={[styles.editMessageInput, styles.bubbleTextOut]}
+                      {message.video && !isEditing ? (
+                        <MessageVideoThumbnail
+                          video={message.video}
+                          incoming={message.incoming}
+                          onPress={() => void openAttachedVideo(message.video!)}
+                          onLongPress={
+                            message.incoming ? undefined : () => openMessageMenu(message)
+                          }
                         />
-                        <View style={styles.editMessageActions}>
-                          <Pressable onPress={() => {
-                            setEditingMessageId(null);
-                            setEditDraft("");
-                          }}>
-                            <Text style={styles.editMessageCancel}>cancel</Text>
-                          </Pressable>
-                          <Pressable onPress={() => void saveEditedMessage()}>
-                            <Text style={styles.editMessageSave}>save</Text>
-                          </Pressable>
-                        </View>
-                      </View>
-                    ) : (
-                      <Text style={[styles.bubbleText, !message.incoming && styles.bubbleTextOut]}>
-                        {message.body}
-                      </Text>
-                    )}
-                  </Pressable>
+                      ) : null}
+                      {isEditing || (message.body ?? "").trim() ? (
+                        <Pressable
+                          disabled={message.incoming}
+                          onLongPress={() => openMessageMenu(message)}
+                          style={[
+                            styles.bubble,
+                            message.incoming ? styles.bubbleIn : styles.bubbleOut,
+                            message.video && !isEditing ? styles.bubbleWithVideo : null,
+                          ]}
+                        >
+                          {isEditing ? (
+                            <View style={styles.editMessageBox}>
+                              <TextInput
+                                value={editDraft}
+                                onChangeText={setEditDraft}
+                                multiline
+                                autoFocus
+                                style={[styles.editMessageInput, styles.bubbleTextOut]}
+                              />
+                              <View style={styles.editMessageActions}>
+                                <Pressable onPress={() => {
+                                  setEditingMessageId(null);
+                                  setEditDraft("");
+                                }}>
+                                  <Text style={styles.editMessageCancel}>cancel</Text>
+                                </Pressable>
+                                <Pressable onPress={() => void saveEditedMessage()}>
+                                  <Text style={styles.editMessageSave}>save</Text>
+                                </Pressable>
+                              </View>
+                            </View>
+                          ) : (
+                            <Text style={[styles.bubbleText, !message.incoming && styles.bubbleTextOut]}>
+                              {message.body}
+                            </Text>
+                          )}
+                        </Pressable>
+                      ) : null}
                   {isMenuOpen && !message.incoming && !isEditing && (
                     <View style={styles.messageContextMenu}>
                       <Pressable style={styles.messageContextItem} onPress={() => startEditingMessage(message)}>
@@ -690,6 +695,12 @@ export function ChatModal({
             ownVideoActions={
               attachedViewer.isOwn
                 ? {
+                    userId: currentUserId,
+                    insightsLocked: !hasProFeatures({
+                      earlyAdopter: attachedViewer.owner.earlyAdopter,
+                      proSubscriptionActive: attachedViewer.owner.proBadge === "blue",
+                      videoCount: attachedViewer.videos.length,
+                    }),
                     onDelete: (video) => {
                       Alert.alert("delete video?", "this removes it from your profile.", [
                         { text: "cancel", style: "cancel" },
@@ -712,6 +723,31 @@ export function ChatModal({
                           },
                         },
                       ]);
+                    },
+                    onEdited: (updated) => {
+                      setAttachedViewer((current) => {
+                        if (!current?.isOwn) return current;
+                        return {
+                          ...current,
+                          videos: current.videos.map((entry) =>
+                            entry.id === updated.id ? { ...entry, ...updated } : entry,
+                          ),
+                        };
+                      });
+                    },
+                    onShared: () => onInboxChanged?.(),
+                    onInsights: () => {
+                      const hasPro = hasProFeatures({
+                        earlyAdopter: attachedViewer.owner.earlyAdopter,
+                        proSubscriptionActive: attachedViewer.owner.proBadge === "blue",
+                        videoCount: attachedViewer.videos.length,
+                      });
+                      Alert.alert(
+                        hasPro ? "insights" : "insights · pro",
+                        hasPro
+                          ? "video insights are coming soon."
+                          : "unlock jam. pro to see views, saves, and more for your posts.",
+                      );
                     },
                   }
                 : undefined
@@ -876,10 +912,12 @@ export function MessageVideoThumbnail({
   video,
   incoming,
   onPress,
+  onLongPress,
 }: {
   video: MessageVideoAttachment;
   incoming: boolean;
   onPress: () => void;
+  onLongPress?: () => void;
 }) {
   const uri = getMessageVideoThumbnailSource(video);
   if (!uri) return null;
@@ -887,6 +925,7 @@ export function MessageVideoThumbnail({
   return (
     <Pressable
       onPress={onPress}
+      onLongPress={onLongPress}
       accessibilityRole="button"
       accessibilityLabel={video.caption ? `Open video: ${video.caption}` : "Open shared video"}
       style={[

@@ -66,7 +66,9 @@ export function toFeedContentFilters(
     roles: roles.length ? roles : undefined,
     genres: genres.length ? genres : undefined,
     locations: locations.length ? locations : undefined,
-    lookingForOnly: filters.lookingForActive || undefined,
+    // Always pass an explicit boolean so Looking For works as a standalone
+    // filter (not only when combined with role/genre/location).
+    lookingForOnly: Boolean(filters.lookingForActive),
   };
 }
 

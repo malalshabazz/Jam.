@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -17,7 +17,7 @@ import {
 import { getActivityIndicatorColor, styles } from "@/theme/styles";
 import { Avatar } from "@/components/ui/avatar";
 import { EmptyCard } from "@/components/ui/empty-card";
-import { SwipeBackSurface } from "@/components/ui/swipe-back-surface";
+import { SwipeBackSurface, type SwipeBackSurfaceHandle } from "@/components/ui/swipe-back-surface";
 
 export function BlockedUsersModal({
   visible,
@@ -32,6 +32,7 @@ export function BlockedUsersModal({
   const [loading, setLoading] = useState(false);
   const [unblockingUserId, setUnblockingUserId] = useState<string | null>(null);
   const insets = useSafeAreaInsets();
+  const swipeBackRef = useRef<SwipeBackSurfaceHandle>(null);
 
   const loadBlockedUsers = useCallback(async () => {
     setLoading(true);
@@ -68,8 +69,19 @@ export function BlockedUsersModal({
   }
 
   return (
-    <Modal animationType="none" transparent visible={visible} onRequestClose={onClose}>
-      <SwipeBackSurface resetKey={visible ? "blocked-users" : null} onBack={onClose} style={styles.flex} enterFromRight>
+    <Modal
+      animationType="none"
+      transparent
+      visible={visible}
+      onRequestClose={() => swipeBackRef.current?.dismiss()}
+    >
+      <SwipeBackSurface
+        ref={swipeBackRef}
+        resetKey={visible ? "blocked-users" : null}
+        onBack={onClose}
+        style={styles.flex}
+        enterFromRight
+      >
         <SafeAreaView style={styles.safe}>
           <ScrollView
             contentContainerStyle={[
@@ -79,7 +91,7 @@ export function BlockedUsersModal({
           >
             <View style={styles.headerRow}>
               <Text style={styles.cardTitle}>blocked accounts</Text>
-              <Pressable onPress={onClose}>
+              <Pressable onPress={() => swipeBackRef.current?.dismiss()}>
                 <Text style={styles.helper}>done</Text>
               </Pressable>
             </View>

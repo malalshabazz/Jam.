@@ -1,5 +1,5 @@
 import { BottomTabBarProps } from "@react-navigation/bottom-tabs";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import {
   Animated,
   Platform,
@@ -12,6 +12,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Path, Rect } from "react-native-svg";
 import type { Profile } from "@/lib/native-social-data";
+import { usePendingSlideshowUploads } from "@/lib/pending-slideshow-uploads";
 import { usePendingUploadFeedProgress } from "@/lib/pending-video-uploads";
 import { getNavBarHeight } from "@/lib/nav-bar";
 import type { Tab } from "@/types/app";
@@ -41,7 +42,29 @@ export function JamTabBar({
   const activeRoute = state.routes[state.index]?.name as Tab;
   const navBarHeight = getNavBarHeight(insets.bottom);
   const navStyles = activeRoute === "discover" ? darkStyles : styles;
-  const postingStatus = usePendingUploadFeedProgress(userId);
+  const videoPostingStatus = usePendingUploadFeedProgress(userId);
+  const pendingSlideshows = usePendingSlideshowUploads();
+  const postingStatus = useMemo(() => {
+    const slideshows = pendingSlideshows.filter(
+      (upload) => upload.userId === userId && upload.phase !== "failed",
+    );
+    if (!videoPostingStatus && slideshows.length === 0) return null;
+    const videoCount = videoPostingStatus?.count ?? 0;
+    const videoProgressTotal = (videoPostingStatus?.progress ?? 0) * videoCount;
+    const slideshowProgressTotal = slideshows.reduce(
+      (total, upload) => total + Math.round(upload.progress * 100),
+      0,
+    );
+    const count = videoCount + slideshows.length;
+    const progress = Math.round((videoProgressTotal + slideshowProgressTotal) / Math.max(count, 1));
+    const phase =
+      slideshows.some((upload) => upload.phase === "uploading") || videoPostingStatus?.phase === "uploading"
+        ? "uploading"
+        : videoPostingStatus?.phase === "processing"
+          ? "processing"
+          : "saving";
+    return { count, progress, phase };
+  }, [pendingSlideshows, userId, videoPostingStatus]);
   const hideChromeOnDiscover = activeRoute === "discover" && Boolean(chromeOpacity);
 
   useEffect(() => {

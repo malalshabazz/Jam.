@@ -24,6 +24,7 @@ import {
   fetchCreatorVideos,
   fetchInbox,
   fetchNearbyUserIds,
+  fetchLookingForUserIds,
   fetchRelationshipState,
   markConversationRead,
   markInboxMessageRead,
@@ -49,7 +50,7 @@ import { getUnreadInboxCount, getUnreadLocalInboxCount } from "@/lib/inbox-unrea
 import { confirmNearMeLiveLocationSharing } from "@/lib/near-me-notice";
 import type { InboxTab, PreloadedUserProfile, SavedVideoController } from "@/types/app";
 import { EMPTY_FILTER_GENRES } from "@/theme/tokens";
-import { getActivityIndicatorColor, styles } from "@/theme/styles";
+import { getActivityIndicatorColor, getChromeIconColor, styles } from "@/theme/styles";
 import { Avatar } from "@/components/ui/avatar";
 import { GoldBadge, ProBadge } from "@/components/ui/badges";
 import { JamSystemAvatar } from "@/components/ui/jam-system-avatar";
@@ -176,6 +177,9 @@ export function InboxScreen({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filterRoles, setFilterRoles] = useState<string[]>([]);
   const [filterLocation, setFilterLocation] = useState("");
+  const [lookingForActive, setLookingForActive] = useState(false);
+  const [lookingForUserIds, setLookingForUserIds] = useState<Set<string> | null>(null);
+  const [lookingForLoading, setLookingForLoading] = useState(false);
   const [nearMeActive, setNearMeActive] = useState(false);
   const [nearMeLoading, setNearMeLoading] = useState(false);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
@@ -201,9 +205,10 @@ export function InboxScreen({
         filterRoles.some((selectedRole) => selectedRole.toLowerCase() === role.toLowerCase());
       const locationMatch = !filterLocation || locationFilterMatches(location, filterLocation);
       const nearMeMatch = !nearMeActive || (nearbyUserIds?.has(otherUserId) ?? false);
-      return roleMatch && locationMatch && nearMeMatch;
+      const lookingForMatch = !lookingForActive || (lookingForUserIds?.has(otherUserId) ?? false);
+      return roleMatch && locationMatch && nearMeMatch && lookingForMatch;
     },
-    [filterLocation, filterRoles, nearMeActive, nearbyUserIds],
+    [filterLocation, filterRoles, lookingForActive, lookingForUserIds, nearMeActive, nearbyUserIds],
   );
 
   const filteredRequests = useMemo(
@@ -225,7 +230,8 @@ export function InboxScreen({
       ),
     [matchesInboxFilters, sent],
   );
-  const filtersActive = filterRoles.length > 0 || Boolean(filterLocation) || nearMeActive;
+  const filtersActive =
+    filterRoles.length > 0 || Boolean(filterLocation) || nearMeActive || lookingForActive;
   const jamTabItems = useMemo(() => {
     const conversationItems = filteredJams.map((conversation) => ({
       type: "conversation" as const,
@@ -334,6 +340,40 @@ export function InboxScreen({
     if (!nearMeActive || !userLocation || nearMeLoading) return;
     void refreshNearbyUserIds(userLocation).catch(() => undefined);
   }, [nearMeActive, nearMeLoading, nearMeRadiusMiles, refreshNearbyUserIds, userLocation]);
+
+  // Resolve which inbox contacts currently have a looking-for video.
+  useEffect(() => {
+    if (!lookingForActive) {
+      setLookingForUserIds(null);
+      setLookingForLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const inboxUserIds = Array.from(
+      new Set([
+        ...requests.map((request) => request.userId),
+        ...jams.map((conversation) => conversation.userId),
+        ...sent.map((conversation) => conversation.userId),
+      ]),
+    );
+
+    setLookingForLoading(true);
+    void fetchLookingForUserIds(inboxUserIds)
+      .then((ids) => {
+        if (!cancelled) setLookingForUserIds(ids);
+      })
+      .catch(() => {
+        if (!cancelled) setLookingForUserIds(new Set());
+      })
+      .finally(() => {
+        if (!cancelled) setLookingForLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [jams, lookingForActive, requests, sent]);
 
   useEffect(() => {
     const chatUserId =
@@ -634,7 +674,7 @@ export function InboxScreen({
             {nearMeLoading ? (
               <ActivityIndicator color={getActivityIndicatorColor()} size="small" />
             ) : (
-              <NearMeIcon active={nearMeActive} />
+              <NearMeIcon active={nearMeActive} color={getChromeIconColor(nearMeActive)} />
             )}
           </Pressable>
           <View style={styles.feedRecentFiltersArea} pointerEvents="none" />
@@ -642,17 +682,22 @@ export function InboxScreen({
             onPress={() => setFiltersOpen(true)}
             style={[
               styles.feedFilterButton,
-              (filterRoles.length > 0 || Boolean(filterLocation)) && styles.inboxFilterButtonActive,
+              (filterRoles.length > 0 || Boolean(filterLocation) || lookingForActive) &&
+                styles.inboxFilterButtonActive,
             ]}
             accessibilityLabel="filter inbox"
             accessibilityRole="button"
-            accessibilityState={{ selected: filterRoles.length > 0 || Boolean(filterLocation) }}
+            accessibilityState={{
+              selected: filterRoles.length > 0 || Boolean(filterLocation) || lookingForActive,
+            }}
           >
             <FeedFilterIcon color={getActivityIndicatorColor()} />
           </Pressable>
         </View>
         <SegmentedTabs tabs={["requests", "jams", "sent"]} active={tab} onChange={(value) => setTab(value as InboxTab)} />
-        {loading || (nearMeActive && nearMeLoading && !nearbyUserIds) ? (
+        {loading ||
+        (nearMeActive && nearMeLoading && !nearbyUserIds) ||
+        (lookingForActive && lookingForLoading && !lookingForUserIds) ? (
           <ActivityIndicator color={getActivityIndicatorColor()} style={styles.loader} />
         ) : tab === "requests" ? (
           <View style={styles.list}>
@@ -684,7 +729,7 @@ export function InboxScreen({
               <Text style={styles.inboxEmptyText}>
                 {getInboxEmptyCopy({
                   tab: "requests",
-                  filtersActive: filterRoles.length > 0 || Boolean(filterLocation),
+                  filtersActive: filterRoles.length > 0 || Boolean(filterLocation) || lookingForActive,
                   nearMeActive,
                 })}
               </Text>
@@ -712,7 +757,7 @@ export function InboxScreen({
               <Text style={styles.inboxEmptyText}>
                 {getInboxEmptyCopy({
                   tab: "jams",
-                  filtersActive: filterRoles.length > 0 || Boolean(filterLocation),
+                  filtersActive: filterRoles.length > 0 || Boolean(filterLocation) || lookingForActive,
                   nearMeActive,
                 })}
               </Text>
@@ -733,7 +778,7 @@ export function InboxScreen({
               <Text style={styles.inboxEmptyText}>
                 {getInboxEmptyCopy({
                   tab: "sent",
-                  filtersActive: filterRoles.length > 0 || Boolean(filterLocation),
+                  filtersActive: filterRoles.length > 0 || Boolean(filterLocation) || lookingForActive,
                   nearMeActive,
                 })}
               </Text>
@@ -746,11 +791,14 @@ export function InboxScreen({
         selectedRoles={filterRoles}
         selectedGenres={EMPTY_FILTER_GENRES}
         selectedLocation={filterLocation}
+        lookingForActive={lookingForActive}
+        showLookingFor
         includeGenres={false}
         onClose={() => setFiltersOpen(false)}
-        onApply={(nextRoles, _nextGenres, nextLocation) => {
+        onApply={(nextRoles, _nextGenres, nextLocation, nextLookingFor) => {
           setFilterRoles(nextRoles);
           setFilterLocation(nextLocation);
+          setLookingForActive(nextLookingFor);
           setFiltersOpen(false);
         }}
       />

@@ -16,6 +16,28 @@ export type MainTabParamList = {
 };
 export type InboxTab = "requests" | "jams" | "sent";
 export type CreateStage = "camera" | "edit" | "details";
+export type CreateCaptureMode = "video" | "photo";
+export type CreateEditItemKind = "video" | "image";
+export type CreateTextOverlayItem = {
+  id: string;
+  text: string;
+  centerRatio: { x: number; y: number };
+  fontScale: number;
+  fontId: VideoTextFontId;
+  effectId: VideoTextEffectId;
+};
+export type CreateEditItem = {
+  id: string;
+  kind: CreateEditItemKind;
+  uri: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number | null;
+  width: number | null;
+  height: number | null;
+  durationMs: number;
+  textOverlays: CreateTextOverlayItem[];
+};
 export type VideoFilter = VideoFilterId;
 export type AuthMode = "login" | "signup" | "forgot" | "reset";
 export type AuthDeepLinkResult = "recovery" | "session" | null;
@@ -43,15 +65,6 @@ export type SavedVideoController = {
   savedVideoIds: Set<string>;
   setVideoSaved: (videoId: string, nextSaved: boolean) => Promise<boolean>;
   refreshSavedVideos: () => Promise<Set<string>>;
-};
-
-export type CreateTextOverlayItem = {
-  id: string;
-  text: string;
-  centerRatio: { x: number; y: number };
-  fontScale: number;
-  fontId: VideoTextFontId;
-  effectId: VideoTextEffectId;
 };
 
 /** Keep in sync with FEED_PLAYBACK_SPEEDS in theme/tokens. */

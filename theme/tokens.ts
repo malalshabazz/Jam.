@@ -7,6 +7,7 @@ export const panel = "#18181b";
 export const panelSoft = "#111113";
 export const border = "rgba(255,255,255,0.12)";
 export const muted = "#a1a1aa";
+export const danger = "#DC2626";
 
 export const THEME_STORAGE_KEY = "jam.themeMode";
 export const AUTH_PASSWORD_MIN_LENGTH = 8;
@@ -57,6 +58,8 @@ export const CREATE_RECORDING_TIMER_OPTIONS = [0, 3, 10] as const;
 export const CREATE_CAMERA_CONTROLS_BOTTOM_PADDING = 24;
 export const CREATE_CAMERA_RECORD_BUTTON_SIZE = 78;
 export const CREATE_CAMERA_RECORD_BUTTON_BORDER_WIDTH = 4;
+export const CREATE_CAMERA_PHOTO_BUTTON_SIZE = 36;
+export const CREATE_CAMERA_CAPTURE_SWITCH_GAP = 18;
 export const CREATE_CAMERA_FILTER_ROW_HEIGHT = 44;
 export const CREATE_CAMERA_CONTROL_BUTTON_SIZE = 54;
 export const CREATE_CAMERA_CONTROL_ICON_SIZE = 28;

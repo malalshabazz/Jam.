@@ -150,6 +150,57 @@ export function CreateCameraFlashIcon({ enabled }: { enabled: boolean }) {
   );
 }
 
+export function CreateEditAudioIcon({ active = false }: { active?: boolean }) {
+  const size = CREATE_CAMERA_CONTROL_ICON_SIZE;
+  const strokeWidth = active ? 2.3 : 1.9;
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M9.2 18.4c0 1.55-1.25 2.8-2.8 2.8S3.6 19.95 3.6 18.4s1.25-2.8 2.8-2.8 2.8 1.25 2.8 2.8Z"
+        stroke="#fff"
+        strokeWidth={strokeWidth}
+      />
+      <Path
+        d="M9.2 18.4V5.4l11.2-2.2v12.8"
+        stroke="#fff"
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <Path
+        d="M20.4 16c0 1.55-1.25 2.8-2.8 2.8s-2.8-1.25-2.8-2.8 1.25-2.8 2.8-2.8 2.8 1.25 2.8 2.8Z"
+        stroke="#fff"
+        strokeWidth={strokeWidth}
+      />
+    </Svg>
+  );
+}
+
+export function CreateEditAudioWaveformIcon({ active = false }: { active?: boolean }) {
+  const size = CREATE_CAMERA_CONTROL_ICON_SIZE;
+  const strokeWidth = active ? 2.4 : 2;
+  const bars = [
+    { x: 4.2, h: 7 },
+    { x: 8.1, h: 13 },
+    { x: 12, h: 18 },
+    { x: 15.9, h: 11 },
+    { x: 19.8, h: 8 },
+  ];
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      {bars.map((bar) => (
+        <Path
+          key={bar.x}
+          d={`M${bar.x} ${12 - bar.h / 2} v${bar.h}`}
+          stroke="#fff"
+          strokeWidth={strokeWidth}
+          strokeLinecap="round"
+        />
+      ))}
+    </Svg>
+  );
+}
+
 export function CreateCameraTimerIcon({ seconds }: { seconds: RecordingTimerSeconds }) {
   if (seconds > 0) {
     return <Text style={styles.createCameraSideRailText}>{seconds}s</Text>;

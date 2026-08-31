@@ -229,6 +229,15 @@ export function EditProfileModal({
               <Text style={styles.helper}>tap to change or delete</Text>
             </Pressable>
             <TextInput value={displayName} onChangeText={setDisplayName} placeholder="display name" placeholderTextColor="#71717a" style={styles.input} />
+            <TextInput
+              value={bio}
+              onChangeText={setBio}
+              placeholder="bio"
+              placeholderTextColor="#71717a"
+              style={[styles.input, styles.textArea]}
+              multiline
+              maxLength={150}
+            />
             <SectionLabel label={`creator types (${creatorTypes.length}/${MAX_ACCOUNT_CREATOR_TYPES})`} />
             <Text style={styles.helper}>choose up to {MAX_ACCOUNT_CREATOR_TYPES} creator types for your account.</Text>
             <ChipRow items={creatorTypes} onRemove={removeCreatorType} />
@@ -243,16 +252,6 @@ export function EditProfileModal({
             <SuggestionList items={roleMatches} maxVisibleItems={3} onPick={(role) => {
               addCreatorType(role);
             }} />
-            <TextInput
-              value={bio}
-              onChangeText={setBio}
-              onFocus={ensureFieldVisible}
-              placeholder="bio"
-              placeholderTextColor="#71717a"
-              style={[styles.input, styles.textArea]}
-              multiline
-              maxLength={150}
-            />
             <SectionLabel label="location" />
             <ProfileLocationPicker
               country={country}

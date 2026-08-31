@@ -1,5 +1,5 @@
 import { Pressable, ScrollView, Text } from "react-native";
-import { styles } from "@/theme/styles";
+import { darkStyles } from "@/theme/styles";
 
 export function SuggestionList({
   items,
@@ -20,11 +20,11 @@ export function SuggestionList({
     <ScrollView
       nestedScrollEnabled
       keyboardShouldPersistTaps="handled"
-      style={[styles.suggestionList, { maxHeight: listMaxHeight }]}
+      style={[darkStyles.suggestionList, { maxHeight: listMaxHeight }]}
     >
       {items.map((item, index) => (
-        <Pressable key={`${item}-${index}`} style={styles.suggestionItem} onPress={() => onPick(item)}>
-          <Text style={styles.suggestionText}>{item}</Text>
+        <Pressable key={`${item}-${index}`} style={darkStyles.suggestionItem} onPress={() => onPick(item)}>
+          <Text style={darkStyles.suggestionText}>{item}</Text>
         </Pressable>
       ))}
     </ScrollView>

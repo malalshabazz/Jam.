@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getAllowedMaxVideoSeconds } from "@/lib/pro-entitlements";
+import { assertCallerOwnsStreamId } from "@/lib/cloudflare-stream-ownership";
+import { createServiceRoleClient } from "@/lib/supabase-admin";
 
 type CloudflareVideoResponse = {
   success: boolean;
@@ -14,47 +16,6 @@ type CloudflareVideoResponse = {
     status?: { state?: string; errorReasonText?: string | null };
   };
 };
-
-/**
- * Clip + source-delete must only run on Stream assets the caller owns.
- * Published rows are checked in `videos`; pending uploads rely on Stream
- * `creator` / `meta.jam_user_id` set at direct-upload time.
- */
-async function assertCallerOwnsStreamSource(input: {
-  supabase: ReturnType<typeof createAuthenticatedClient>;
-  userId: string;
-  sourceId: string;
-  sourceCreator: string | null | undefined;
-  sourceMeta: Record<string, string | undefined> | null | undefined;
-}): Promise<Response | null> {
-  const { data: videoRows, error } = await input.supabase
-    .from("videos")
-    .select("user_id")
-    .eq("cloudflare_stream_id", input.sourceId)
-    .limit(20);
-
-  if (error) {
-    return Response.json({ error: "Could not verify video ownership." }, { status: 500 });
-  }
-
-  if (videoRows && videoRows.length > 0) {
-    const foreignOwner = videoRows.some(
-      (row) => typeof row.user_id === "string" && row.user_id !== input.userId,
-    );
-    if (foreignOwner) {
-      return Response.json({ error: "You do not own this video." }, { status: 403 });
-    }
-    return null;
-  }
-
-  const streamOwner =
-    input.sourceCreator?.trim() || input.sourceMeta?.jam_user_id?.trim() || "";
-  if (!streamOwner || streamOwner !== input.userId) {
-    return Response.json({ error: "You do not own this video." }, { status: 403 });
-  }
-
-  return null;
-}
 
 function cloudflareErrorMessage(data: CloudflareVideoResponse, fallback: string) {
   return (
@@ -151,6 +112,10 @@ export async function POST(request: NextRequest) {
   if (!accountId || !apiToken) {
     return Response.json({ error: "Cloudflare Stream is not configured." }, { status: 500 });
   }
+  const admin = createServiceRoleClient();
+  if (!admin) {
+    return Response.json({ error: "Upload claiming is not configured." }, { status: 500 });
+  }
 
   const supabase = createAuthenticatedClient(accessToken);
   const {
@@ -180,6 +145,15 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Trim end must be after trim start." }, { status: 400 });
   }
 
+  const ownershipError = await assertCallerOwnsStreamId({
+    supabase,
+    userId: user.id,
+    streamId: sourceId,
+    accountId,
+    apiToken,
+  });
+  if (ownershipError) return ownershipError;
+
   const { data: profile } = await supabase
     .from("profiles")
     .select("early_adopter, video_count, pro_subscription_active")
@@ -204,15 +178,6 @@ export async function POST(request: NextRequest) {
       { status: 504 },
     );
   }
-
-  const ownershipError = await assertCallerOwnsStreamSource({
-    supabase,
-    userId: user.id,
-    sourceId,
-    sourceCreator: sourceVideo?.creator,
-    sourceMeta: sourceVideo?.meta,
-  });
-  if (ownershipError) return ownershipError;
 
   const { startTimeSeconds, endTimeSeconds, durationSeconds } = normalizeClipRange(
     rawStartTimeSeconds,
@@ -300,12 +265,27 @@ export async function POST(request: NextRequest) {
     headers: { Authorization: `Bearer ${apiToken}` },
   }).catch(() => undefined);
 
-  // Transfer publish claim from source → clipped asset.
-  await supabase.from("stream_upload_claims").insert({
+  // Transfer publish claim from source → clipped asset (clip already enforces output cap).
+  const { error: claimInsertError } = await admin.from("stream_upload_claims").insert({
     cloudflare_stream_id: clippedId,
     user_id: user.id,
+    allowed_publish_seconds: allowedMaxDurationSeconds,
+    status: "publishable",
   });
-  await supabase
+  if (claimInsertError) {
+    if (claimInsertError.code !== "23505") {
+      return Response.json({ error: "Could not claim trimmed video." }, { status: 500 });
+    }
+    const { data: existing } = await admin
+      .from("stream_upload_claims")
+      .select("user_id")
+      .eq("cloudflare_stream_id", clippedId)
+      .maybeSingle<{ user_id: string }>();
+    if (existing?.user_id !== user.id) {
+      return Response.json({ error: "Could not claim trimmed video." }, { status: 409 });
+    }
+  }
+  await admin
     .from("stream_upload_claims")
     .delete()
     .eq("cloudflare_stream_id", sourceId)

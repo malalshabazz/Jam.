@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from "react";
 import { Animated, Easing, type StyleProp, type ViewStyle } from "react-native";
 import {
   PanGestureHandler,
@@ -8,21 +8,27 @@ import {
 import { styles } from "@/theme/styles";
 import { viewportWidth } from "@/theme/tokens";
 
-export function SwipeBackSurface({
-  children,
-  onBack,
-  style,
-  resetKey,
-  enterFromRight = false,
-}: {
-  children: React.ReactNode;
-  onBack: () => void;
-  style?: StyleProp<ViewStyle>;
-  resetKey?: string | boolean | null;
-  enterFromRight?: boolean;
-}) {
+export type SwipeBackSurfaceHandle = {
+  dismiss: () => void;
+};
+
+export const SwipeBackSurface = forwardRef<
+  SwipeBackSurfaceHandle,
+  {
+    children: React.ReactNode;
+    onBack: () => void;
+    style?: StyleProp<ViewStyle>;
+    resetKey?: string | boolean | null;
+    enterFromRight?: boolean;
+  }
+>(function SwipeBackSurface(
+  { children, onBack, style, resetKey, enterFromRight = false },
+  ref,
+) {
   const [translateX] = useState(() => new Animated.Value(enterFromRight ? viewportWidth : 0));
   const closingRef = useRef(false);
+  const onBackRef = useRef(onBack);
+  onBackRef.current = onBack;
   const animatedTranslateX = useMemo(
     () =>
       translateX.interpolate({
@@ -32,6 +38,25 @@ export function SwipeBackSurface({
       }),
     [translateX],
   );
+
+  function dismiss() {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    Animated.timing(translateX, {
+      toValue: viewportWidth,
+      duration: 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) {
+        onBackRef.current();
+        return;
+      }
+      closingRef.current = false;
+    });
+  }
+
+  useImperativeHandle(ref, () => ({ dismiss }), []);
 
   useEffect(() => {
     if (!resetKey) return;
@@ -75,16 +100,7 @@ export function SwipeBackSurface({
       (translationX > viewportWidth * 0.34 || velocityX > 520);
 
     if (shouldComplete) {
-      if (closingRef.current) return;
-      closingRef.current = true;
-      Animated.timing(translateX, {
-        toValue: viewportWidth,
-        duration: 190,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }).start(() => {
-        onBack();
-      });
+      dismiss();
       return;
     }
 
@@ -115,4 +131,4 @@ export function SwipeBackSurface({
       </Animated.View>
     </PanGestureHandler>
   );
-}
+});

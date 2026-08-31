@@ -14,6 +14,7 @@ export const creatorRoles = [
 
 export const musicGenres = [
   "afrobeats",
+  "alternative",
   "amapiano",
   "blues",
   "classical",
@@ -29,6 +30,7 @@ export const musicGenres = [
   "indie",
   "jazz",
   "latin",
+  "lofi",
   "metal",
   "neo soul",
   "pop",

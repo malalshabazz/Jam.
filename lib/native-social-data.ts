@@ -2,7 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { clearDiscoverFeedSessionCache } from "@/lib/discover-feed-session-cache";
 import { geocodeProfileLocation } from "@/lib/geocode";
 import { publishJamRelationship } from "@/lib/jam-relationship-sync";
-import { deleteCloudflareVideo, getCloudflarePlaybackUrl } from "@/lib/native-cloudflare";
+import { deleteCloudflareVideo, getCloudflarePlaybackUrl, assertStreamPublishable } from "@/lib/native-cloudflare";
 import { creatorRoles, musicGenres } from "@/lib/options";
 import { getProBadgeKind, type ProBadgeKind } from "@/lib/pro-entitlements";
 import { supabase } from "@/lib/native-supabase";
@@ -12,6 +12,8 @@ import {
   normalizeVideoTextOverlays,
   type VideoTextOverlay,
 } from "@/lib/video-presentation";
+
+export type PostMediaType = "video" | "slideshow";
 
 export type FeedVideo = {
   id: string;
@@ -35,6 +37,10 @@ export type FeedVideo = {
   lookingFor: boolean;
   /** 1–3 when pinned on the creator profile. */
   pinnedRank?: number | null;
+  mediaType: PostMediaType;
+  imageUrls: string[];
+  audioUrl: string | null;
+  audioDurationMs: number | null;
   earlyAdopter: boolean;
   proBadge: ProBadgeKind | null;
   videoCount: number;
@@ -90,6 +96,14 @@ export type ProfileVideo = {
   /** 1–3 when pinned on the creator profile; null/undefined when unpinned. */
   pinned_rank?: number | null;
   pinnedRank?: number | null;
+  mediaType?: PostMediaType | null;
+  media_type?: string | null;
+  imageUrls?: string[] | null;
+  image_urls?: string[] | null;
+  audioUrl?: string | null;
+  audio_url?: string | null;
+  audioDurationMs?: number | null;
+  audio_duration_ms?: number | null;
   created_at?: string;
   creatorName?: string;
   role?: string;
@@ -276,6 +290,10 @@ type VideoRow = {
   text_overlays?: unknown;
   looking_for?: boolean | null;
   pinned_rank?: number | null;
+  media_type?: string | null;
+  image_urls?: string[] | null;
+  audio_url?: string | null;
+  audio_duration_ms?: number | null;
   created_at: string;
 };
 
@@ -326,9 +344,9 @@ type MessageRow = {
 };
 
 const VIDEO_COLUMNS_WITH_TAGS =
-  "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, pinned_rank, created_at";
+  "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, pinned_rank, media_type, image_urls, audio_url, audio_duration_ms, created_at";
 const OWN_VIDEO_COLUMNS_WITH_TAGS =
-  "id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, pinned_rank, created_at";
+  "id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, pinned_rank, media_type, image_urls, audio_url, audio_duration_ms, created_at";
 const VIDEO_COLUMNS_WITH_TAGS_NO_PIN =
   "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, created_at";
 const OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PIN =
@@ -780,6 +798,32 @@ export async function fetchNearbyUserIds(options: {
   return ids;
 }
 
+/**
+ * Inbox Looking For filter: creators in `userIds` who currently have at least
+ * one video tagged looking_for.
+ */
+export async function fetchLookingForUserIds(userIds: string[]): Promise<Set<string>> {
+  const uniqueIds = Array.from(new Set(userIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return new Set();
+
+  const { data, error } = await supabase
+    .from("videos")
+    .select("user_id")
+    .in("user_id", uniqueIds)
+    .eq("looking_for", true);
+
+  if (error) {
+    if (isMissingSchemaError(error)) return new Set();
+    throw error;
+  }
+
+  const ids = new Set<string>();
+  for (const row of (data ?? []) as Array<{ user_id: string | null }>) {
+    if (row?.user_id) ids.add(row.user_id);
+  }
+  return ids;
+}
+
 async function hydrateFeedPageFromOrderedIds(input: {
   currentUserId: string;
   orderedIds: Array<{ id: string; created_at: string; sort_key: string }>;
@@ -918,12 +962,32 @@ export function getProfileVideoPinnedRank(
   return typeof raw === "number" && raw >= 1 && raw <= MAX_PINNED_PROFILE_VIDEOS ? raw : null;
 }
 
+function normalizePostMediaType(value: unknown): PostMediaType {
+  return value === "slideshow" ? "slideshow" : "video";
+}
+
+function normalizeImageUrls(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    .map((entry) => entry.trim())
+    .slice(0, 10);
+}
+
 function normalizeOwnProfileVideo(video: ProfileVideo, ownerUserId?: string): ProfileVideo {
   const cloudflareStreamId = video.cloudflareStreamId ?? video.cloudflare_stream_id ?? null;
+  const mediaType = normalizePostMediaType(video.mediaType ?? video.media_type);
+  const imageUrls = normalizeImageUrls(video.imageUrls ?? video.image_urls);
+  const audioUrl = video.audioUrl ?? video.audio_url ?? null;
+  const audioDurationMs = video.audioDurationMs ?? video.audio_duration_ms ?? null;
   const mediaUrl =
     video.mediaUrl ??
     video.media_url ??
-    (cloudflareStreamId ? getCloudflarePlaybackUrl(cloudflareStreamId) : null);
+    (mediaType === "slideshow"
+      ? imageUrls[0] ?? null
+      : cloudflareStreamId
+        ? getCloudflarePlaybackUrl(cloudflareStreamId)
+        : null);
   const lookingFor = Boolean(video.lookingFor ?? video.looking_for);
   const pinnedRank = getProfileVideoPinnedRank(video);
   // Own/creator selects omit user_id — attach the known owner so profile → feed
@@ -944,6 +1008,14 @@ function normalizeOwnProfileVideo(video: ProfileVideo, ownerUserId?: string): Pr
     looking_for: lookingFor,
     pinnedRank,
     pinned_rank: pinnedRank,
+    mediaType,
+    media_type: mediaType,
+    imageUrls,
+    image_urls: imageUrls,
+    audioUrl,
+    audio_url: audioUrl,
+    audioDurationMs,
+    audio_duration_ms: audioDurationMs,
   };
 }
 
@@ -1445,14 +1517,125 @@ async function publishFreshJamRelationship(
   }
 }
 
-export async function sendMessage(recipientUserId: string, body: string) {
-  const { data, error } = await supabase.rpc("send_direct_message", {
+export async function sendMessage(
+  recipientUserId: string,
+  body: string,
+  sourceVideoId?: string | null,
+) {
+  const payload: Record<string, unknown> = {
     recipient_user_id: recipientUserId,
     message_body: body,
-  });
+  };
+  if (sourceVideoId) {
+    payload.source_video_id = sourceVideoId;
+  }
 
-  if (error) throw error;
+  const { data, error } = await supabase.rpc("send_direct_message", payload);
+
+  if (error) {
+    // Older DBs without the video arg still accept text-only messages.
+    if (sourceVideoId && isMissingSchemaError(error)) {
+      const fallback = await supabase.rpc("send_direct_message", {
+        recipient_user_id: recipientUserId,
+        message_body: body.trim() || "shared a video",
+      });
+      if (fallback.error) throw fallback.error;
+      return fallback.data as MessageRow;
+    }
+    throw error;
+  }
   return data as MessageRow;
+}
+
+export async function updateOwnVideo(input: {
+  videoId: string;
+  caption?: string;
+  roles?: string[];
+  genres?: string[];
+  videoFilter?: string | null;
+  lookingFor?: boolean;
+  thumbnailTimeMs?: number | null;
+}) {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) throw new Error("Log in again before editing.");
+
+  const roles = getUniqueTags(input.roles ?? []).slice(0, 1);
+  const genres = getUniqueTags(input.genres ?? []).slice(0, 3);
+  const categories = getUniqueTags([...roles, ...genres]);
+  const caption = (input.caption ?? "").trim().slice(0, 200);
+  const videoFilter = normalizeVideoFilter(input.videoFilter);
+  const lookingFor = Boolean(input.lookingFor);
+  const thumbnailTimeMs =
+    typeof input.thumbnailTimeMs === "number" && Number.isFinite(input.thumbnailTimeMs)
+      ? Math.max(0, Math.round(input.thumbnailTimeMs))
+      : null;
+  const thumbnailFields =
+    thumbnailTimeMs != null ? { thumbnail_time_ms: thumbnailTimeMs } : {};
+
+  const updateAttempts: Array<Record<string, unknown>> = [
+    {
+      caption,
+      roles,
+      genres,
+      categories,
+      video_filter: videoFilter,
+      looking_for: lookingFor,
+      ...thumbnailFields,
+    },
+    {
+      caption,
+      roles,
+      genres,
+      categories,
+      video_filter: videoFilter,
+      looking_for: lookingFor,
+    },
+    {
+      caption,
+      roles,
+      genres,
+      categories,
+      video_filter: videoFilter,
+    },
+    {
+      caption,
+      categories,
+      video_filter: videoFilter,
+    },
+    {
+      caption,
+      categories,
+    },
+  ];
+
+  let lastError: unknown = null;
+  for (const payload of updateAttempts) {
+    const { data, error } = await supabase
+      .from("videos")
+      .update(payload)
+      .eq("id", input.videoId)
+      .eq("user_id", user.id)
+      .select(OWN_VIDEO_COLUMNS_WITH_TAGS)
+      .maybeSingle();
+
+    if (!error) {
+      if (!data) throw new Error("Video not found.");
+      return normalizeOwnProfileVideo(data as ProfileVideo, user.id);
+    }
+    lastError = error;
+    if (!isMissingSchemaError(error)) break;
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Could not update video.");
+}
+
+export async function fetchJamConnections(currentUserId: string) {
+  const inbox = await fetchInbox(currentUserId);
+  return inbox.conversations;
 }
 
 export async function editMessage(messageId: string, body: string) {
@@ -1718,14 +1901,34 @@ export async function createVideo(input: {
   videoFilter?: VideoFilterId | string | null;
   textOverlays?: VideoTextOverlay[] | unknown;
   lookingFor?: boolean;
+  mediaType?: PostMediaType;
+  imageUrls?: string[] | null;
+  audioUrl?: string | null;
+  audioDurationMs?: number | null;
 }): Promise<{ id: string }> {
   const roles = getUniqueTags(input.roles);
   const genres = getUniqueTags(input.genres);
   const categories = getUniqueTags([...roles, ...genres]);
   const lookingFor = Boolean(input.lookingFor);
+  const mediaType: PostMediaType = input.mediaType === "slideshow" ? "slideshow" : "video";
+  const imageUrls =
+    mediaType === "slideshow"
+      ? (input.imageUrls ?? []).map((url) => url.trim()).filter(Boolean).slice(0, 10)
+      : [];
+  const audioUrl = mediaType === "slideshow" ? input.audioUrl?.trim() || null : null;
+  const audioDurationMs =
+    mediaType === "slideshow" &&
+    typeof input.audioDurationMs === "number" &&
+    Number.isFinite(input.audioDurationMs)
+      ? Math.max(0, Math.round(input.audioDurationMs))
+      : null;
   const mediaUrl =
     input.mediaUrl ??
-    (input.cloudflareStreamId ? getCloudflarePlaybackUrl(input.cloudflareStreamId) : null);
+    (mediaType === "slideshow"
+      ? imageUrls[0] ?? null
+      : input.cloudflareStreamId
+        ? getCloudflarePlaybackUrl(input.cloudflareStreamId)
+        : null);
   const thumbnailTimeMs =
     typeof input.thumbnailTimeMs === "number" && Number.isFinite(input.thumbnailTimeMs)
       ? Math.max(0, Math.round(input.thumbnailTimeMs))
@@ -1733,8 +1936,11 @@ export async function createVideo(input: {
   const videoFilter = normalizeVideoFilter(input.videoFilter);
   const textOverlays = normalizeVideoTextOverlays(input.textOverlays);
   logVideoDatabaseStep("createVideo start", {
+    mediaType,
     hasCloudflareStreamId: Boolean(input.cloudflareStreamId),
     hasMediaUrl: Boolean(mediaUrl),
+    imageCount: imageUrls.length,
+    hasAudioUrl: Boolean(audioUrl),
     captionLength: input.caption.length,
     roleCount: roles.length,
     genreCount: genres.length,
@@ -1742,6 +1948,30 @@ export async function createVideo(input: {
     textOverlayCount: textOverlays.length,
     lookingFor,
   });
+
+  if (mediaType === "slideshow") {
+    if (imageUrls.length === 0) throw new Error("Add at least one photo.");
+  }
+
+  if (input.cloudflareStreamId) {
+    await assertStreamPublishable(input.cloudflareStreamId);
+  }
+
+  const slideshowFields =
+    mediaType === "slideshow"
+      ? {
+          media_type: "slideshow" as const,
+          image_urls: imageUrls,
+          audio_url: audioUrl,
+          audio_duration_ms: audioDurationMs,
+        }
+      : {
+          media_type: "video" as const,
+          image_urls: [] as string[],
+          audio_url: null as string | null,
+          audio_duration_ms: null as number | null,
+        };
+
   // Prefer payloads that keep video_filter/text_overlays. The live DB is missing
   // roles/genres columns, so categories+presentation must come before any fallback
   // that drops presentation (otherwise text/filter never persist).
@@ -1759,6 +1989,21 @@ export async function createVideo(input: {
       video_filter: videoFilter,
       text_overlays: textOverlays,
       looking_for: lookingFor,
+      ...slideshowFields,
+    },
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      roles,
+      genres,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+      thumbnail_time_ms: thumbnailTimeMs,
+      video_filter: videoFilter,
+      text_overlays: textOverlays,
+      looking_for: lookingFor,
     },
     {
       user_id: input.userId,
@@ -1784,6 +2029,7 @@ export async function createVideo(input: {
       video_filter: videoFilter,
       text_overlays: textOverlays,
       looking_for: lookingFor,
+      ...slideshowFields,
     },
     {
       user_id: input.userId,
@@ -1795,6 +2041,31 @@ export async function createVideo(input: {
       thumbnail_time_ms: thumbnailTimeMs,
       video_filter: videoFilter,
       text_overlays: textOverlays,
+      looking_for: lookingFor,
+    },
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+      thumbnail_time_ms: thumbnailTimeMs,
+      video_filter: videoFilter,
+      text_overlays: textOverlays,
+    },
+    {
+      user_id: input.userId,
+      caption: input.caption,
+      roles,
+      genres,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+      thumbnail_time_ms: thumbnailTimeMs,
+      looking_for: lookingFor,
+      ...slideshowFields,
     },
     {
       user_id: input.userId,
@@ -2259,46 +2530,69 @@ async function fetchLocalSavedVideos(currentUserId: string) {
 async function removeSavedVideosByCreator(currentUserId: string, creatorUserId: string) {
   if (!currentUserId || !creatorUserId || currentUserId === creatorUserId) return;
 
-  const rpc = await supabase.rpc("fetch_creator_video_ids_for_moderation", {
+  const rpc = await supabase.rpc("clear_saved_videos_by_creator", {
     p_creator_id: creatorUserId,
   });
-  let videoIds: string[] = [];
-  if (!rpc.error) {
-    videoIds = ((rpc.data ?? []) as unknown[])
-      .map((id) => (typeof id === "string" ? id : null))
-      .filter((id): id is string => Boolean(id));
-  } else if (isMissingSchemaError(rpc.error)) {
-    const { data: creatorVideos, error: videosError } = await supabase
-      .from("videos")
-      .select("id")
-      .eq("user_id", creatorUserId);
-    if (videosError) {
-      if (isMissingSchemaError(videosError)) return;
-      throw videosError;
+  if (rpc.error) {
+    if (!isMissingFunctionError(rpc.error) && !isMissingSchemaError(rpc.error)) {
+      throw rpc.error;
     }
-    videoIds = ((creatorVideos ?? []) as Array<{ id: string }>).map((video) => video.id);
-  } else {
-    throw rpc.error;
+    await deleteOwnSavesOfCreatorViaKnownIds(currentUserId, creatorUserId);
   }
 
+  await replaceLocalSavedCacheFromRemote(currentUserId);
+}
+
+/** Fallback when 055 is not applied — only uses ids this user already saved. */
+async function deleteOwnSavesOfCreatorViaKnownIds(currentUserId: string, creatorUserId: string) {
+  const { data, error } = await supabase
+    .from("saved_videos")
+    .select("video_id")
+    .eq("user_id", currentUserId);
+
+  let savedIds: string[] = [];
+  if (error) {
+    if (!isMissingSchemaError(error)) throw error;
+  } else {
+    savedIds = ((data ?? []) as Array<{ video_id: string }>)
+      .map((row) => row.video_id)
+      .filter((id): id is string => Boolean(id));
+  }
+
+  const localIds = await getLocalSavedVideoIds(currentUserId);
+  const knownIds = [...new Set([...savedIds, ...localIds])];
+  if (knownIds.length === 0) return;
+
+  const rows = await fetchVideoRowsByIds(knownIds);
+  const videoIds = rows
+    .filter((video) => video.user_id === creatorUserId)
+    .map((video) => video.id);
   if (videoIds.length === 0) return;
 
-  const { error } = await supabase
+  const { error: deleteError } = await supabase
     .from("saved_videos")
     .delete()
     .eq("user_id", currentUserId)
     .in("video_id", videoIds);
 
+  if (deleteError && !isMissingSchemaError(deleteError)) throw deleteError;
+}
+
+async function replaceLocalSavedCacheFromRemote(currentUserId: string) {
+  const { data, error } = await supabase
+    .from("saved_videos")
+    .select("video_id")
+    .eq("user_id", currentUserId);
+
   if (error) {
-    if (isMissingSchemaError(error)) {
-      await Promise.all(videoIds.map((videoId) => removeLocalSavedVideoId(currentUserId, videoId)));
-      return;
-    }
+    if (isMissingSchemaError(error)) return;
     throw error;
   }
 
-  // Keep any local fallback cache in sync with the remote purge.
-  await Promise.all(videoIds.map((videoId) => removeLocalSavedVideoId(currentUserId, videoId)));
+  const next = ((data ?? []) as Array<{ video_id: string }>)
+    .map((row) => row.video_id)
+    .filter((id): id is string => Boolean(id));
+  await AsyncStorage.setItem(getLocalSavedKey(currentUserId), JSON.stringify(next));
 }
 
 async function getLocalSavedVideoIds(currentUserId: string) {
@@ -2417,6 +2711,16 @@ function getLatestJamActivityAt(
     .at(-1) ?? null;
 }
 
+function conversationPreviewText(message: MessageRow | undefined, unlocked: boolean) {
+  if (!message) {
+    return unlocked ? "you are jamming. chat is open." : "jam sent. waiting for a reply.";
+  }
+  const body = message.body?.trim() ?? "";
+  if (body) return body;
+  if (message.video_id || message.video) return "sent a video";
+  return "";
+}
+
 function toConversation(
   currentUserId: string,
   otherUserId: string,
@@ -2443,9 +2747,7 @@ function toConversation(
     avatarUrl: profile.avatar_url,
     role: getRole(profile),
     location: getProfileLocation(profile),
-    lastMessage:
-      lastMessage?.body ??
-      (unlocked ? "you are jamming. chat is open." : "jam sent. waiting for a reply."),
+    lastMessage: conversationPreviewText(lastMessage, unlocked),
     timestamp: formatRelativeTime(lastActivityAt),
     lastActivityAt,
     unread: unreadCount > 0,
@@ -2530,6 +2832,10 @@ function toFeedVideo(
     textOverlays: normalizeVideoTextOverlays(video.text_overlays),
     lookingFor: Boolean(video.looking_for),
     pinnedRank: getProfileVideoPinnedRank({ pinned_rank: video.pinned_rank }),
+    mediaType: normalizePostMediaType(video.media_type),
+    imageUrls: normalizeImageUrls(video.image_urls),
+    audioUrl: video.audio_url ?? null,
+    audioDurationMs: video.audio_duration_ms ?? null,
     earlyAdopter: Boolean(profile?.early_adopter),
     proBadge,
     videoCount: profile?.video_count ?? 0,
@@ -2580,6 +2886,14 @@ function toSavedProfileVideo(
     looking_for: Boolean(video.looking_for),
     pinnedRank,
     pinned_rank: pinnedRank,
+    mediaType: normalizePostMediaType(video.media_type),
+    media_type: normalizePostMediaType(video.media_type),
+    imageUrls: normalizeImageUrls(video.image_urls),
+    image_urls: normalizeImageUrls(video.image_urls),
+    audioUrl: video.audio_url ?? null,
+    audio_url: video.audio_url ?? null,
+    audioDurationMs: video.audio_duration_ms ?? null,
+    audio_duration_ms: video.audio_duration_ms ?? null,
     created_at: video.created_at,
     savedByMe,
     mutual: connectedWithCurrentUser || (jammedByMe.has(video.user_id) && jammedMe.has(video.user_id)),

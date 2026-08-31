@@ -2,8 +2,14 @@ import { useEffect, useRef } from "react";
 import { Animated, Easing } from "react-native";
 import Svg, { Circle, Path } from "react-native-svg";
 
-export function NearMeIcon({ active = false }: { active?: boolean }) {
-  const stroke = active ? "#fff" : "#d4d4d8";
+export function NearMeIcon({
+  active = false,
+  color,
+}: {
+  active?: boolean;
+  color?: string;
+}) {
+  const stroke = color ?? (active ? "#fff" : "#d4d4d8");
   const baseCenterY = 27;
   const baseRadiusX = 8.4;
   const baseRadiusY = 2.85;

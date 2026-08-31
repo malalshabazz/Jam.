@@ -15,11 +15,13 @@ export function VideoThumbnailFilmstrip({
   onSelect,
   filter = "none",
   textOverlays = [],
+  initialTimeMs,
 }: {
   frames: Array<{ timeMs: number; uri: string }>;
   onSelect: (timeMs: number, uri: string) => void;
   filter?: VideoFilter;
   textOverlays?: CreateTextOverlayItem[];
+  initialTimeMs?: number;
 }) {
   const onSelectRef = useRef(onSelect);
   const lastIndexRef = useRef(0);
@@ -36,14 +38,25 @@ export function VideoThumbnailFilmstrip({
 
   onSelectRef.current = onSelect;
 
+  const initialIndex =
+    frames.length === 0 || typeof initialTimeMs !== "number"
+      ? 0
+      : frames.reduce((best, frame, index) => {
+          const bestDist = Math.abs(frames[best].timeMs - initialTimeMs);
+          const nextDist = Math.abs(frame.timeMs - initialTimeMs);
+          return nextDist < bestDist ? index : best;
+        }, 0);
+
   useEffect(() => {
-    lastIndexRef.current = 0;
-    selectorLeftRef.current = 0;
-    setSelectorLeft(0);
-    if (frames[0]) {
-      onSelectRef.current(frames[0].timeMs, frames[0].uri);
+    lastIndexRef.current = initialIndex;
+    const nextLeft = frameWidth > 0 ? initialIndex * frameWidth : 0;
+    selectorLeftRef.current = nextLeft;
+    setSelectorLeft(nextLeft);
+    const frame = frames[initialIndex];
+    if (frame) {
+      onSelectRef.current(frame.timeMs, frame.uri);
     }
-  }, [frames]);
+  }, [frames, frameWidth, initialIndex]);
 
   function setSelectorPosition(left: number) {
     const nextLeft = clamp(left, 0, maxSelectorLeft);

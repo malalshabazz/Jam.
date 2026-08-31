@@ -2,6 +2,8 @@
 
 # dependencies
 /node_modules
+/node_modules.nosync
+# Keep local deps off iCloud eviction (see scripts/start-expo-lan.mjs)
 /.pnp
 .pnp.*
 .yarn/*
@@ -25,6 +27,7 @@
 .DS_Store
 .expo/
 *.pem
+/dist
 
 # debug
 npm-debug.log*

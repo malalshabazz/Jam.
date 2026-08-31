@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import { Animated, Easing, Pressable, Text, TextInput, View } from "react-native";
-import { styles } from "@/theme/styles";
+import { darkStyles, styles } from "@/theme/styles";
 
 function FilterResetButton({ onReset }: { onReset: () => void }) {
   const spin = useRef(new Animated.Value(0)).current;
@@ -71,7 +71,7 @@ export function FilterQueryField({
         onFocus={onFocus}
         placeholder={placeholder}
         placeholderTextColor="#71717a"
-        style={[styles.input, styles.filterQueryInput]}
+        style={[darkStyles.input, styles.filterQueryInput]}
       />
       <FilterResetButton onReset={onReset} />
     </View>

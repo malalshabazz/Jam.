@@ -98,6 +98,13 @@
     <string>Jam updates your live location for nearby creators while share live location is enabled in settings.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>Jam uses your location to show creators near you and share your live location when enabled in settings.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Jam needs local network access to load the development server on your computer.</string>
+    <key>NSBonjourServices</key>
+    <array>
+      <string>_expo._tcp</string>
+      <string>_http._tcp</string>
+    </array>
     <key>NSMicrophoneUsageDescription</key>
     <string>Jam uses your microphone so your videos can include sound.</string>
     <key>NSPhotoLibraryUsageDescription</key>

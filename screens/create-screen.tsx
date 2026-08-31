@@ -1,5 +1,4 @@
 import * as Haptics from "expo-haptics";
-import * as ImagePicker from "expo-image-picker";
 import { Camera, CameraView, type CameraType } from "expo-camera";
 import * as MediaLibrary from "expo-media-library";
 import { getThumbnailAsync } from "expo-video-thumbnails";
@@ -40,7 +39,7 @@ import {
   VideoTextOverlayGlyph,
   getVideoFilterOverlayStyle,
 } from "@/components/VideoPresentationOverlays";
-import { JamVideoView, type JamVideoPlaybackStatus } from "@/components/video/jam-video-view";
+import type { JamVideoPlaybackStatus } from "@/components/video/jam-video-view";
 import {
   contentFitForVideoSize,
   ensureVideoAspectCached,
@@ -58,6 +57,8 @@ import {
   CreateCameraFlashIcon,
   CreateCameraFlipIcon,
   CreateCameraTimerIcon,
+  CreateEditAudioIcon,
+  CreateEditAudioWaveformIcon,
   CreateEditTextIcon,
   CreateEditTrimIcon,
 } from "@/components/create/create-icons";
@@ -80,7 +81,11 @@ import {
   snapTextOverlayCenterRatio,
 } from "@/components/create/layout";
 import { CreatePostPreviewModal } from "@/components/create/post-preview-modal";
-import { RecordButtonCore, RecordProgressRing, RecordingElapsedTimer } from "@/components/create/record-controls";
+import { CreateCaptureShutter } from "@/components/create/capture-shutter";
+import { CreateEditAlbumPager } from "@/components/create/edit-album-pager";
+import { CreateAudioTrimPanel } from "@/components/create/edit-audio-trim";
+import { CreateEditSoundtrack } from "@/components/create/edit-soundtrack";
+import { RecordingElapsedTimer } from "@/components/create/record-controls";
 import { TagPicker } from "@/components/create/tag-picker";
 import { CreateEditTextOverlayItem } from "@/components/create/text-overlay-editors";
 import { CreateTrimFilmstrip } from "@/components/create/trim-filmstrip";
@@ -93,10 +98,22 @@ import {
   normalizeCameraRecording,
 } from "@/lib/bake-video-presentation";
 import { clamp, formatClipDuration, getUniqueStrings } from "@/lib/format";
+import {
+  isLibraryVideoAsset,
+  launchCreateLibraryPicker,
+  libraryPickerErrorMessage,
+  materializeLibraryAsset,
+} from "@/lib/create-library-media";
 import { getVideoUploadErrorDetails, logVideoUploadStep, type NativeVideoAsset } from "@/lib/native-cloudflare";
 import { fetchProfile, type Profile } from "@/lib/native-social-data";
 import { getNavBarHeight } from "@/lib/nav-bar";
 import { enqueuePendingVideoUpload } from "@/lib/pending-video-uploads";
+import { enqueuePendingSlideshowUpload } from "@/lib/pending-slideshow-uploads";
+import {
+  MAX_SLIDESHOW_IMAGES,
+  type SlideshowAudioAsset,
+  type SlideshowImageAsset,
+} from "@/lib/native-slideshow-storage";
 import { getAllowedMaxVideoSeconds } from "@/lib/pro-entitlements";
 import { triggerHoldHaptic } from "@/lib/hold-haptic";
 import {
@@ -120,8 +137,6 @@ import {
   CREATE_CAMERA_CONTROL_BUTTON_SIZE,
   CREATE_CAMERA_EXPOSURE_DRAG_RANGE_PX,
   CREATE_CAMERA_FOCUS_RETICLE_SIZE,
-  CREATE_CAMERA_RECORD_BUTTON_BORDER_WIDTH,
-  CREATE_CAMERA_RECORD_BUTTON_SIZE,
   CREATE_CAMERA_TOP_CONTROLS_OFFSET,
   CREATE_DETAILS_PREVIEW_HEIGHT,
   CREATE_DETAILS_PREVIEW_WIDTH,
@@ -136,7 +151,14 @@ import {
   viewportHeight,
   viewportWidth,
 } from "@/theme/tokens";
-import type { CreateStage, CreateTextOverlayItem, RecordingTimerSeconds, VideoFilter } from "@/types/app";
+import type {
+  CreateCaptureMode,
+  CreateEditItem,
+  CreateStage,
+  CreateTextOverlayItem,
+  RecordingTimerSeconds,
+  VideoFilter,
+} from "@/types/app";
 
 export function CreateScreen({
   userId,
@@ -149,7 +171,14 @@ export function CreateScreen({
 }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [createStage, setCreateStage] = useState<CreateStage>("camera");
+  const [captureMode, setCaptureMode] = useState<CreateCaptureMode>("video");
   const [asset, setAsset] = useState<NativeVideoAsset | null>(null);
+  const [editItems, setEditItems] = useState<CreateEditItem[]>([]);
+  const [editItemIndex, setEditItemIndex] = useState(0);
+  const [slideshowImages, setSlideshowImages] = useState<SlideshowImageAsset[]>([]);
+  const [slideshowAudio, setSlideshowAudio] = useState<SlideshowAudioAsset | null>(null);
+  const [slideshowAudioDurationMs, setSlideshowAudioDurationMs] = useState<number | null>(null);
+  const [slideshowAudioLabel, setSlideshowAudioLabel] = useState<string | null>(null);
   const [caption, setCaption] = useState("");
   const [selectedRoles, setSelectedRoles] = useState<string[]>([]);
   const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
@@ -166,11 +195,16 @@ export function CreateScreen({
   const [trimFilmstripFrames, setTrimFilmstripFrames] = useState<Array<{ timeMs: number; uri: string }>>([]);
   const [loadingTrimFilmstrip, setLoadingTrimFilmstrip] = useState(false);
   const [timelineWidth, setTimelineWidth] = useState(0);
-  const [activeEditTool, setActiveEditTool] = useState<"trim" | "filters" | "text" | null>(null);
+  const [activeEditTool, setActiveEditTool] = useState<"trim" | "filters" | "text" | "audio" | null>(null);
+  const [audioTrimStartRatio, setAudioTrimStartRatio] = useState(0);
+  const [audioTrimEndRatio, setAudioTrimEndRatio] = useState(1);
+  const [audioScrubRatio, setAudioScrubRatio] = useState<number | null>(null);
+  const [audioPlaybackRatio, setAudioPlaybackRatio] = useState(0);
+  const [audioTimelineWidth, setAudioTimelineWidth] = useState(0);
   const [selectedFilter, setSelectedFilter] = useState<VideoFilter>("none");
   const [lookingForCollaborators, setLookingForCollaborators] = useState(false);
-  const [textOverlays, setTextOverlays] = useState<CreateTextOverlayItem[]>([]);
   const [editingTextOverlayId, setEditingTextOverlayId] = useState<string | null>(null);
+  const [editPagerScrolling, setEditPagerScrolling] = useState(false);
   const [textOverlayActionId, setTextOverlayActionId] = useState<string | null>(null);
   const [textOverlayActionRenderId, setTextOverlayActionRenderId] = useState<string | null>(null);
   const [textFontPickerOverlayId, setTextFontPickerOverlayId] = useState<string | null>(null);
@@ -181,6 +215,7 @@ export function CreateScreen({
   });
   const [postPreviewOpen, setPostPreviewOpen] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
+  const [audioPickerOpen, setAudioPickerOpen] = useState(false);
   /** Composed export for details preview / thumbs / upload (trim + filter + text). */
   const [exportBakedAsset, setExportBakedAsset] = useState<NativeVideoAsset | null>(null);
   const [exportBakedDurationMs, setExportBakedDurationMs] = useState(0);
@@ -205,6 +240,8 @@ export function CreateScreen({
   const [editFilterPickerMounted, setEditFilterPickerMounted] = useState(false);
   const [recordingCountdown, setRecordingCountdown] = useState<number | null>(null);
   const [recording, setRecording] = useState(false);
+  const [capturingPhoto, setCapturingPhoto] = useState(false);
+  const [libraryBusy, setLibraryBusy] = useState(false);
   const [recentVideoThumbnailUri, setRecentVideoThumbnailUri] = useState<string | null>(
     () => cachedRecentVideoThumbnailUri,
   );
@@ -258,11 +295,13 @@ export function CreateScreen({
   const textOverlayHorizontalGuideVisibleRef = useRef(false);
   const pinchZoomFrameRef = useRef<number | null>(null);
   const trimDragStartRef = useRef({ start: 0, end: 1 });
+  const audioTrimDragStartRef = useRef({ start: 0, end: 1 });
   const uploadSessionRef = useRef(0);
   const thumbnailLoadSessionRef = useRef(0);
   const trimFilmstripLoadSessionRef = useRef(0);
   const selectedVideoDurationMsRef = useRef(0);
   const textOverlaysRef = useRef<CreateTextOverlayItem[]>([]);
+  const currentEditItemIdRef = useRef<string | null>(null);
   const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
 
@@ -408,9 +447,29 @@ export function CreateScreen({
     selectedVideoDurationMsRef.current = selectedVideoDurationMs;
   }, [selectedVideoDurationMs]);
 
+  const currentEditItem = editItems[editItemIndex] ?? editItems[0] ?? null;
+  const textOverlays = currentEditItem?.textOverlays ?? [];
+
+  useEffect(() => {
+    currentEditItemIdRef.current = currentEditItem?.id ?? null;
+  }, [currentEditItem?.id]);
+
   useEffect(() => {
     textOverlaysRef.current = textOverlays;
   }, [textOverlays]);
+
+  function setTextOverlays(updater: SetStateAction<CreateTextOverlayItem[]>) {
+    const itemId = currentEditItemIdRef.current;
+    if (!itemId) return;
+    setEditItems((items) =>
+      items.map((item) => {
+        if (item.id !== itemId) return item;
+        const prev = item.textOverlays ?? [];
+        const next = typeof updater === "function" ? updater(prev) : updater;
+        return next === prev ? item : { ...item, textOverlays: next };
+      }),
+    );
+  }
 
   useEffect(() => {
     editingTextOverlayIdRef.current = editingTextOverlayId;
@@ -604,7 +663,19 @@ export function CreateScreen({
     uploadSessionRef.current += 1;
     cameraRef.current?.stopRecording();
     setCreateStage("camera");
+    setCaptureMode("video");
     setAsset(null);
+    setEditItems([]);
+    setEditItemIndex(0);
+    setSlideshowImages([]);
+    setSlideshowAudio(null);
+    setSlideshowAudioDurationMs(null);
+    setSlideshowAudioLabel(null);
+    setAudioTrimStartRatio(0);
+    setAudioTrimEndRatio(1);
+    setAudioScrubRatio(null);
+    setAudioPlaybackRatio(0);
+    setAudioTimelineWidth(0);
     setCaption("");
     setSelectedRoles([]);
     setSelectedGenres([]);
@@ -626,7 +697,8 @@ export function CreateScreen({
     setActiveEditTool(null);
     setSelectedFilter("none");
     setLookingForCollaborators(false);
-    setTextOverlays([]);
+    currentEditItemIdRef.current = null;
+    setEditPagerScrolling(false);
     setEditingTextOverlayId(null);
     setTextOverlayActionId(null);
     setTextOverlayActionRenderId(null);
@@ -634,7 +706,10 @@ export function CreateScreen({
     setTextOverlaySizes({});
     hideTextOverlaySnapGuides(true);
     setRecording(false);
+    setCapturingPhoto(false);
+    setLibraryBusy(false);
     setPostPreviewOpen(false);
+    setAudioPickerOpen(false);
     setFlashEnabled(false);
     setRecordingTimerSeconds(0);
     setCameraFiltersOpen(false);
@@ -701,72 +776,73 @@ export function CreateScreen({
     setRecentVideoThumbnailUri(uri);
   }
 
-  async function pickVideo(source: "library") {
+  async function pickFromLibrary() {
+    const source = "library";
     logVideoUploadStep("picker permission request start", { source });
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    logVideoUploadStep("picker permission result", {
-      source,
-      granted: permission.granted,
-      status: permission.status,
-      canAskAgain: permission.canAskAgain,
-    });
-    if (!permission.granted) {
-      Alert.alert("permission needed", "camera and media permissions are needed to post.");
-      return;
-    }
-
-    logVideoUploadStep("picker launch start", { source, maxDuration });
-    let result: ImagePicker.ImagePickerResult;
     try {
-      result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ["videos"] as ImagePicker.MediaType[],
-        videoMaxDuration: maxDuration,
-        quality: 1,
-        videoQuality: ImagePicker.UIImagePickerControllerQualityType.High,
+      logVideoUploadStep("picker launch start", { source });
+      const result = await launchCreateLibraryPicker({
+        mediaTypes: ["images", "videos"],
+        allowsMultipleSelection: true,
+        selectionLimit: MAX_SLIDESHOW_IMAGES,
       });
+
+      logVideoUploadStep("picker launch result", {
+        source,
+        canceled: result.canceled,
+        assetCount: result.canceled ? 0 : result.assets.length,
+      });
+      if (result.canceled) {
+        logVideoUploadStep("picker canceled", { source });
+        return;
+      }
+
+      const pickedAssets = result.assets.filter((entry) => Boolean(entry.uri));
+      if (pickedAssets.length === 0) {
+        Alert.alert("couldn’t open that file", "try another video or photo from your camera roll.");
+        return;
+      }
+
+      setLibraryBusy(true);
+      const album: CreateEditItem[] = [];
+      for (const entry of pickedAssets.slice(0, MAX_SLIDESHOW_IMAGES)) {
+        const kind = isLibraryVideoAsset(entry) ? "video" : "image";
+        const materialized = await materializeLibraryAsset(entry, kind);
+        album.push({
+          id: `${kind}-${materialized.uri}-${album.length}`,
+          kind,
+          uri: materialized.uri,
+          fileName: materialized.fileName,
+          mimeType: materialized.mimeType,
+          fileSize: materialized.fileSize,
+          width: materialized.width,
+          height: materialized.height,
+          durationMs: materialized.durationMs,
+          textOverlays: [],
+        });
+      }
+      if (album.length === 0) {
+        Alert.alert("couldn’t open that file", "try another video or photo from your camera roll.");
+        return;
+      }
+
+      logVideoUploadStep("picker album selected", {
+        source,
+        itemCount: album.length,
+        imageCount: album.filter((item) => item.kind === "image").length,
+        videoCount: album.filter((item) => item.kind === "video").length,
+      });
+      startEditAlbum(album);
+      void loadRecentVideoThumbnail();
     } catch (err) {
       logVideoUploadStep("picker launch failed", {
         source,
         ...getVideoUploadErrorDetails(err),
       });
-      throw err;
+      Alert.alert("couldn’t open that file", libraryPickerErrorMessage(err));
+    } finally {
+      setLibraryBusy(false);
     }
-
-    logVideoUploadStep("picker launch result", {
-      source,
-      canceled: result.canceled,
-      assetCount: result.canceled ? 0 : result.assets.length,
-    });
-    if (result.canceled) {
-      logVideoUploadStep("picker canceled", { source });
-      return;
-    }
-    const picked = result.assets[0];
-    if (!picked?.uri) {
-      logVideoUploadStep("picker missing asset uri", { source });
-      return;
-    }
-
-    const nextAsset: NativeVideoAsset = {
-      uri: picked.uri,
-      fileName: picked.fileName ?? picked.uri.split("/").pop() ?? "jam-video.mp4",
-      mimeType: picked.mimeType ?? "video/mp4",
-      fileSize: picked.fileSize ?? null,
-      width: picked.width ?? null,
-      height: picked.height ?? null,
-    };
-    logVideoUploadStep("picker asset selected", {
-      source,
-      fileName: nextAsset.fileName,
-      fileSize: nextAsset.fileSize,
-      mimeType: nextAsset.mimeType,
-      uriScheme: nextAsset.uri.split(":")[0] || "unknown",
-      duration: picked.duration ?? null,
-      width: nextAsset.width ?? null,
-      height: nextAsset.height ?? null,
-    });
-    await startVideoUpload(nextAsset, picked.duration ?? 0);
-    void loadRecentVideoThumbnail();
   }
 
   async function recordVideo() {
@@ -903,6 +979,49 @@ export function CreateScreen({
     return !recordingCountdownCancelRef.current;
   }
 
+  async function takePhoto() {
+    if (!cameraRef.current || !cameraReady || capturingPhoto || recording) return;
+
+    if (!cameraPermissionGranted) {
+      Alert.alert("permission needed", "camera access is needed to take a photo.");
+      return;
+    }
+
+    setCapturingPhoto(true);
+    try {
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 1,
+        shutterSound: true,
+        mirror: cameraFacingRef.current === "front",
+      });
+      if (!photo?.uri) {
+        logVideoUploadStep("in-app camera photo missing uri", {});
+        return;
+      }
+
+      startEditAlbum([
+        {
+          id: `photo-${Date.now()}`,
+          kind: "image",
+          uri: photo.uri,
+          fileName: photo.uri.split("/").pop() ?? "jam-photo.jpg",
+          mimeType: photo.format === "png" ? "image/png" : "image/jpeg",
+          fileSize: null,
+          width: photo.width ?? null,
+          height: photo.height ?? null,
+          durationMs: 0,
+          textOverlays: [],
+        },
+      ]);
+      void loadRecentVideoThumbnail();
+    } catch (err) {
+      logVideoUploadStep("in-app camera photo failed", getVideoUploadErrorDetails(err));
+      Alert.alert("could not take photo", err instanceof Error ? err.message : "try again");
+    } finally {
+      setCapturingPhoto(false);
+    }
+  }
+
   async function handleRecordPress() {
     if (recording) {
       stopRecording();
@@ -920,8 +1039,21 @@ export function CreateScreen({
     await recordVideo();
   }
 
+  async function handlePhotoPress() {
+    if (recordingCountdown !== null) {
+      cancelRecordingCountdown();
+      return;
+    }
+
+    setCameraFiltersOpen(false);
+    const shouldShoot = await runRecordingCountdown();
+    if (!shouldShoot) return;
+    await takePhoto();
+  }
+
   function handleRecordPressIn() {
-    if (!cameraPermissionGranted || !microphonePermissionGranted || !cameraReady) return;
+    if (!cameraPermissionGranted || !cameraReady) return;
+    if (captureMode === "video" && !microphonePermissionGranted) return;
     recordPressScale.stopAnimation();
     Animated.spring(recordPressScale, {
       toValue: 1.12,
@@ -1145,20 +1277,52 @@ export function CreateScreen({
     }
   }
 
-  function startVideoUpload(
-    nextAsset: NativeVideoAsset,
-    durationMs = 0,
-    options?: { selfieMirrorPending?: boolean },
-  ) {
+  function startEditAlbum(items: CreateEditItem[], options?: { selfieMirrorPending?: boolean }) {
+    if (items.length === 0) return;
     uploadSessionRef.current += 1;
-    setAsset(nextAsset);
-    setSelectedVideoDurationMs(durationMs);
+    const images = items
+      .filter((item) => item.kind === "image")
+      .map((item) => ({
+        uri: item.uri,
+        fileName: item.fileName,
+        mimeType: item.mimeType,
+      }));
+    const video = items.find((item) => item.kind === "video") ?? null;
+    const album = items.map((item) => ({
+      ...item,
+      textOverlays: item.textOverlays ?? [],
+    }));
+    currentEditItemIdRef.current = album[0]?.id ?? null;
+    setEditItems(album);
+    setEditItemIndex(0);
+    setEditPagerScrolling(false);
+    setSlideshowImages(images);
+    setSlideshowAudio(null);
+    setSlideshowAudioDurationMs(null);
+    setSlideshowAudioLabel(null);
+    setAudioTrimStartRatio(0);
+    setAudioTrimEndRatio(1);
+    setAudioScrubRatio(null);
+    setAudioPlaybackRatio(0);
+    setAudioTimelineWidth(0);
+    setAsset(
+      video
+        ? {
+            uri: video.uri,
+            fileName: video.fileName,
+            mimeType: video.mimeType,
+            fileSize: video.fileSize,
+            width: video.width,
+            height: video.height,
+          }
+        : null,
+    );
+    setSelectedVideoDurationMs(video?.durationMs ?? 0);
     setNeedsSelfieMirror(Boolean(options?.selfieMirrorPending));
     setTrimStartRatio(0);
     setTrimEndRatio(1);
     setActiveEditTool(null);
     setSelectedFilter("none");
-    setTextOverlays([]);
     setEditingTextOverlayId(null);
     setTextOverlayActionId(null);
     setTextOverlayActionRenderId(null);
@@ -1166,7 +1330,159 @@ export function CreateScreen({
     setTextOverlaySizes({});
     hideTextOverlaySnapGuides(true);
     setCreateStage("edit");
-    void prepareVideoThumbnail(nextAsset.uri);
+    if (video) {
+      void prepareVideoThumbnail(video.uri);
+      return;
+    }
+    setSelectedVideoThumbnailUri(images[0]?.uri ?? null);
+    setSelectedThumbnailTimeMs(0);
+  }
+
+  function startVideoUpload(
+    nextAsset: NativeVideoAsset,
+    durationMs = 0,
+    options?: { selfieMirrorPending?: boolean },
+  ) {
+    startEditAlbum(
+      [
+        {
+          id: `video-${nextAsset.uri}`,
+          kind: "video",
+          uri: nextAsset.uri,
+          fileName: nextAsset.fileName ?? nextAsset.uri.split("/").pop() ?? "jam-video.mp4",
+          mimeType: nextAsset.mimeType ?? "video/mp4",
+          fileSize: nextAsset.fileSize ?? null,
+          width: nextAsset.width ?? null,
+          height: nextAsset.height ?? null,
+          durationMs,
+          textOverlays: [],
+        },
+      ],
+      options,
+    );
+  }
+
+  function beginEditPagerScroll() {
+    dismissEditTextKeyboard();
+    closeTextOverlayActions(false);
+    setTextFontPickerOverlayId(null);
+    hideTextOverlaySnapGuides(true);
+    setEditPagerScrolling(true);
+  }
+
+  function handleEditItemIndexChange(nextIndex: number) {
+    const item = editItems[nextIndex];
+    if (!item) return;
+    if (nextIndex !== editItemIndex) {
+      dismissEditTextKeyboard();
+      closeTextOverlayActions(false);
+      setTextFontPickerOverlayId(null);
+    }
+    currentEditItemIdRef.current = item.id;
+    setEditItemIndex(nextIndex);
+    if (item.kind === "image") {
+      if (activeEditTool === "trim") setActiveEditTool(null);
+      return;
+    }
+    setAsset({
+      uri: item.uri,
+      fileName: item.fileName,
+      mimeType: item.mimeType,
+      fileSize: item.fileSize,
+      width: item.width,
+      height: item.height,
+    });
+    setSelectedVideoDurationMs(item.durationMs);
+  }
+
+  function attachSlideshowAudio(next: {
+    uri: string;
+    fileName: string;
+    mimeType: string;
+    fromVideo: boolean;
+    label: string;
+    durationMs: number | null;
+  }) {
+    setSlideshowAudio({
+      uri: next.uri,
+      fileName: next.fileName,
+      mimeType: next.mimeType,
+      fromVideo: next.fromVideo,
+    });
+    setSlideshowAudioDurationMs(next.durationMs);
+    setSlideshowAudioLabel(next.label);
+    setAudioTrimStartRatio(0);
+    setAudioTrimEndRatio(1);
+    setAudioScrubRatio(null);
+    setAudioPlaybackRatio(0);
+    setActiveEditTool("audio");
+  }
+
+  async function dismissAudioSheet() {
+    setAudioPickerOpen(false);
+    // iOS cannot present PHPicker / document picker from a React Native Modal.
+    await waitMs(400);
+  }
+
+  async function pickSlideshowAudioFromFiles() {
+    await dismissAudioSheet();
+    try {
+      const DocumentPicker = await import("expo-document-picker");
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a", "audio/aac", "audio/wav", "audio/*"],
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled || !result.assets?.[0]?.uri) return;
+      const picked = result.assets[0];
+      attachSlideshowAudio({
+        uri: picked.uri,
+        fileName: picked.name ?? picked.uri.split("/").pop() ?? "audio.mp3",
+        mimeType: picked.mimeType ?? "audio/mpeg",
+        fromVideo: false,
+        label: picked.name ?? "MP3 from Files",
+        durationMs: null,
+      });
+    } catch (error) {
+      Alert.alert(
+        "could not open files",
+        error instanceof Error ? error.message : "try again or pick audio from a video.",
+      );
+    }
+  }
+
+  async function pickSlideshowAudioFromVideo() {
+    await dismissAudioSheet();
+    try {
+      logVideoUploadStep("audio from video picker start", {});
+      const result = await launchCreateLibraryPicker({
+        mediaTypes: ["videos"],
+        allowsMultipleSelection: false,
+        selectionLimit: 1,
+        preferCompatibleVideo: true,
+      });
+      if (result.canceled || !result.assets[0]?.uri) {
+        logVideoUploadStep("audio from video picker canceled", {});
+        return;
+      }
+      const picked = await materializeLibraryAsset(result.assets[0], "video");
+      attachSlideshowAudio({
+        uri: picked.uri,
+        fileName: picked.fileName,
+        mimeType: picked.mimeType,
+        fromVideo: true,
+        label: picked.fileName,
+        durationMs: picked.durationMs > 0 ? picked.durationMs : null,
+      });
+      logVideoUploadStep("audio from video attached", {
+        fileName: picked.fileName,
+        durationMs: picked.durationMs,
+        mimeType: picked.mimeType,
+      });
+    } catch (error) {
+      logVideoUploadStep("audio from video failed", getVideoUploadErrorDetails(error));
+      Alert.alert("couldn’t use that video", libraryPickerErrorMessage(error));
+    }
   }
 
   function dismissEditTextKeyboard() {
@@ -1351,6 +1667,67 @@ export function CreateScreen({
     });
   }
 
+  function getAudioDurationLabel() {
+    if (!slideshowAudioDurationMs) return "--:--";
+    return formatClipDuration(
+      Math.max(0, Math.round((audioTrimEndRatio - audioTrimStartRatio) * slideshowAudioDurationMs)),
+    );
+  }
+
+  function beginAudioTrimDrag() {
+    audioTrimDragStartRef.current = {
+      start: audioTrimStartRatio,
+      end: audioTrimEndRatio,
+    };
+  }
+
+  function applyAudioTrimHandleDrag(handle: "start" | "end", translationX: number) {
+    if (!audioTimelineWidth) return;
+    const delta = translationX / audioTimelineWidth;
+    const minGap = 0.08;
+    const dragStart = audioTrimDragStartRef.current;
+    if (handle === "start") {
+      const ratio = clamp(dragStart.start + delta, 0, Math.max(0, dragStart.end - minGap));
+      setAudioTrimStartRatio(ratio);
+      setAudioScrubRatio(ratio);
+      return;
+    }
+    const ratio = clamp(dragStart.end + delta, Math.min(1, dragStart.start + minGap), 1);
+    setAudioTrimEndRatio(ratio);
+    setAudioScrubRatio(ratio);
+  }
+
+  function finishAudioTrimHandleDrag(handle: "start" | "end", translationX: number) {
+    const delta = audioTimelineWidth ? translationX / audioTimelineWidth : 0;
+    const minGap = 0.08;
+    const dragStart = audioTrimDragStartRef.current;
+    const nextStart =
+      handle === "start"
+        ? clamp(dragStart.start + delta, 0, Math.max(0, dragStart.end - minGap))
+        : dragStart.start;
+    const nextEnd =
+      handle === "end"
+        ? clamp(dragStart.end + delta, Math.min(1, dragStart.start + minGap), 1)
+        : dragStart.end;
+    audioTrimDragStartRef.current = { start: nextStart, end: nextEnd };
+    setAudioTrimStartRatio(nextStart);
+    setAudioTrimEndRatio(nextEnd);
+    setAudioScrubRatio(null);
+    setAudioPlaybackRatio(nextStart);
+  }
+
+  function handleAudioTrimHandleStateChange(handle: "start" | "end", event: PanGestureHandlerStateChangeEvent) {
+    const { state, translationX } = event.nativeEvent;
+    if (state === State.BEGAN) {
+      beginAudioTrimDrag();
+      setAudioScrubRatio(handle === "start" ? audioTrimStartRatio : audioTrimEndRatio);
+      return;
+    }
+    if (state === State.END || state === State.CANCELLED || state === State.FAILED) {
+      finishAudioTrimHandleDrag(handle, translationX);
+    }
+  }
+
   function toggleEditTool(tool: "trim" | "filters" | "text") {
     if (tool === "text") {
       addNewTextOverlay();
@@ -1506,6 +1883,10 @@ export function CreateScreen({
 
   function goBackToEditStage() {
     setPostPreviewOpen(false);
+    if (editItems.length > 0) {
+      setCreateStage("edit");
+      return;
+    }
     exportBakeSessionRef.current += 1;
     setExportBakedAsset(null);
     setExportBakedDurationMs(0);
@@ -1531,12 +1912,31 @@ export function CreateScreen({
   }
 
   async function goToDetailsStage() {
+    if (!slideshowAudio?.uri) {
+      Alert.alert("add audio", "choose a track from files or a video before continuing.");
+      setAudioPickerOpen(true);
+      return;
+    }
+
     dismissEditTextKeyboard();
     closeTextOverlayActions(false);
     setActiveEditTool(null);
 
-    const cleanedOverlays = textOverlays.filter((overlay) => overlay.text.trim());
-    setTextOverlays(cleanedOverlays);
+    const postedVideoItem =
+      (asset
+        ? editItems.find((item) => item.kind === "video" && item.uri === asset.uri)
+        : null) ?? editItems.find((item) => item.kind === "video");
+    const draftId = editingTextOverlayIdRef.current;
+    const draftText = editingTextDraftRef.current.slice(0, 60);
+    const overlaysForExport = (postedVideoItem?.textOverlays ?? textOverlays).map((overlay) =>
+      overlay.id === draftId ? { ...overlay, text: draftText } : overlay,
+    );
+    const cleanedOverlays = overlaysForExport.filter((overlay) => overlay.text.trim());
+    if (postedVideoItem && currentEditItemIdRef.current === postedVideoItem.id) {
+      setTextOverlays(cleanedOverlays);
+    } else if (!postedVideoItem) {
+      setTextOverlays(cleanedOverlays);
+    }
 
     if (selectedVideoDurationMs > 0) {
       const trimStartMs = Math.round(trimStartRatio * selectedVideoDurationMs);
@@ -1732,6 +2132,37 @@ export function CreateScreen({
   async function post() {
     const postRoles = getUniqueStrings(selectedRoles).slice(0, MAX_VIDEO_ROLES);
     const postGenres = getUniqueStrings(selectedGenres).slice(0, MAX_VIDEO_GENRES);
+
+    const imageOnlyAlbum = editItems.length > 0 && editItems.every((item) => item.kind === "image");
+    if (imageOnlyAlbum) {
+      if (!slideshowAudio?.uri) {
+        Alert.alert("add audio", "choose a track from files or a video before posting.");
+        return;
+      }
+      if (postRoles.length === 0 && postGenres.length === 0) {
+        Alert.alert("choose tags", "select at least one role or genre for this post.");
+        return;
+      }
+      enqueuePendingSlideshowUpload({
+        userId,
+        images: slideshowImages,
+        audio: slideshowAudio,
+        audioDurationMs: slideshowAudioDurationMs
+          ? Math.max(
+              100,
+              Math.round((audioTrimEndRatio - audioTrimStartRatio) * slideshowAudioDurationMs),
+            )
+          : null,
+        caption: caption.trim(),
+        roles: postRoles,
+        genres: postGenres,
+        lookingFor: lookingForCollaborators,
+      });
+      resetUploadState();
+      onPosted();
+      return;
+    }
+
     const useBakedExport = exportBakeStatus === "ready" && Boolean(exportBakedAsset?.uri);
     const sourceDurationSeconds = useBakedExport
       ? Math.max(0.1, exportBakedDurationMs / 1000)
@@ -1748,9 +2179,14 @@ export function CreateScreen({
           Math.max(trimStartSeconds + 0.1, trimEndRatio * sourceDurationSeconds),
         );
     const trimmedSeconds = trimEndSeconds - trimStartSeconds;
+    const postedVideoItem =
+      (asset
+        ? editItems.find((item) => item.kind === "video" && item.uri === asset.uri)
+        : null) ?? editItems.find((item) => item.kind === "video");
+    const overlaysForPost = postedVideoItem?.textOverlays ?? textOverlays;
     const postedTextOverlays = useBakedExport
       ? []
-      : textOverlays
+      : overlaysForPost
           .filter((overlay) => overlay.text.trim())
           .map((overlay) => ({
             id: overlay.id,
@@ -1842,7 +2278,7 @@ export function CreateScreen({
 
   if (createStage === "camera") {
     const cameraPermissionReady = cameraPermissionGranted && microphonePermissionGranted;
-    const cameraControlsDisabled = recording || recordingCountdown !== null || !cameraPermissionReady || !cameraReady;
+    const cameraControlsDisabled = recording || capturingPhoto || libraryBusy || recordingCountdown !== null || !cameraPermissionReady || !cameraReady;
     const cameraHint =
       recordingCountdown !== null
         ? `starting in ${recordingCountdown}...`
@@ -1997,7 +2433,7 @@ export function CreateScreen({
           )}
         </View>
         <View style={[styles.createCameraTopBar, { top: insets.top + CREATE_CAMERA_TOP_CONTROLS_OFFSET }]}>
-          <Pressable onPress={closeCreateScreen} style={styles.createCameraControlButton} accessibilityLabel="close create screen">
+          <Pressable onPress={closeCreateScreen} style={styles.createCameraControlButton} accessibilityLabel="close create">
             <Text style={styles.createCameraCloseIconText}>×</Text>
           </Pressable>
         </View>
@@ -2042,42 +2478,23 @@ export function CreateScreen({
           </View>
         ) : null}
         <View style={[styles.createCameraBottomBar, { bottom: controlsBottom }]}>
-          <Animated.View style={{ transform: [{ scale: recordPressScale }] }}>
-            <Pressable
-              onPress={() => {
-                void handleRecordPress();
-              }}
-              onPressIn={handleRecordPressIn}
-              onPressOut={handleRecordPressOut}
-              disabled={!cameraPermissionReady || !cameraReady}
-              style={[
-                styles.createRecordButton,
-                (!cameraPermissionReady || !cameraReady) && styles.disabled,
-              ]}
-              accessibilityLabel={
-                recording
-                  ? "stop recording"
-                  : recordingCountdown !== null
-                    ? "cancel countdown"
-                    : "start recording"
-              }
-            >
-              <RecordButtonCore active={recording || recordingCountdown !== null} />
-              <RecordProgressRing
-                active={recording}
-                durationSeconds={maxDuration}
-                // Sized so the stroke sits exactly on top of the button's 4px white border.
-                size={79}
-                strokeWidth={5}
-                centerOffset={
-                  (CREATE_CAMERA_RECORD_BUTTON_SIZE -
-                    2 * CREATE_CAMERA_RECORD_BUTTON_BORDER_WIDTH -
-                    79) /
-                  2
-                }
-              />
-            </Pressable>
-          </Animated.View>
+          <CreateCaptureShutter
+            mode={captureMode}
+            onModeChange={setCaptureMode}
+            recording={recording}
+            countdownActive={recordingCountdown !== null}
+            disabled={!cameraPermissionReady || !cameraReady || capturingPhoto}
+            onVideoPress={() => {
+              void handleRecordPress();
+            }}
+            onPhotoPress={() => {
+              void handlePhotoPress();
+            }}
+            onPrimaryPressIn={handleRecordPressIn}
+            onPrimaryPressOut={handleRecordPressOut}
+            primaryPressScale={recordPressScale}
+            maxDuration={maxDuration}
+          />
         </View>
         <Animated.View
           style={[
@@ -2089,10 +2506,10 @@ export function CreateScreen({
           ]}
         >
           <Pressable
-            onPress={() => void pickVideo("library")}
+            onPress={() => void pickFromLibrary()}
             style={StyleSheet.absoluteFill}
-            disabled={recording || recordingCountdown !== null || cameraFiltersOpen}
-            accessibilityLabel="choose video from camera roll"
+            disabled={recording || capturingPhoto || libraryBusy || recordingCountdown !== null || cameraFiltersOpen}
+            accessibilityLabel="choose video or photo from camera roll"
           >
             {recentVideoThumbnailUri ? (
               <Image source={{ uri: recentVideoThumbnailUri }} style={styles.createLibraryThumbnail as ImageStyle} />
@@ -2104,6 +2521,12 @@ export function CreateScreen({
             )}
           </Pressable>
         </Animated.View>
+        {libraryBusy ? (
+          <View style={styles.createCameraCountdownOverlay}>
+            <ActivityIndicator color="#fff" />
+            <Text style={styles.helper}>opening...</Text>
+          </View>
+        ) : null}
         {recording ? (
           <RecordingElapsedTimer
             active={recording}
@@ -2145,7 +2568,8 @@ export function CreateScreen({
     );
   }
 
-  if (asset && createStage === "edit") {
+  if (editItems.length > 0 && createStage === "edit") {
+    const currentIsVideo = currentEditItem?.kind === "video";
     const feedViewport = getFeedVideoViewport(insets.bottom);
     const actionMenuOverlayId = textOverlayActionRenderId ?? textOverlayActionId;
     const actionOverlay = actionMenuOverlayId
@@ -2183,24 +2607,37 @@ export function CreateScreen({
             style={[styles.createCameraViewport, { bottom: feedViewport.navBarHeight }]}
             onLayout={handleEditViewportLayout}
           >
-            <JamVideoView
-              source={asset.uri}
-              style={[
-                StyleSheet.absoluteFill,
-                // Fallback if post-record mirror bake failed — keep edit preview selfie-flipped.
-                needsSelfieMirror ? { transform: [{ scaleX: -1 }] } : null,
-              ]}
-              knownWidth={asset.width}
-              knownHeight={asset.height}
-              shouldPlay
-              isLooping
-              isMuted={false}
-              volume={1}
+            <CreateEditSoundtrack
+              uri={slideshowAudio?.uri ?? null}
+              playing={isFocused && Boolean(slideshowAudio?.uri) && audioScrubRatio == null}
+              trimStartRatio={audioTrimStartRatio}
+              trimEndRatio={audioTrimEndRatio}
+              scrubToRatio={audioScrubRatio}
+              onDurationMs={(durationMs) => {
+                if (durationMs > 0) setSlideshowAudioDurationMs(durationMs);
+              }}
+              onPlaybackRatio={setAudioPlaybackRatio}
+            />
+            <CreateEditAlbumPager
+              items={editItems}
+              index={editItemIndex}
+              width={editViewportSize.width}
+              height={editViewportSize.height}
+              shouldPlay={isFocused}
+              muteVideos={
+                Boolean(slideshowAudio?.uri) ||
+                editItems.filter((item) => item.kind === "video").length > 1
+              }
+              hideActiveOverlays={editPagerScrolling}
+              needsSelfieMirror={needsSelfieMirror}
               trimStartRatio={trimStartRatio}
               trimEndRatio={trimEndRatio}
               scrubToRatio={trimScrubRatio}
               trimPlaybackResumeSignal={trimPlaybackResumeSignal}
               timeUpdateIntervalSec={activeEditTool === "trim" ? 0.05 : 0.25}
+              onIndexChange={handleEditItemIndexChange}
+              onPageScrollStart={beginEditPagerScroll}
+              onPageScrollEnd={() => setEditPagerScrolling(false)}
               onDurationResolved={handleEditVideoDurationResolved}
               onPlaybackStatusUpdate={activeEditTool === "trim" ? handleEditPlaybackStatusUpdate : undefined}
             />
@@ -2241,7 +2678,8 @@ export function CreateScreen({
                 { opacity: textOverlayHorizontalGuideOpacity },
               ]}
             />
-            {textOverlays.map((overlay) => (
+            {!editPagerScrolling
+              ? textOverlays.map((overlay) => (
               <CreateEditTextOverlayItem
                 key={overlay.id}
                 overlay={overlay}
@@ -2266,8 +2704,9 @@ export function CreateScreen({
                 onPanGesture={(event) => handleTextOverlayPanGesture(overlay.id, event)}
                 onPanStateChange={(event) => handleTextOverlayPanStateChange(overlay.id, event)}
               />
-            ))}
-            {actionOverlay ? (
+            ))
+              : null}
+            {actionOverlay && !editPagerScrolling ? (
               <Animated.View
                 pointerEvents={textOverlayActionId ? "box-none" : "none"}
                 style={[
@@ -2329,15 +2768,58 @@ export function CreateScreen({
               <Text style={styles.createCameraCloseIconText}>×</Text>
             </Pressable>
           </View>
+          <View
+            pointerEvents="box-none"
+            style={{
+              position: "absolute",
+              top: insets.top + CREATE_CAMERA_TOP_CONTROLS_OFFSET,
+              left: 0,
+              right: 0,
+              zIndex: 6,
+              alignItems: "center",
+            }}
+          >
+            <Pressable
+              onPress={() => {
+                if (slideshowAudio?.uri) {
+                  dismissEditTextKeyboard();
+                  closeTextOverlayActions(false);
+                  setTextFontPickerOverlayId(null);
+                  setActiveEditTool((current) => (current === "audio" ? null : "audio"));
+                  return;
+                }
+                setAudioPickerOpen(true);
+              }}
+              style={[
+                styles.createEditAudioButton,
+                slideshowAudio?.uri ? styles.createEditAudioButtonActive : null,
+              ]}
+              accessibilityLabel={
+                slideshowAudio?.uri
+                  ? activeEditTool === "audio"
+                    ? "close audio editor"
+                    : "edit audio"
+                  : "add audio"
+              }
+            >
+              {slideshowAudio?.uri ? (
+                <CreateEditAudioWaveformIcon active={activeEditTool === "audio"} />
+              ) : (
+                <CreateEditAudioIcon />
+              )}
+            </Pressable>
+          </View>
 
           <View style={[styles.createCameraSideRail, { top: insets.top + CREATE_CAMERA_TOP_CONTROLS_OFFSET }]}>
-            <Pressable
-              style={styles.createCameraControlButton}
-              onPress={() => toggleEditTool("trim")}
-              accessibilityLabel="trim video"
-            >
-              <CreateEditTrimIcon active={activeEditTool === "trim"} />
-            </Pressable>
+            {currentIsVideo ? (
+              <Pressable
+                style={styles.createCameraControlButton}
+                onPress={() => toggleEditTool("trim")}
+                accessibilityLabel="trim video"
+              >
+                <CreateEditTrimIcon active={activeEditTool === "trim"} />
+              </Pressable>
+            ) : null}
             <Pressable
               style={styles.createCameraControlButton}
               onPress={() => toggleEditTool("text")}
@@ -2383,7 +2865,27 @@ export function CreateScreen({
             </Pressable>
           </Animated.View>
 
-          {activeEditTool === "trim" ? (
+          {activeEditTool === "audio" && slideshowAudio?.uri ? (
+            <View
+              style={[styles.createTrimToolPanel, { bottom: feedViewport.navBarHeight }]}
+              pointerEvents="box-none"
+            >
+              <CreateAudioTrimPanel
+                seed={slideshowAudio.uri}
+                durationLabel={getAudioDurationLabel()}
+                trimStartRatio={audioTrimStartRatio}
+                trimEndRatio={audioTrimEndRatio}
+                playbackRatio={audioPlaybackRatio}
+                scrubRatio={audioScrubRatio}
+                onLayoutWidth={setAudioTimelineWidth}
+                onTrimHandleGesture={applyAudioTrimHandleDrag}
+                onTrimHandleStateChange={handleAudioTrimHandleStateChange}
+                onChangeAudio={() => setAudioPickerOpen(true)}
+              />
+            </View>
+          ) : null}
+
+          {activeEditTool === "trim" && currentIsVideo ? (
             <View
               style={[styles.createTrimToolPanel, { bottom: feedViewport.navBarHeight }]}
               pointerEvents="box-none"
@@ -2424,7 +2926,7 @@ export function CreateScreen({
                 <CreateFilterPickerRow
                   compact
                   selectedFilter={selectedFilter}
-                  thumbnailUri={selectedVideoThumbnailUri}
+                  thumbnailUri={selectedVideoThumbnailUri ?? currentEditItem?.uri ?? null}
                   textOverlays={textOverlays}
                   onSelect={setSelectedFilter}
                 />
@@ -2455,26 +2957,113 @@ export function CreateScreen({
         <ConfirmModal
           visible={discardConfirmOpen}
           title="discard?"
-          message="your video and edits will be lost."
+          message="your post and edits will be lost."
           confirmLabel="discard"
           onCancel={dismissDiscardCreateDraft}
           onConfirm={discardCreateDraft}
         />
+        {audioPickerOpen ? (
+          <View style={[StyleSheet.absoluteFill, styles.confirmModalOverlay, { zIndex: 40 }]}>
+            <Pressable style={styles.jamPromptShade} onPress={() => setAudioPickerOpen(false)} />
+            <View style={styles.createAudioSheetCard}>
+              <Text style={styles.confirmModalTitle}>add audio</Text>
+              <Text style={styles.confirmModalMessage}>
+                choose a track from files or extract audio from a video
+              </Text>
+              <Pressable
+                style={styles.createChooseOption}
+                onPress={() => void pickSlideshowAudioFromFiles()}
+                accessibilityLabel="choose audio from files"
+              >
+                <Text style={styles.createChooseOptionTitle}>from files</Text>
+                <Text style={styles.createChooseOptionHelper}>mp3 or other audio files</Text>
+              </Pressable>
+              <Pressable
+                style={styles.createChooseOption}
+                onPress={() => void pickSlideshowAudioFromVideo()}
+                accessibilityLabel="choose audio from camera roll video"
+              >
+                <Text style={styles.createChooseOptionTitle}>from camera roll</Text>
+                <Text style={styles.createChooseOptionHelper}>use the soundtrack from a video</Text>
+              </Pressable>
+              {slideshowAudioLabel ? (
+                <View style={styles.createAudioSheetAttached}>
+                  <Text style={styles.createChooseOptionTitle}>attached</Text>
+                  <Text style={styles.createChooseOptionHelper} numberOfLines={2}>
+                    {slideshowAudioLabel}
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+          </View>
+        ) : null}
       </View>
     );
   }
+
+  const imageOnlyAlbum = editItems.length > 0 && editItems.every((item) => item.kind === "image");
+  const postedVideoItem =
+    (asset
+      ? editItems.find((item) => item.kind === "video" && item.uri === asset.uri)
+      : null) ?? editItems.find((item) => item.kind === "video");
+  const postedPreviewOverlays = postedVideoItem?.textOverlays ?? textOverlays;
 
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView contentContainerStyle={styles.screenContent} keyboardShouldPersistTaps="handled">
         <View style={styles.headerRow}>
           <Text style={styles.logoSmall}>jam.</Text>
-          <Pressable onPress={goBackToEditStage} style={styles.iconCircle} accessibilityLabel="back to edit">
+          <Pressable onPress={goBackToEditStage} style={styles.iconCircle} accessibilityLabel="back">
             <Text style={styles.closeIconText}>×</Text>
           </Pressable>
         </View>
         <Text style={styles.h1}>create</Text>
-        {asset && (
+        {imageOnlyAlbum ? (
+          <>
+            <Pressable
+              onPress={() => setLookingForCollaborators((current) => !current)}
+              style={styles.createLookingForToggle}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: lookingForCollaborators }}
+              accessibilityLabel="looking for collaborators"
+            >
+              <LookingForIcon active={lookingForCollaborators} size={28} />
+              <View style={styles.createLookingForToggleCopy}>
+                <Text style={styles.createLookingForToggleTitle}>looking for?</Text>
+                <Text style={styles.createLookingForToggleHelper}>
+                  tag your post to show you're looking to collab
+                </Text>
+              </View>
+            </Pressable>
+            <View style={styles.createDetailsComposerRow}>
+              <TextInput
+                value={caption}
+                onChangeText={setCaption}
+                placeholder="write a caption..."
+                placeholderTextColor="#71717a"
+                style={styles.createDetailsCaptionInput}
+                multiline
+                maxLength={200}
+                textAlignVertical="top"
+              />
+              <View style={styles.createDetailsVideoTap}>
+                <Image
+                  source={{ uri: slideshowImages[0]?.uri }}
+                  style={styles.createDetailsVideoTapImage as ImageStyle}
+                  resizeMode="contain"
+                />
+                <View style={styles.createDetailsVideoTapBadge}>
+                  <Text style={styles.createDetailsVideoTapBadgeText}>
+                    {slideshowImages.length} photo{slideshowImages.length === 1 ? "" : "s"}
+                  </Text>
+                </View>
+              </View>
+            </View>
+            {slideshowAudioLabel ? (
+              <Text style={styles.helper}>audio · {slideshowAudioLabel}</Text>
+            ) : null}
+          </>
+        ) : asset ? (
           <>
             <Pressable
               onPress={() => setLookingForCollaborators((current) => !current)}
@@ -2532,7 +3121,7 @@ export function CreateScreen({
                 {exportBakeStatus !== "ready" ? (
                   <VideoPresentationOverlays
                     filter={selectedFilter}
-                    textOverlays={textOverlays}
+                    textOverlays={postedPreviewOverlays}
                     density="thumb"
                   />
                 ) : null}
@@ -2554,58 +3143,72 @@ export function CreateScreen({
               <VideoThumbnailFilmstrip
                 frames={thumbnailFrameOptions}
                 filter={exportBakeStatus === "ready" ? "none" : selectedFilter}
-                textOverlays={exportBakeStatus === "ready" ? [] : textOverlays}
+                textOverlays={exportBakeStatus === "ready" ? [] : postedPreviewOverlays}
                 onSelect={(timeMs, uri) => selectThumbnailTime(timeMs, uri)}
               />
             ) : (
               <Text style={styles.helper}>could not load thumbnail frames.</Text>
             )}
           </>
-        )}
+        ) : null}
         <SectionLabel label={`role (${selectedRoles.length}/${MAX_VIDEO_ROLES})`} />
-        <Text style={styles.helper}>choose one role for this video.</Text>
+        <Text style={styles.helper}>
+          choose one role for this {imageOnlyAlbum ? "post" : "video"}.
+        </Text>
         <TagPicker
           options={creatorRoles}
           selected={selectedRoles}
           onToggle={(role) => toggleLimitedTag(role, selectedRoles, setSelectedRoles, "role", MAX_VIDEO_ROLES)}
         />
         <SectionLabel label={`genres (${selectedGenres.length}/${MAX_VIDEO_GENRES})`} />
-        <Text style={styles.helper}>choose up to {MAX_VIDEO_GENRES} genres for this video.</Text>
+        <Text style={styles.helper}>
+          choose up to {MAX_VIDEO_GENRES} genres for this {imageOnlyAlbum ? "post" : "video"}.
+        </Text>
         <TagPicker
           options={musicGenres}
           selected={selectedGenres}
           onToggle={(genre) => toggleLimitedTag(genre, selectedGenres, setSelectedGenres, "genre", MAX_VIDEO_GENRES)}
         />
         <PrimaryButton
-          label={exportBakeStatus === "baking" ? "rendering..." : "post"}
+          label={
+            imageOnlyAlbum
+              ? "post"
+              : exportBakeStatus === "baking"
+                ? "rendering..."
+                : "post"
+          }
           disabled={
-            !asset ||
-            exportBakeStatus === "baking" ||
-            (selectedRoles.length === 0 && selectedGenres.length === 0)
+            imageOnlyAlbum
+              ? !slideshowAudio?.uri || (selectedRoles.length === 0 && selectedGenres.length === 0)
+              : !asset ||
+                exportBakeStatus === "baking" ||
+                (selectedRoles.length === 0 && selectedGenres.length === 0)
           }
           onPress={() => {
             void post();
           }}
         />
       </ScrollView>
-      <CreatePostPreviewModal
-        visible={postPreviewOpen}
-        onClose={() => setPostPreviewOpen(false)}
-        videoUri={exportBakedAsset?.uri ?? asset?.uri ?? null}
-        videoWidth={exportBakedAsset?.width ?? asset?.width ?? null}
-        videoHeight={exportBakedAsset?.height ?? asset?.height ?? null}
-        filter={exportBakeStatus === "ready" ? "none" : selectedFilter}
-        textOverlays={
-          exportBakeStatus === "ready" ? [] : textOverlays.filter((overlay) => overlay.text.trim())
-        }
-        caption={caption}
-        lookingFor={lookingForCollaborators}
-        profile={profile}
-        roles={selectedRoles}
-        genres={selectedGenres}
-        trimStartRatio={exportBakeStatus === "ready" ? 0 : trimStartRatio}
-        trimEndRatio={exportBakeStatus === "ready" ? 1 : trimEndRatio}
-      />
+      {!imageOnlyAlbum ? (
+        <CreatePostPreviewModal
+          visible={postPreviewOpen}
+          onClose={() => setPostPreviewOpen(false)}
+          videoUri={exportBakedAsset?.uri ?? asset?.uri ?? null}
+          videoWidth={exportBakedAsset?.width ?? asset?.width ?? null}
+          videoHeight={exportBakedAsset?.height ?? asset?.height ?? null}
+          filter={exportBakeStatus === "ready" ? "none" : selectedFilter}
+          textOverlays={
+            exportBakeStatus === "ready" ? [] : postedPreviewOverlays.filter((overlay) => overlay.text.trim())
+          }
+          caption={caption}
+          lookingFor={lookingForCollaborators}
+          profile={profile}
+          roles={selectedRoles}
+          genres={selectedGenres}
+          trimStartRatio={exportBakeStatus === "ready" ? 0 : trimStartRatio}
+          trimEndRatio={exportBakeStatus === "ready" ? 1 : trimEndRatio}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }

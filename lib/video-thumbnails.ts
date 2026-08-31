@@ -2,6 +2,7 @@ import {
   extractCloudflareStreamId,
   getCloudflareThumbnailUrl,
 } from "@/lib/native-cloudflare";
+import { CREATE_THUMBNAIL_FRAME_COUNT } from "@/theme/tokens";
 import type {
   FeedVideo,
   MessageVideoAttachment,
@@ -24,17 +25,53 @@ export function getVideoThumbnailTimeMs(video: ProfileVideo | FeedVideo | Messag
   return 1000;
 }
 
+export function getCloudflareThumbnailFilmstripFrames(
+  streamId: string,
+  durationMs: number,
+  frameCount = CREATE_THUMBNAIL_FRAME_COUNT,
+): Array<{ timeMs: number; uri: string }> {
+  const safeDuration = Math.max(durationMs, 1000);
+  const frameDenominator = Math.max(frameCount - 1, 1);
+  return Array.from({ length: frameCount }, (_, index) => {
+    const ratio = 0.05 + (index / frameDenominator) * 0.9;
+    const timeMs = Math.round(ratio * safeDuration);
+    return {
+      timeMs,
+      uri: getCloudflareThumbnailUrl(streamId, timeMs, { height: 180, width: 102 }),
+    };
+  });
+}
+
 /** Prefer local posters / never feed HLS URLs into Image (that renders blank). */
 export function getGridThumbnailCandidates(video: ProfileVideo | FeedVideo) {
   const candidates: string[] = [];
   const localPoster = getLocalPosterForVideo(video.id);
   if (localPoster) candidates.push(localPoster);
 
+  const slideshowImages =
+    ("imageUrls" in video && Array.isArray(video.imageUrls) && video.imageUrls) ||
+    ("image_urls" in video && Array.isArray(video.image_urls) && video.image_urls) ||
+    [];
+  const isSlideshow =
+    ("mediaType" in video && video.mediaType === "slideshow") ||
+    ("media_type" in video && video.media_type === "slideshow") ||
+    slideshowImages.length > 0;
+  if (isSlideshow) {
+    for (const uri of slideshowImages) {
+      if (typeof uri === "string" && uri.trim() && !candidates.includes(uri)) {
+        candidates.push(uri);
+      }
+    }
+  }
+
   const mediaUri =
     ("mediaUrl" in video && video.mediaUrl) ||
     ("media_url" in video && video.media_url) ||
     null;
   if (isLocalImageUri(mediaUri) && mediaUri && !candidates.includes(mediaUri)) {
+    candidates.push(mediaUri);
+  }
+  if (isSlideshow && typeof mediaUri === "string" && mediaUri && !candidates.includes(mediaUri)) {
     candidates.push(mediaUri);
   }
 

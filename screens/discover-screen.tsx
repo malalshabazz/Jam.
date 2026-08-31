@@ -25,8 +25,6 @@ import { normalizeNearMeRadius } from "@/lib/location-distance";
 import {
   FEED_PAGE_SIZE,
   blockUser,
-  deleteMessage,
-  editMessage,
   fetchFeedVideos,
   fetchNearbyFeedVideos,
   fetchNewestVideoCreatedAt,
@@ -34,16 +32,13 @@ import {
   markVideoSeen,
   reportVideo,
   sendJamRequest,
-  sendMessage,
-  type ChatMessage,
-  type Conversation,
   type FeedCursor,
   type FeedPhase,
   type FeedVideo,
-  type InboxMessage,
   type Profile,
   type ReportReason,
 } from "@/lib/native-social-data";
+import { getCloudflareFreezeFrameUri, getFeedPosterSource, getVideoSource } from "@/lib/video-display";
 import type { SavedVideoController } from "@/types/app";
 import {
   FEED_CHROME_FADE_MS,
@@ -78,7 +73,6 @@ import {
 } from "@/lib/jam-relationship-sync";
 import { FeedReportModal } from "@/components/discover/feed-report-modal";
 import { DmModal } from "@/components/chat/dm-modal";
-import { ChatModal } from "@/components/chat/chat-modal";
 import { UserProfileModal } from "@/components/profile/user-profile-modal";
 import { getNavBarHeight } from "@/lib/nav-bar";
 import { confirmNearMeLiveLocationSharing } from "@/lib/near-me-notice";
@@ -90,7 +84,6 @@ import { FeedRoleFilterWheel } from "@/components/discover/feed-role-filter-whee
 import { EndOfFeedState, getEndOfFeedCopy } from "@/components/discover/end-of-feed";
 import { FilterSheet } from "@/components/discover/filter-sheet";
 import { FeedItem } from "@/components/discover/feed-item";
-import { getCloudflareFreezeFrameUri, getVideoSource } from "@/lib/video-display";
 
 export function DiscoverScreen({
   userId,
@@ -123,6 +116,7 @@ export function DiscoverScreen({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const [roles, setRoles] = useState<string[]>([]);
   const [genres, setGenres] = useState<string[]>([]);
   const [location, setLocation] = useState("");
@@ -133,7 +127,6 @@ export function DiscoverScreen({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [activeProfile, setActiveProfile] = useState<FeedVideo | null>(null);
   const [activeDm, setActiveDm] = useState<FeedVideo | null>(null);
-  const [activeChat, setActiveChat] = useState<Conversation | InboxMessage | null>(null);
   const [reportItem, setReportItem] = useState<FeedVideo | null>(null);
   const [reportSubmitting, setReportSubmitting] = useState(false);
   const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
@@ -328,10 +321,10 @@ export function DiscoverScreen({
   }, []);
 
   useEffect(() => {
-    if (filtersOpen || activeProfile || activeChat || activeDm) {
+    if (filtersOpen || activeProfile || activeDm) {
       restoreFeedChrome();
     }
-  }, [activeChat, activeDm, activeProfile, filtersOpen, restoreFeedChrome]);
+  }, [activeDm, activeProfile, filtersOpen, restoreFeedChrome]);
 
   useEffect(() => {
     return subscribeJamRelationship((state) => {
@@ -1007,13 +1000,22 @@ export function DiscoverScreen({
 
   const heldFeed = useMemo(() => {
     if (!queryReloadHold || queryReloadHold.length === 0) return null;
-    return queryReloadHold.map((item) => ({
+    const withSaved = queryReloadHold.map((item) => ({
       ...item,
       savedByMe: savedVideoIds.has(item.id),
     }));
-  }, [queryReloadHold, savedVideoIds]);
+    // Only keep clips that still match the active filters (e.g. Looking For alone).
+    // Otherwise Apply looks like a no-op while the unfiltered hold stays on screen.
+    const matched = withSaved.filter((item) => feedVideoMatchesFilters(item, filterState));
+    return matched.length > 0 ? matched : null;
+  }, [filterState, queryReloadHold, savedVideoIds]);
 
   const feedModeSwitching = nearMeLoading || feedQueryReloading;
+
+  const matchingBridge = useMemo(
+    () => feedBridge.filter((item) => feedVideoMatchesFilters(item, filterState)),
+    [feedBridge, filterState],
+  );
 
   const searchingForFilterMatches =
     filtered.length === 0 &&
@@ -1024,15 +1026,15 @@ export function DiscoverScreen({
       (nearMeActive && !userLocation) ||
       (filtersActive && Boolean(feedCursor)));
 
-  // Keep the last non-empty feed on screen while filter paging / mode switch catches up.
+  // Keep the last non-empty *matching* feed on screen while filter paging / mode switch catches up.
   const holdingFilterBridge =
-    searchingForFilterMatches && feedBridge.length > 0 && !loading && !feedQueryReloading;
+    searchingForFilterMatches && matchingBridge.length > 0 && !loading && !feedQueryReloading;
   /**
    * Poster-only bridge for empty-result filter fills. Soft query reloads
    * keep the live player on the held rows until the new page commits.
    */
   const suspendFeedVideo =
-    holdingFilterBridge || (feedQueryReloading && !heldFeed && filtered.length === 0 && feedBridge.length > 0);
+    holdingFilterBridge || (feedQueryReloading && !heldFeed && filtered.length === 0 && matchingBridge.length > 0);
 
   const visibleFeed =
     feedQueryReloading && heldFeed
@@ -1040,9 +1042,22 @@ export function DiscoverScreen({
       : filtered.length > 0
         ? filtered
         : holdingFilterBridge
-          ? feedBridge
+          ? matchingBridge
           : [];
   const wasHoldingFilterBridgeRef = useRef(false);
+
+  // Warm neighbor posters so half-swipes paint immediately (no black VideoView).
+  useEffect(() => {
+    if (!activeVideoId || visibleFeed.length === 0) return;
+    const activeIndex = visibleFeed.findIndex((item) => item.id === activeVideoId);
+    if (activeIndex < 0) return;
+    for (const offset of [-1, 0, 1, 2]) {
+      const item = visibleFeed[activeIndex + offset];
+      if (!item) continue;
+      const poster = getFeedPosterSource(item);
+      if (poster) void Image.prefetch(poster);
+    }
+  }, [activeVideoId, visibleFeed]);
 
   useEffect(() => {
     // Don't replace the bridge with client-thinned matches mid soft-reload.
@@ -1083,6 +1098,7 @@ export function DiscoverScreen({
     genres,
     loading,
     location,
+    lookingForActive,
     nearMeActive,
     nearMeLoading,
     roles,
@@ -1221,7 +1237,8 @@ export function DiscoverScreen({
     })
       .then(() => {
         setReportItem(null);
-        setError("report submitted");
+        setError(null);
+        setToast("report submitted");
       })
       .catch((err) => {
         Alert.alert("could not submit report", err instanceof Error ? err.message : "try again");
@@ -1270,7 +1287,7 @@ export function DiscoverScreen({
   // Keep the active clip playing under the filter sheet — only pause for
   // full-screen routes / filter-wheel bridge holds.
   const shouldPlayFeedVideos =
-    isFocused && !activeProfile && !activeChat && !suspendFeedVideo;
+    isFocused && !activeProfile && !suspendFeedVideo;
 
   // Remember the clip on blur; restore active id on focus without scrolling.
   // Forced scrollToOffset remounts the cell and flashes black over the video.
@@ -1344,7 +1361,8 @@ export function DiscoverScreen({
           <FeedFilterIcon />
         </Pressable>
       </Animated.View>
-      {error && <Toast text={error} />}
+      {error ? <Toast text={error} onDismiss={() => setError(null)} /> : null}
+      {toast ? <Toast text={toast} onDismiss={() => setToast(null)} /> : null}
       {replayToastVisible ? (
         <Animated.View
           pointerEvents="none"
@@ -1388,6 +1406,7 @@ export function DiscoverScreen({
             keyExtractor={(item) => item.id}
             style={{ height: feedItemHeight }}
             pagingEnabled
+            directionalLockEnabled
             scrollEnabled={
               !suspendFeedVideo && !feedModeSwitching && !feedChromeHolding && !feedSpeedHolding
             }
@@ -1488,6 +1507,7 @@ export function DiscoverScreen({
         selectedGenres={genres}
         selectedLocation={location}
         lookingForActive={lookingForActive}
+        showLookingFor
         onClose={() => setFiltersOpen(false)}
         onApply={(nextRoles, nextGenres, nextLocation, nextLookingFor) => {
           const nextKey = buildDiscoverFeedQueryKey({
@@ -1509,6 +1529,11 @@ export function DiscoverScreen({
             setFiltersOpen(false);
             void refreshCachedFeedIfStale(nextKey, cached);
             return;
+          }
+          // Looking For alone must invalidate the query key the same way role/genre
+          // do — bump a stale sentinel if somehow the key already matched.
+          if (feedQueryKeyRef.current === nextKey) {
+            feedQueryKeyRef.current = `${nextKey}:reapply`;
           }
           beginFilterTransition(visibleFeed);
           setRoles(nextRoles);
@@ -1560,145 +1585,11 @@ export function DiscoverScreen({
           setActiveProfile((current) =>
             current?.userId === removedUserId ? null : current,
           );
-          setActiveChat((current) =>
-            current && !("sender_name" in current) && current.userId === removedUserId ? null : current,
-          );
           setActiveDm((current) => (current?.userId === removedUserId ? null : current));
           onInboxChanged();
         }}
         onBlocked={(blockedUserId) => {
           removeCreatorFromFeed(blockedUserId);
-        }}
-      />
-      {/*
-        All routed profile views use UserProfileModal above. The old discover-specific
-        profile implementation was removed from rendering so profile grids/fullscreen
-        behavior stays identical across discover, inbox, and DM routes.
-      */}
-      <ChatModal
-        active={activeChat}
-        currentUserId={userId}
-        savedVideoController={savedVideoController}
-        onClose={() => setActiveChat(null)}
-        onOpenProfile={(nextUserId) => {
-          const profileItem = itemsWithSavedState.find((entry) => entry.userId === nextUserId);
-          if (profileItem) {
-            setActiveChat(null);
-            setActiveProfile(profileItem);
-          }
-        }}
-        onInboxChanged={onInboxChanged}
-        onSend={async (conversation, body) => {
-          const optimisticId = `local-${conversation.userId}-${Date.now()}`;
-          const optimisticMessage: ChatMessage = {
-            id: optimisticId,
-            body,
-            incoming: false,
-            createdAt: new Date().toISOString(),
-          };
-
-          setActiveChat((current) => {
-            if (!current || "sender_name" in current || current.userId !== conversation.userId) {
-              return current;
-            }
-
-            return {
-              ...current,
-              lastMessage: body,
-              timestamp: "now",
-              unread: false,
-              messages: [...current.messages, optimisticMessage],
-            };
-          });
-
-          try {
-            const savedMessage = conversation.unlocked
-              ? await sendMessage(conversation.userId, body)
-              : await sendJamRequest(conversation.userId, body);
-            const unlocksFromReply = !conversation.unlocked && conversation.messages.some((message) => message.incoming);
-
-            setActiveChat((current) => {
-              if (!current || "sender_name" in current || current.userId !== conversation.userId) {
-                return current;
-              }
-
-              return {
-                ...current,
-                unlocked: current.unlocked || unlocksFromReply,
-                lastMessage: savedMessage.body,
-                messages: current.messages.map((message) =>
-                  message.id === optimisticId
-                    ? {
-                        id: message.id,
-                        serverId: savedMessage.id,
-                        body: savedMessage.body,
-                        incoming: false,
-                        createdAt: savedMessage.created_at,
-                      }
-                    : message,
-                ),
-              };
-            });
-
-            if (unlocksFromReply) {
-              setItems((current) =>
-                current.map((entry) =>
-                  entry.userId === conversation.userId
-                    ? {
-                        ...entry,
-                        jammedByMe: true,
-                        jammedMe: true,
-                        mutual: true,
-                      }
-                    : entry,
-                ),
-              );
-              onInboxChanged();
-            }
-
-            await load();
-          } catch (err) {
-            setActiveChat((current) => {
-              if (!current || "sender_name" in current || current.userId !== conversation.userId) {
-                return current;
-              }
-
-              const nextMessages = current.messages.filter((message) => message.id !== optimisticId);
-              return {
-                ...current,
-                messages: nextMessages,
-                lastMessage: nextMessages.at(-1)?.body ?? conversation.lastMessage,
-              };
-            });
-            Alert.alert("could not send", err instanceof Error ? err.message : "try again");
-          }
-        }}
-        onEditMessage={async (messageId, body) => {
-          const updated = await editMessage(messageId, body);
-          setActiveChat((current) => {
-            if (!current || "sender_name" in current) return current;
-            return {
-              ...current,
-              messages: current.messages.map((message) =>
-                message.id === messageId ? { ...message, body: updated.body } : message,
-              ),
-              lastMessage: current.lastMessage === current.messages.find((message) => message.id === messageId)?.body
-                ? updated.body
-                : current.lastMessage,
-            };
-          });
-        }}
-        onDeleteMessage={async (messageId) => {
-          await deleteMessage(messageId);
-          setActiveChat((current) => {
-            if (!current || "sender_name" in current) return current;
-            const nextMessages = current.messages.filter((message) => message.id !== messageId);
-            return {
-              ...current,
-              messages: nextMessages,
-              lastMessage: nextMessages.at(-1)?.body ?? "",
-            };
-          });
         }}
       />
       <DmModal

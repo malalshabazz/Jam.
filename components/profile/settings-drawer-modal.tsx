@@ -34,6 +34,7 @@ import type { ThemeMode } from "@/types/app";
 import { viewportWidth } from "@/theme/tokens";
 import { styles } from "@/theme/styles";
 import { ConfirmModal } from "@/components/ui/confirm-modal";
+import { AccountSettingsModal } from "@/components/account-settings-modal";
 import { BlockedUsersModal } from "@/components/profile/blocked-users-modal";
 import { NotificationsSettingsModal } from "@/components/profile/notifications-settings-modal";
 import { TermsAndPoliciesModal } from "@/components/profile/terms-and-policies-modal";
@@ -53,7 +54,6 @@ export function SettingsDrawerModal({
   onThemeModeChange,
   profile,
   onClose,
-  onAccount,
   onProfileUpdated,
   onLoggedOut,
 }: {
@@ -63,7 +63,6 @@ export function SettingsDrawerModal({
   onThemeModeChange: (mode: ThemeMode) => void;
   profile: Profile | null;
   onClose: () => void;
-  onAccount: () => void;
   onProfileUpdated: (profile: Profile) => void;
   onLoggedOut: () => void;
 }) {
@@ -71,6 +70,7 @@ export function SettingsDrawerModal({
   const drawerWidth = viewportWidth * 0.8;
   const [mounted, setMounted] = useState(visible);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
   const [blockedUsersOpen, setBlockedUsersOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [termsAndPoliciesOpen, setTermsAndPoliciesOpen] = useState(false);
@@ -153,6 +153,15 @@ export function SettingsDrawerModal({
     };
   }, [profile?.id, visible]);
 
+  useEffect(() => {
+    if (visible) return;
+    setAccountOpen(false);
+    setBlockedUsersOpen(false);
+    setNotificationsOpen(false);
+    setTermsAndPoliciesOpen(false);
+    setLogoutConfirmOpen(false);
+  }, [visible]);
+
   function animateNearMeRadiusReveal(show: boolean) {
     LayoutAnimation.configureNext({
       duration: 280,
@@ -201,7 +210,8 @@ export function SettingsDrawerModal({
   }
 
   function openAccount() {
-    animateClosed(onAccount);
+    // Push account as a stack screen over the open drawer — do not close the drawer.
+    setAccountOpen(true);
   }
 
   async function updateNearMeRadius(nextRadius: NearMeRadiusMiles) {
@@ -422,6 +432,15 @@ export function SettingsDrawerModal({
                 );
               }
             })();
+          }}
+        />
+        <AccountSettingsModal
+          visible={accountOpen}
+          themeMode={themeMode}
+          onClose={() => setAccountOpen(false)}
+          onDeleted={() => {
+            setAccountOpen(false);
+            void onLoggedOut();
           }}
         />
         <BlockedUsersModal

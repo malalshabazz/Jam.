@@ -86,6 +86,10 @@ export function rememberLocalPosterForVideo(videoId: string, localUri: string | 
   localPostersByVideoId.set(videoId, localUri);
 }
 
+export function notifyPendingUploadPosted(event: PendingUploadPostedEvent) {
+  notifyPosted(event);
+}
+
 function notify() {
   listeners.forEach((listener) => listener());
 }
@@ -196,6 +200,12 @@ function needsTrimClip(upload: PendingVideoUpload) {
   const startRatio = upload.trimStartSeconds / sourceDuration;
   const endRatio = upload.trimEndSeconds / sourceDuration;
   return startRatio > 0.001 || endRatio < 0.999;
+}
+
+/** True when the chosen output window is longer than the account publish cap. */
+function needsDurationEnforceClip(upload: PendingVideoUpload) {
+  const trimDuration = Math.max(0.1, upload.trimEndSeconds - upload.trimStartSeconds);
+  return trimDuration > upload.maxDurationSeconds + 0.5;
 }
 
 function getClippedThumbnailTimeMs(upload: PendingVideoUpload) {
@@ -346,7 +356,7 @@ async function runPendingUpload(uploadId: string) {
           if (!uploadUrl || !streamId) {
             const uploadRequest = await createStreamUpload(uploadMaxDurationSeconds, {
               allowLongerSource:
-                (!clientTrimmed && needsTrimClip(working)) ||
+                (!clientTrimmed && (needsTrimClip(working) || needsDurationEnforceClip(working))) ||
                 working.sourceDurationSeconds > working.maxDurationSeconds,
               uploadLength,
             });
@@ -420,7 +430,11 @@ async function runPendingUpload(uploadId: string) {
     let finalStreamId = working.clippedStreamId ?? cloudflareStreamId;
     let thumbnailTimeMs = working.publishedThumbnailTimeMs ?? publishedThumbnailTimeMs;
 
-    if (!clientTrimmed && needsTrimClip(working) && !working.clippedStreamId) {
+    if (
+      !clientTrimmed &&
+      (needsTrimClip(working) || needsDurationEnforceClip(working)) &&
+      !working.clippedStreamId
+    ) {
       updatePendingUpload(uploadId, { phase: "processing", progress: 82 });
       // Prefer client-known duration so we don't ask Cloudflare to clip past EOF
       // (a common 400 when camera-roll metadata is slightly longer than encoded duration).
@@ -429,10 +443,14 @@ async function runPendingUpload(uploadId: string) {
         working.sourceDurationSeconds || working.trimEndSeconds,
       );
       const startTimeSeconds = Math.max(0, Math.min(working.trimStartSeconds, sourceDuration - 0.1));
-      const endTimeSeconds = Math.max(
+      let endTimeSeconds = Math.max(
         startTimeSeconds + 0.1,
         Math.min(working.trimEndSeconds, Math.max(0.1, sourceDuration - 0.05)),
       );
+      // Cap clip length to the account publish entitlement.
+      if (endTimeSeconds - startTimeSeconds > working.maxDurationSeconds) {
+        endTimeSeconds = startTimeSeconds + working.maxDurationSeconds;
+      }
       logVideoUploadStep("background trim start", {
         uploadId,
         startTimeSeconds,

@@ -22,6 +22,8 @@ import {
   type AccountDetails,
 } from "@/lib/native-account";
 import { downloadAccountDataExport } from "@/lib/native-data-export";
+import { SwipeBackSurface } from "@/components/ui/swipe-back-surface";
+import { danger } from "@/theme/tokens";
 
 type AccountPanel = "email" | "password" | "delete" | null;
 
@@ -174,24 +176,30 @@ export function AccountSettingsModal({
   }
 
   return (
-    <Modal animationType="slide" visible={visible} onRequestClose={onClose}>
-      <SafeAreaView style={styles.safe}>
-        <KeyboardAvoidingView
-          style={styles.safe}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
-          <View style={styles.header}>
-            <Pressable
-              onPress={onClose}
-              accessibilityRole="button"
-              accessibilityLabel="close account settings"
-              hitSlop={10}
-            >
-              <Text style={styles.headerAction}>back</Text>
-            </Pressable>
-            <Text style={styles.title}>account</Text>
-            <View style={styles.headerSpacer} />
-          </View>
+    <Modal animationType="none" transparent visible={visible} onRequestClose={onClose}>
+      <SwipeBackSurface
+        resetKey={visible ? "account-settings" : null}
+        onBack={onClose}
+        style={[styles.flex, { backgroundColor: colors.background }]}
+        enterFromRight
+      >
+        <SafeAreaView style={styles.safe}>
+          <KeyboardAvoidingView
+            style={styles.safe}
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+          >
+            <View style={styles.header}>
+              <Pressable
+                onPress={onClose}
+                accessibilityRole="button"
+                accessibilityLabel="back to settings"
+                hitSlop={10}
+              >
+                <Text style={styles.headerAction}>back</Text>
+              </Pressable>
+              <Text style={styles.title}>account</Text>
+              <View style={styles.headerSpacer} />
+            </View>
 
           <ScrollView
             contentContainerStyle={styles.content}
@@ -367,6 +375,7 @@ export function AccountSettingsModal({
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
+      </SwipeBackSurface>
     </Modal>
   );
 }
@@ -462,6 +471,7 @@ function getColors(themeMode: "dark" | "light") {
 
 function createStyles(colors: ReturnType<typeof getColors>) {
   return StyleSheet.create({
+    flex: { flex: 1 },
     safe: { flex: 1, backgroundColor: colors.background },
     header: {
       minHeight: 58,
@@ -527,7 +537,7 @@ function createStyles(colors: ReturnType<typeof getColors>) {
       borderTopColor: colors.border,
     },
     copy: { color: colors.muted, fontSize: 13, lineHeight: 19 },
-    dangerCopy: { color: "#fca5a5", fontSize: 13, lineHeight: 19 },
+    dangerCopy: { color: danger, fontSize: 13, lineHeight: 19 },
     input: {
       minHeight: 50,
       borderBottomWidth: StyleSheet.hairlineWidth,
@@ -554,7 +564,7 @@ function createStyles(colors: ReturnType<typeof getColors>) {
       fontWeight: "700",
       textTransform: "lowercase",
     },
-    dangerText: { color: "#fca5a5", fontSize: 15, fontWeight: "600", textTransform: "lowercase" },
+    dangerText: { color: danger, fontSize: 15, fontWeight: "600", textTransform: "lowercase" },
     deleteButton: {
       minHeight: 48,
       alignItems: "center",
@@ -566,7 +576,7 @@ function createStyles(colors: ReturnType<typeof getColors>) {
       marginTop: 4,
     },
     deleteButtonText: {
-      color: "#fca5a5",
+      color: danger,
       fontSize: 15,
       fontWeight: "800",
       textTransform: "lowercase",
@@ -580,7 +590,7 @@ function createStyles(colors: ReturnType<typeof getColors>) {
       paddingHorizontal: 8,
     },
     error: {
-      color: "#fca5a5",
+      color: danger,
       fontSize: 14,
       lineHeight: 20,
       textAlign: "center",

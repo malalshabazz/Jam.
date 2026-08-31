@@ -63,6 +63,12 @@ import { getUnreadInboxCount } from "@/lib/inbox-unread";
 import { LoadingScreen } from "@/components/ui/loading-screen";
 import { preloadRecentVideoThumbnail } from "@/components/create/create-media";
 import { handleAuthDeepLink } from "@/lib/auth-deep-link";
+import {
+  clearPasswordRecoveryPending,
+  isPasswordRecoveryPending,
+  markPasswordRecoveryPending,
+} from "@/lib/password-recovery";
+import { getIsNetworkOnline, waitForNetworkOnline } from "@/lib/network-connectivity";
 import { JamTabBar } from "@/components/navigation/jam-tab-bar";
 import { DiscoverScreen } from "@/screens/discover-screen";
 import { CreateScreen } from "@/screens/create-screen";
@@ -153,6 +159,7 @@ function JamApp({
   const [route, setRoute] = useState<Route>("auth");
   const [userId, setUserId] = useState<string | null>(null);
   const [booting, setBooting] = useState(true);
+  const [showConnectionHint, setShowConnectionHint] = useState(false);
   const [shuffleSignal, setShuffleSignal] = useState(0);
   const [onboardingInitialStep, setOnboardingInitialStep] = useState<1 | 2 | 3>(1);
   const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(false);
@@ -163,6 +170,7 @@ function JamApp({
     nextUserId: string,
     options?: { fromColdStart?: boolean },
   ) => {
+    await clearPasswordRecoveryPending();
     setPasswordRecoveryPending(false);
     const profile = await fetchProfile(nextUserId);
     setUserId(nextUserId);
@@ -184,6 +192,7 @@ function JamApp({
   }, []);
 
   const enterPasswordRecovery = useCallback(() => {
+    void markPasswordRecoveryPending();
     setPasswordRecoveryPending(true);
     setUserId(null);
     setRoute("auth");
@@ -197,8 +206,27 @@ function JamApp({
 
   useEffect(() => {
     let active = true;
+    let connectionHintTimer: ReturnType<typeof setTimeout> | null = null;
 
     async function boot() {
+      const onlineAtStart = await getIsNetworkOnline();
+      if (!active) return;
+
+      if (!onlineAtStart) {
+        connectionHintTimer = setTimeout(() => {
+          if (active) setShowConnectionHint(true);
+        }, 5000);
+
+        await waitForNetworkOnline();
+        if (!active) return;
+
+        if (connectionHintTimer) {
+          clearTimeout(connectionHintTimer);
+          connectionHintTimer = null;
+        }
+        setShowConnectionHint(false);
+      }
+
       let linkResult: AuthDeepLinkResult = null;
       try {
         linkResult = await handleAuthDeepLink(await Linking.getInitialURL());
@@ -212,11 +240,16 @@ function JamApp({
 
       if (!active) return;
 
-      if (linkResult === "recovery") {
+      const recoveryPending =
+        linkResult === "recovery" || (Boolean(user) && (await isPasswordRecoveryPending()));
+
+      if (recoveryPending) {
         enterPasswordRecovery();
       } else if (user) {
+        await clearPasswordRecoveryPending();
         await routeAfterAuth(user.id, { fromColdStart: true });
       } else {
+        await clearPasswordRecoveryPending();
         setRoute("auth");
       }
       setBooting(false);
@@ -225,6 +258,7 @@ function JamApp({
     const subscription = Linking.addEventListener("url", ({ url }) => {
       void handleAuthDeepLink(url)
         .then(async (linkResult) => {
+          if (!active) return;
           if (linkResult === "recovery") {
             enterPasswordRecovery();
             return;
@@ -233,9 +267,11 @@ function JamApp({
           const {
             data: { user },
           } = await supabase.auth.getUser();
+          if (!active) return;
           if (user) await routeAfterAuth(user.id);
         })
         .catch((err) => {
+          if (!active) return;
           Alert.alert(
             "could not open link",
             err instanceof Error ? err.message : "try requesting a new reset email.",
@@ -250,6 +286,7 @@ function JamApp({
       }
 
       if (!session?.user) {
+        void clearPasswordRecoveryPending();
         setPasswordRecoveryPending(false);
         setUserId(null);
         setRoute("auth");
@@ -260,13 +297,20 @@ function JamApp({
 
     return () => {
       active = false;
+      if (connectionHintTimer) clearTimeout(connectionHintTimer);
       subscription.remove();
       authSubscription.data.subscription.unsubscribe();
     };
   }, [enterPasswordRecovery, routeAfterAuth]);
 
   if (booting) {
-    return <LoadingScreen label="opening jam." logoOnly />;
+    return (
+      <LoadingScreen
+        label="opening jam."
+        logoOnly
+        connectionHint={showConnectionHint ? "Check your connection" : null}
+      />
+    );
   }
 
   if (route === "auth") {
@@ -274,6 +318,7 @@ function JamApp({
       <AuthScreen
         onAuthenticated={routeAfterAuth}
         passwordRecovery={passwordRecoveryPending}
+        onPasswordRecoveryCancelled={() => setPasswordRecoveryPending(false)}
       />
     );
   }
@@ -283,6 +328,7 @@ function JamApp({
       <AuthScreen
         onAuthenticated={routeAfterAuth}
         passwordRecovery={passwordRecoveryPending}
+        onPasswordRecoveryCancelled={() => setPasswordRecoveryPending(false)}
       />
     );
   }

@@ -9,6 +9,13 @@ npm install
 npm run dev
 ```
 
+Metro should be ready in a few seconds. Optional iOS bundle pre-warm (slower):
+`npm run dev -- --warm` or `JAM_WARM_IOS_BUNDLE=1 npm run dev`.
+
+If Metro hangs or fails to resolve packages under `~/Documents`, iCloud may have
+evicted `node_modules` (Optimize Mac Storage). Run `npm ci`, or keep the repo
+outside iCloud Documents.
+
 Use `npm run ios` or `npm run android` for native development builds.
 
 ## Native API
