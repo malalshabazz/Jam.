@@ -21,6 +21,33 @@ export type SlideshowAudioAsset = {
 
 export { MAX_SLIDESHOW_IMAGES };
 
+const POST_MEDIA_HOST = /\.supabase\.(co|in)$/i;
+
+/** Public object URL under this user's post-media prefix. */
+export function isOwnedPostMediaUrl(url: string, userId: string) {
+  const trimmed = url.trim();
+  if (!trimmed || !userId || /[\s\\]/.test(trimmed) || trimmed.includes("..")) {
+    return false;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return false;
+  }
+
+  if (parsed.protocol !== "https:") return false;
+  if (parsed.username || parsed.password) return false;
+  if (!POST_MEDIA_HOST.test(parsed.hostname)) return false;
+
+  const prefixes = [
+    `/storage/v1/object/public/${POST_MEDIA_BUCKET}/${userId}/`,
+    `/storage/v1/render/image/public/${POST_MEDIA_BUCKET}/${userId}/`,
+  ];
+  return prefixes.some((prefix) => parsed.pathname.startsWith(prefix));
+}
+
 export async function uploadSlideshowImages(
   userId: string,
   postId: string,

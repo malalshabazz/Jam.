@@ -3,6 +3,7 @@ import { clearDiscoverFeedSessionCache } from "@/lib/discover-feed-session-cache
 import { geocodeProfileLocation } from "@/lib/geocode";
 import { publishJamRelationship } from "@/lib/jam-relationship-sync";
 import { deleteCloudflareVideo, getCloudflarePlaybackUrl, assertStreamPublishable } from "@/lib/native-cloudflare";
+import { isOwnedPostMediaUrl } from "@/lib/native-slideshow-storage";
 import { creatorRoles, musicGenres } from "@/lib/options";
 import { getProBadgeKind, type ProBadgeKind } from "@/lib/pro-entitlements";
 import { supabase } from "@/lib/native-supabase";
@@ -1951,6 +1952,15 @@ export async function createVideo(input: {
 
   if (mediaType === "slideshow") {
     if (imageUrls.length === 0) throw new Error("Add at least one photo.");
+    if (imageUrls.some((url) => !isOwnedPostMediaUrl(url, input.userId))) {
+      throw new Error("Slideshow photos must be your own uploads.");
+    }
+    if (audioUrl && !isOwnedPostMediaUrl(audioUrl, input.userId)) {
+      throw new Error("Slideshow audio must be your own upload.");
+    }
+    if (mediaUrl && !isOwnedPostMediaUrl(mediaUrl, input.userId)) {
+      throw new Error("Slideshow media must be your own upload.");
+    }
   }
 
   if (input.cloudflareStreamId) {

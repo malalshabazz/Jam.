@@ -608,31 +608,6 @@ async function recordStreamUploadClaim(
     return Response.json({ error: "Upload already claimed." }, { status: 409 });
   }
 
-  // Pre-050 schema without status columns — retry bare claim.
-  if (/allowed_publish_seconds|status|schema cache|column/i.test(error.message ?? "")) {
-    const legacy = await admin.from("stream_upload_claims").insert({
-      cloudflare_stream_id: streamId,
-      user_id: userId,
-    });
-    if (!legacy.error || legacy.error.code === "23505") return null;
-    if (
-      legacy.error.code === "42P01" ||
-      /stream_upload_claims|does not exist|schema cache/i.test(legacy.error.message ?? "")
-    ) {
-      logUploadApiStep("stream claim skipped", { reason: "missing-table", streamId });
-      return null;
-    }
-  }
-
-  // Migration not applied yet — don't block uploads; insert policy still old.
-  if (
-    error.code === "42P01" ||
-    /stream_upload_claims|does not exist|schema cache/i.test(error.message ?? "")
-  ) {
-    logUploadApiStep("stream claim skipped", { reason: "missing-table", streamId });
-    return null;
-  }
-
   logUploadApiStep("stream claim failed", {
     streamId,
     code: error.code,

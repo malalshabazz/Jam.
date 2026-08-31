@@ -405,15 +405,9 @@ export async function assertStreamPublishable(cloudflareStreamId: string) {
   const data = (await response.json().catch(() => ({}))) as {
     error?: string;
     publishable?: boolean;
-    skipped?: boolean;
   };
 
-  if (response.status === 404) {
-    // Older deploy without publish-check — don't block.
-    return;
-  }
-
-  if (!response.ok || (data.publishable !== true && !data.skipped)) {
+  if (!response.ok || data.publishable !== true) {
     throw new Error(data.error ?? "Video is longer than your account allows. Trim before posting.");
   }
 }

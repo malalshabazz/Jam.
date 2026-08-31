@@ -71,10 +71,6 @@ export async function POST(request: NextRequest) {
     .maybeSingle<ClaimRow>();
 
   if (claimError) {
-    if (/stream_upload_claims|does not exist|schema cache/i.test(claimError.message ?? "")) {
-      // Pre-claim migrations — nothing to gate.
-      return Response.json({ publishable: true, skipped: true });
-    }
     return Response.json({ error: "Could not verify upload claim." }, { status: 500 });
   }
 
@@ -160,16 +156,6 @@ export async function POST(request: NextRequest) {
     .eq("user_id", user.id);
 
   if (updateError) {
-    if (/status|allowed_publish_seconds|schema cache|column/i.test(updateError.message ?? "")) {
-      // Pre-050 schema — duration already verified; client insert policy still allowed publish.
-      return Response.json({
-        publishable: true,
-        cloudflareStreamId: streamId,
-        durationSeconds: duration,
-        allowedPublishSeconds: claimAllowed,
-        skipped: true,
-      });
-    }
     return Response.json({ error: "Could not mark upload publishable." }, { status: 500 });
   }
 
