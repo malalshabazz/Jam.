@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Animated,
   Easing,
@@ -14,19 +14,18 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { creatorRoles, musicGenres } from "@/lib/options";
 import {
-  LOCATION_FILTER_COUNTRIES,
   encodeLocationFilter,
-  getCountrySearchText,
-  normalizeLocationText,
+  formatLocationSelection,
+  locationPlaceToSelection,
+  locationSelectionKey,
   parseLocationFilter,
 } from "@/lib/location-filter";
-import {
-  LOCATION_PICKER_VISIBLE_HEIGHT,
-  viewportHeight,
-} from "@/theme/tokens";
+import { useLocationSearch } from "@/lib/use-location-search";
+import { viewportHeight } from "@/theme/tokens";
 import { darkStyles, styles } from "@/theme/styles";
-import type { LocationCountryOption, LocationFilterSelection } from "@/types/app";
+import type { LocationFilterSelection } from "@/types/app";
 import { ChipRow } from "@/components/ui/chip-row";
+import { LocationSearchResults } from "@/components/ui/location-search-results";
 import { PrimaryButton } from "@/components/ui/primary-button";
 import { SectionLabel } from "@/components/ui/section-label";
 import { FilterQueryField } from "@/components/ui/filter-query-field";
@@ -65,7 +64,6 @@ export function FilterSheet({
   const [roleQuery, setRoleQuery] = useState("");
   const [genreQuery, setGenreQuery] = useState("");
   const [locationSelections, setLocationSelections] = useState<LocationFilterSelection[]>(() => parseLocationFilter(selectedLocation));
-  const [expandedCountries, setExpandedCountries] = useState<string[]>(() => parseLocationFilter(selectedLocation).map((selection) => selection.country));
   const [locationQuery, setLocationQuery] = useState("");
   const [mounted, setMounted] = useState(visible);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
@@ -122,7 +120,6 @@ export function FilterSheet({
     setLookingForDraft(Boolean(lookingForActive));
     const nextLocationSelections = parseLocationFilter(selectedLocation);
     setLocationSelections(nextLocationSelections);
-    setExpandedCountries(nextLocationSelections.map((selection) => selection.country));
     setLocationQuery("");
     setRoleQuery("");
     setGenreQuery("");
@@ -242,48 +239,26 @@ export function FilterSheet({
 
   const roleMatches = useSuggestions(creatorRoles, roleQuery, roles);
   const genreMatches = useSuggestions(musicGenres, genreQuery, genres);
-  const countryMatches = useMemo(() => {
-    const query = normalizeLocationText(locationQuery);
-    return LOCATION_FILTER_COUNTRIES.filter((option) => !query || getCountrySearchText(option).includes(query));
-  }, [locationQuery]);
-  const selectedLocationCount = locationSelections.reduce((count, selection) => count + Math.max(selection.cities.length, 1), 0);
+  const { results: locationResults, status: locationSearchStatus } = useLocationSearch(locationQuery);
+  const selectedLocationCount = locationSelections.length;
+  const selectedLocationLabels = locationSelections.map(
+    (selection) => formatLocationSelection(selection) ?? selection.country,
+  );
 
-  function findLocationSelection(country: string) {
-    return locationSelections.find((selection) => selection.country === country);
+  function addLocationPlace(place: Parameters<typeof locationPlaceToSelection>[0]) {
+    const next = locationPlaceToSelection(place);
+    const nextKey = locationSelectionKey(next);
+    setLocationSelections((current) => {
+      if (current.some((selection) => locationSelectionKey(selection) === nextKey)) return current;
+      return [...current, next];
+    });
+    setLocationQuery("");
   }
 
-  function toggleCountry(option: LocationCountryOption) {
-    setLocationSelections((current) => {
-      const existing = current.find((selection) => selection.country === option.country);
-      if (existing) return current.filter((selection) => selection.country !== option.country);
-      return [...current, { country: option.country, cities: [] }];
-    });
-    setExpandedCountries((current) =>
-      current.includes(option.country)
-        ? current.filter((country) => country !== option.country)
-        : [...current, option.country],
+  function removeLocationLabel(label: string) {
+    setLocationSelections((current) =>
+      current.filter((selection) => (formatLocationSelection(selection) ?? selection.country) !== label),
     );
-  }
-
-  function toggleCity(option: LocationCountryOption, city: string) {
-    setExpandedCountries((current) => (current.includes(option.country) ? current : [...current, option.country]));
-    setLocationSelections((current) => {
-      const existing = current.find((selection) => selection.country === option.country);
-      if (!existing) return [...current, { country: option.country, cities: [city] }];
-
-      const citySelected = existing.cities.includes(city);
-      const nextCities =
-        existing.cities.length === 0
-          ? [city]
-          : citySelected
-            ? existing.cities.filter((selectedCity) => selectedCity !== city)
-            : [...existing.cities, city];
-
-      if (nextCities.length === 0) return current.filter((selection) => selection.country !== option.country);
-      return current.map((selection) =>
-        selection.country === option.country ? { ...selection, cities: nextCities } : selection,
-      );
-    });
   }
 
   function resetRoles() {
@@ -298,7 +273,6 @@ export function FilterSheet({
 
   function resetLocations() {
     setLocationSelections([]);
-    setExpandedCountries([]);
     setLocationQuery("");
   }
 
@@ -421,61 +395,26 @@ export function FilterSheet({
             }}
           >
             <SectionLabel label="location" light />
+            <ChipRow items={selectedLocationLabels} onRemove={removeLocationLabel} />
             <FilterQueryField
               value={locationQuery}
               onChangeText={setLocationQuery}
-              placeholder="search countries..."
+              placeholder="search city, region, or country"
               onReset={resetLocations}
               onFocus={() => {
                 focusedSectionRef.current = "location";
                 ensureSectionVisible("location", Platform.OS === "ios" ? 280 : 120);
               }}
             />
-            <ScrollView
-              nestedScrollEnabled
-              keyboardShouldPersistTaps="handled"
-              style={[
-                darkStyles.locationFilterList,
-                { maxHeight: LOCATION_PICKER_VISIBLE_HEIGHT },
-              ]}
-            >
-              {countryMatches.map((option) => {
-                const selection = findLocationSelection(option.country);
-                const isExpanded = expandedCountries.includes(option.country);
-                const isCountrySelected = Boolean(selection && selection.cities.length === 0);
-                const isPartiallySelected = Boolean(selection && selection.cities.length > 0);
-
-                return (
-                  <View key={option.country} style={darkStyles.locationCountryGroup}>
-                    <Pressable style={darkStyles.locationOptionRow} onPress={() => toggleCountry(option)}>
-                      <View
-                        style={[
-                          darkStyles.locationCircle,
-                          isCountrySelected && darkStyles.locationCircleSelected,
-                          isPartiallySelected && darkStyles.locationCirclePartial,
-                        ]}
-                      >
-                        {isPartiallySelected && <View style={darkStyles.locationCirclePartialFill} />}
-                      </View>
-                      <Text style={darkStyles.locationCountryText}>{option.country}</Text>
-                    </Pressable>
-                    {isExpanded && (
-                      <View style={darkStyles.locationCityList}>
-                        {option.cities.map((city) => {
-                          const isCitySelected = Boolean(selection?.cities.includes(city));
-                          return (
-                            <Pressable key={city} style={darkStyles.locationCityRow} onPress={() => toggleCity(option, city)}>
-                              <View style={[darkStyles.locationCityCircle, isCitySelected && darkStyles.locationCircleSelected]} />
-                              <Text style={darkStyles.locationCityText}>{city}</Text>
-                            </Pressable>
-                          );
-                        })}
-                      </View>
-                    )}
-                  </View>
-                );
-              })}
-            </ScrollView>
+            <LocationSearchResults
+              query={locationQuery}
+              results={locationResults}
+              status={locationSearchStatus}
+              onPick={addLocationPlace}
+              listStyle={darkStyles.locationFilterList}
+              rowStyle={darkStyles.locationOptionRow}
+              textStyle={darkStyles.locationCountryText}
+            />
             <Text style={styles.helper}>
               {selectedLocationCount === 0
                 ? "no location selection — anywhere"

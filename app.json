@@ -31,26 +31,26 @@
             "upload.cloudflarestream.com": {
               "NSIncludesSubdomains": true,
               "NSExceptionAllowsInsecureHTTPLoads": false,
-              "NSExceptionMinimumTLSVersion": "TLSv1.0",
-              "NSExceptionRequiresForwardSecrecy": false
+              "NSExceptionMinimumTLSVersion": "TLSv1.2",
+              "NSExceptionRequiresForwardSecrecy": true
             },
             "cloudflarestream.com": {
               "NSIncludesSubdomains": true,
               "NSExceptionAllowsInsecureHTTPLoads": false,
-              "NSExceptionMinimumTLSVersion": "TLSv1.0",
-              "NSExceptionRequiresForwardSecrecy": false
+              "NSExceptionMinimumTLSVersion": "TLSv1.2",
+              "NSExceptionRequiresForwardSecrecy": true
             },
             "upload.videodelivery.net": {
               "NSIncludesSubdomains": true,
               "NSExceptionAllowsInsecureHTTPLoads": false,
               "NSExceptionMinimumTLSVersion": "TLSv1.2",
-              "NSExceptionRequiresForwardSecrecy": false
+              "NSExceptionRequiresForwardSecrecy": true
             },
             "videodelivery.net": {
               "NSIncludesSubdomains": true,
               "NSExceptionAllowsInsecureHTTPLoads": false,
               "NSExceptionMinimumTLSVersion": "TLSv1.2",
-              "NSExceptionRequiresForwardSecrecy": false
+              "NSExceptionRequiresForwardSecrecy": true
             }
           }
         }

@@ -69,35 +69,14 @@ function createAuthenticatedClient(accessToken: string) {
   });
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForStreamReady(
-  accountId: string,
-  apiToken: string,
-  streamId: string,
-  timeoutMs = 90000,
-) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${streamId}`,
-      {
-        headers: { Authorization: `Bearer ${apiToken}` },
-      },
-    );
-    const data = (await response.json().catch(() => ({}))) as CloudflareVideoResponse;
-    const state = data.result?.status?.state?.toLowerCase();
-    if (response.ok && data.success && state === "ready") {
-      return data.result ?? null;
-    }
-    if (state === "error") {
-      throw new Error(cloudflareErrorMessage(data, "Video processing failed."));
-    }
-    await sleep(2000);
-  }
-  throw new Error("Timed out waiting for video processing.");
+async function fetchStreamOnce(accountId: string, apiToken: string, streamId: string) {
+  const response = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${encodeURIComponent(streamId)}`,
+    { headers: { Authorization: `Bearer ${apiToken}` } },
+  );
+  const data = (await response.json().catch(() => ({}))) as CloudflareVideoResponse;
+  const state = data.result?.status?.state?.toLowerCase();
+  return { response, data, state };
 }
 
 export async function POST(request: NextRequest) {
@@ -169,15 +148,26 @@ export async function POST(request: NextRequest) {
     proSubscriptionActive: profile?.pro_subscription_active,
   });
 
-  let sourceVideo: CloudflareVideoResponse["result"] | null | undefined;
+  let sourceLookup: Awaited<ReturnType<typeof fetchStreamOnce>>;
   try {
-    sourceVideo = await waitForStreamReady(accountId, apiToken, sourceId);
-  } catch (error) {
+    sourceLookup = await fetchStreamOnce(accountId, apiToken, sourceId);
+  } catch {
+    return Response.json({ error: "Could not reach Cloudflare Stream." }, { status: 502 });
+  }
+
+  if (sourceLookup.state === "error") {
     return Response.json(
-      { error: error instanceof Error ? error.message : "Source video is not ready." },
-      { status: 504 },
+      { error: cloudflareErrorMessage(sourceLookup.data, "Video processing failed.") },
+      { status: 400 },
     );
   }
+  if (!sourceLookup.response.ok || !sourceLookup.data.success || sourceLookup.state !== "ready") {
+    return Response.json(
+      { error: "Source video is not ready yet.", retry: true },
+      { status: 409 },
+    );
+  }
+  const sourceVideo = sourceLookup.data.result;
 
   const { startTimeSeconds, endTimeSeconds, durationSeconds } = normalizeClipRange(
     rawStartTimeSeconds,
@@ -250,22 +240,8 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  try {
-    await waitForStreamReady(accountId, apiToken, clippedId);
-  } catch (error) {
-    return Response.json(
-      { error: error instanceof Error ? error.message : "Trimmed video is not ready." },
-      { status: 504 },
-    );
-  }
-
-  // Best-effort cleanup of the untrimmed source upload.
-  await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${sourceId}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${apiToken}` },
-  }).catch(() => undefined);
-
   // Transfer publish claim from source → clipped asset (clip already enforces output cap).
+  // Do not delete the source here — Cloudflare may still need it while the clip processes.
   const { error: claimInsertError } = await admin.from("stream_upload_claims").insert({
     cloudflare_stream_id: clippedId,
     user_id: user.id,

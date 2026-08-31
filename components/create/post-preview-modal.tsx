@@ -8,7 +8,7 @@ import { ProBadge } from "@/components/ui/badges";
 import { LookingForIcon } from "@/components/icons/looking-for-icon";
 import { getCreateTextOverlayFontSize, getCreateTextOverlayLineHeight } from "@/components/create/layout";
 import { getUniqueStrings } from "@/lib/format";
-import { formatProfileLocation, getProfileLocationParts } from "@/lib/location-filter";
+import { formatProfileLocationLabel } from "@/lib/location-filter";
 import { getProBadgeKind } from "@/lib/pro-entitlements";
 import { getNavBarHeight } from "@/lib/nav-bar";
 import {
@@ -58,7 +58,7 @@ export function CreatePostPreviewModal({
   const displayName = profile?.display_name?.trim() || "you";
   const role = profile?.creator_types?.[0] ?? "creator";
   const location = profile
-    ? formatProfileLocation(getProfileLocationParts(profile).country, getProfileLocationParts(profile).city) ??
+    ? formatProfileLocationLabel(profile) ??
       "unknown"
     : "unknown";
   const visibleTags = getUniqueStrings([...roles, ...genres]);

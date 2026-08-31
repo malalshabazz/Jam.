@@ -59,6 +59,9 @@ export function toFeedContentFilters(
       country: selection.country,
       cities: selection.cities,
       country_aliases: [...(option?.aliases ?? [])],
+      country_code: selection.country_code,
+      region: selection.region,
+      granularity: selection.granularity,
     };
   });
 

@@ -46,10 +46,7 @@ import {
   hasProFeatures,
   shouldShowProProgress,
 } from "@/lib/pro-entitlements";
-import {
-  formatProfileLocation,
-  getProfileLocationParts,
-} from "@/lib/location-filter";
+import { formatProfileLocationLabel } from "@/lib/location-filter";
 import {
   feedItemToPreloadedProfile,
   getProfileVideoOwner,
@@ -590,17 +587,9 @@ export function MyProfileScreen({
                 </View>
               </ProfileNameAnchor>
               <Text style={styles.subtitle}>{visibleProfile.creator_types?.join(", ") || "creator"}</Text>
-              {formatProfileLocation(
-                getProfileLocationParts(visibleProfile).country,
-                getProfileLocationParts(visibleProfile).city,
-              ) && (
-                <Text style={styles.subtitle}>
-                  {formatProfileLocation(
-                    getProfileLocationParts(visibleProfile).country,
-                    getProfileLocationParts(visibleProfile).city,
-                  )}
-                </Text>
-              )}
+              {formatProfileLocationLabel(visibleProfile) ? (
+                <Text style={styles.subtitle}>{formatProfileLocationLabel(visibleProfile)}</Text>
+              ) : null}
               <Text style={styles.profileBio}>{visibleProfile.bio || "no bio yet."}</Text>
             </View>
             <Pressable style={styles.profileActionPill} onPress={() => setEditing(true)}>
@@ -682,7 +671,7 @@ export function MyProfileScreen({
           owner={{
             creatorName: profile.display_name ?? "you",
             role: profile.creator_types?.[0] ?? "creator",
-            location: formatProfileLocation(getProfileLocationParts(profile).country, getProfileLocationParts(profile).city) ?? "unknown",
+            location: formatProfileLocationLabel(profile) ?? "unknown",
             avatarUrl: profile.avatar_url,
             earlyAdopter: Boolean(profile.early_adopter),
             proBadge,

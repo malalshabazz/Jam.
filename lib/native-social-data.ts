@@ -60,6 +60,9 @@ export type Profile = {
   location: string | null;
   country: string | null;
   city: string | null;
+  region: string | null;
+  country_code: string | null;
+  location_granularity: "city" | "region" | "country" | null;
   latitude: number | null;
   longitude: number | null;
   live_latitude: number | null;
@@ -202,6 +205,9 @@ export type FeedLocationFilter = {
   country: string;
   cities: string[];
   country_aliases?: string[];
+  country_code?: string;
+  region?: string;
+  granularity?: "city" | "region" | "country";
 };
 
 export type FeedContentFilters = {
@@ -260,6 +266,9 @@ type ProfileRow = Pick<
   | "location"
   | "country"
   | "city"
+  | "region"
+  | "country_code"
+  | "location_granularity"
   | "avatar_url"
   | "bio"
   | "early_adopter"
@@ -375,9 +384,9 @@ const VIDEO_COLUMNS_LEGACY =
 const OWN_VIDEO_COLUMNS_LEGACY =
   "id, caption, hashtags, media_url, cloudflare_stream_id, created_at";
 const PROFILE_COLUMNS =
-  "id, display_name, bio, creator_types, location, country, city, near_me_radius_miles, avatar_url, onboarding_complete, welcome_seen, early_adopter, video_count, pro_subscription_active";
+  "id, display_name, bio, creator_types, location, country, city, region, country_code, location_granularity, near_me_radius_miles, avatar_url, onboarding_complete, welcome_seen, early_adopter, video_count, pro_subscription_active";
 const PROFILE_ROW_COLUMNS =
-  "id, display_name, creator_types, location, country, city, avatar_url, bio, early_adopter, video_count, pro_subscription_active";
+  "id, display_name, creator_types, location, country, city, region, country_code, location_granularity, avatar_url, bio, early_adopter, video_count, pro_subscription_active";
 const PROFILE_LOCATION_COLUMNS =
   "user_id, latitude, longitude, live_latitude, live_longitude, live_location_updated_at";
 const creatorRoleSet = new Set(creatorRoles.map(normalizeTag));
@@ -512,21 +521,33 @@ export async function saveProfile(
       | "location"
       | "country"
       | "city"
+      | "region"
+      | "country_code"
+      | "location_granularity"
       | "near_me_radius_miles"
       | "avatar_url"
       | "onboarding_complete"
       | "welcome_seen"
     >
-  >,
+  > & {
+    location_coordinates?: { latitude: number; longitude: number } | null;
+  },
 ) {
-  const hasLocationUpdate = "country" in input || "city" in input;
-  const payload: Record<string, unknown> = { id: userId, ...input };
+  const hasLocationUpdate =
+    "country" in input ||
+    "city" in input ||
+    "region" in input ||
+    "country_code" in input ||
+    "location_granularity" in input;
+  const { location_coordinates: locationCoordinates, ...profileInput } = input;
+  const payload: Record<string, unknown> = { id: userId, ...profileInput };
 
   delete payload.latitude;
   delete payload.longitude;
   delete payload.live_latitude;
   delete payload.live_longitude;
   delete payload.live_location_updated_at;
+  delete payload.location_coordinates;
 
   const { data, error } = await supabase
     .from("profiles")
@@ -542,13 +563,29 @@ export async function saveProfile(
 
   const trimmedCountry = input.country?.trim() ?? "";
   const trimmedCity = input.city?.trim() ?? "";
+  const trimmedRegion = input.region?.trim() ?? "";
+  const granularity =
+    input.location_granularity ??
+    (trimmedCity ? "city" : trimmedRegion ? "region" : trimmedCountry ? "country" : null);
 
-  if (!trimmedCountry && !trimmedCity) {
+  if (!trimmedCountry && !trimmedCity && !trimmedRegion) {
     await upsertPrivateProfileGeocode(userId, null);
     return attachPrivateLocation(data as Omit<Profile, keyof ProfileLocationFields>);
   }
 
-  const coordinates = await geocodeProfileLocation(input.country, input.city);
+  if (granularity !== "city") {
+    await upsertPrivateProfileGeocode(userId, null);
+    return attachPrivateLocation(data as Omit<Profile, keyof ProfileLocationFields>);
+  }
+
+  const providedCoordinates =
+    locationCoordinates &&
+    Number.isFinite(locationCoordinates.latitude) &&
+    Number.isFinite(locationCoordinates.longitude)
+      ? locationCoordinates
+      : null;
+  const coordinates =
+    providedCoordinates ?? (await geocodeProfileLocation(input.country, input.city));
   if (coordinates) {
     await upsertPrivateProfileGeocode(userId, coordinates);
   }
@@ -692,6 +729,9 @@ async function fetchFilteredFeedVideos(
       country: selection.country.trim(),
       cities: normalizeFeedFilterTags(selection.cities),
       country_aliases: normalizeFeedFilterTags(selection.country_aliases),
+      country_code: selection.country_code?.trim().toUpperCase() || undefined,
+      region: selection.region?.trim() || undefined,
+      granularity: selection.granularity,
     }))
     .filter((selection) => selection.country);
 
@@ -2935,11 +2975,18 @@ function getDisplayName(profile: Pick<ProfileRow, "display_name">) {
   return profile.display_name?.trim() || "Creator";
 }
 
-function getProfileLocation(profile: Pick<ProfileRow, "country" | "city" | "location">) {
-  const country = profile.country?.trim();
-  const city = profile.city?.trim();
-  if (country && city) return `${city}, ${country}`;
-  return country || profile.location?.trim() || "Unknown";
+function getProfileLocation(
+  profile: Pick<ProfileRow, "country" | "city" | "region" | "location">,
+) {
+  const country = profile.country?.trim() ?? "";
+  const city = profile.city?.trim() ?? "";
+  const region = profile.region?.trim() ?? "";
+  const formatted = [city, region, country].filter((part, index, parts) => {
+    if (!part) return false;
+    const normalized = part.toLowerCase();
+    return !parts.slice(0, index).some((earlier) => earlier.toLowerCase() === normalized);
+  });
+  return formatted.join(", ") || profile.location?.trim() || "Unknown";
 }
 
 function getVideoTags(video: VideoRow) {

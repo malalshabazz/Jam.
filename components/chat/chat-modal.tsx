@@ -34,8 +34,7 @@ import {
   withJamRelationship,
 } from "@/lib/jam-relationship-sync";
 import {
-  formatProfileLocation,
-  getProfileLocationParts,
+  formatProfileLocationLabel,
 } from "@/lib/location-filter";
 import {
   blockUser,
@@ -381,7 +380,6 @@ export function ChatModal({
           return;
         }
 
-        const locationParts = getProfileLocationParts(profile);
         setAttachedViewer({
           isOwn: true,
           videos: ownVideos,
@@ -389,7 +387,7 @@ export function ChatModal({
           owner: {
             creatorName: profile.display_name ?? "you",
             role: profile.creator_types?.[0] ?? "creator",
-            location: formatProfileLocation(locationParts.country, locationParts.city) ?? "unknown",
+            location: formatProfileLocationLabel(profile) ?? "unknown",
             avatarUrl: profile.avatar_url,
             earlyAdopter: Boolean(profile.early_adopter),
             proBadge: getProBadgeKind({
@@ -432,7 +430,6 @@ export function ChatModal({
         return;
       }
 
-      const locationParts = getProfileLocationParts(profile);
       setAttachedViewer({
         isOwn: false,
         videos: feedVideos,
@@ -440,7 +437,7 @@ export function ChatModal({
         owner: {
           creatorName: profile.display_name ?? "creator",
           role: profile.creator_types?.[0] ?? "creator",
-          location: formatProfileLocation(locationParts.country, locationParts.city) ?? "unknown",
+          location: formatProfileLocationLabel(profile) ?? "unknown",
           avatarUrl: profile.avatar_url,
           earlyAdopter: Boolean(profile.early_adopter),
           proBadge: getProBadgeKind({

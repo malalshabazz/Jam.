@@ -1,7 +1,13 @@
-import type { LocationCountryOption, LocationFilterSelection } from "@/types/app";
+import type {
+  LocationCountryOption,
+  LocationFilterSelection,
+  LocationGranularity,
+  LocationPlace,
+} from "@/types/app";
 import { getUniqueStrings } from "@/lib/format";
 
 export const LOCATION_FILTER_PREFIX = "jam-location-v1:";
+export const LOCATION_FILTER_PREFIX_V2 = "jam-location-v2:";
 
 function sortLocationCountries(options: readonly LocationCountryOption[]): readonly LocationCountryOption[] {
   return [...options]
@@ -89,54 +95,150 @@ export function locationContainsTerm(location: string, term: string) {
   return new RegExp(`(^|[^a-z0-9])${escapeRegExp(term)}([^a-z0-9]|$)`, "i").test(location);
 }
 
-export function parseLocationFilter(value: string): LocationFilterSelection[] {
-  if (!value) return [];
+function isLocationGranularity(value: unknown): value is LocationGranularity {
+  return value === "city" || value === "region" || value === "country";
+}
 
-  if (!value.startsWith(LOCATION_FILTER_PREFIX)) {
-    const normalizedValue = normalizeLocationText(value);
-    const legacyMatch = LOCATION_FILTER_COUNTRIES.find(
-      (option) =>
-        getCountryMatchTerms(option).some((term) => locationContainsTerm(normalizedValue, term)) ||
-        option.cities.some((city) => locationContainsTerm(normalizedValue, normalizeLocationText(city))),
-    );
+export function locationPlaceKey(place: Pick<LocationPlace, "granularity" | "country_code" | "country" | "region" | "city">) {
+  return [
+    place.granularity,
+    normalizeLocationText(place.country_code || place.country),
+    normalizeLocationText(place.region ?? ""),
+    normalizeLocationText(place.city ?? ""),
+  ].join("|");
+}
 
-    if (!legacyMatch) return [];
+export function locationSelectionKey(selection: LocationFilterSelection) {
+  const city = selection.cities[0] ?? "";
+  return locationPlaceKey({
+    granularity: resolveSelectionGranularity(selection),
+    country_code: selection.country_code ?? "",
+    country: selection.country,
+    region: selection.region ?? "",
+    city,
+  });
+}
 
-    const legacyCities = legacyMatch.cities.filter((city) =>
-      locationContainsTerm(normalizedValue, normalizeLocationText(city)),
-    );
-    return [{ country: legacyMatch.country, cities: legacyCities }];
-  }
+export function resolveSelectionGranularity(selection: LocationFilterSelection): LocationGranularity {
+  if (isLocationGranularity(selection.granularity)) return selection.granularity;
+  if (selection.cities.length > 0) return "city";
+  if (selection.region?.trim()) return "region";
+  return "country";
+}
 
+export function locationPlaceToSelection(place: LocationPlace): LocationFilterSelection {
+  return {
+    country: place.country,
+    country_code: place.country_code || undefined,
+    region: place.region ?? undefined,
+    cities: place.city ? [place.city] : [],
+    granularity: place.granularity,
+  };
+}
+
+export function formatLocationSelection(selection: LocationFilterSelection) {
+  return formatProfileLocation(
+    selection.country,
+    selection.cities[0] ?? "",
+    selection.region,
+  );
+}
+
+function parseStructuredLocationFilter(
+  raw: string,
+  allowUnknownCountries: boolean,
+): LocationFilterSelection[] {
   try {
-    const parsed = JSON.parse(value.slice(LOCATION_FILTER_PREFIX.length));
+    const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
 
     return parsed.flatMap((entry): LocationFilterSelection[] => {
-      if (!entry || typeof entry.country !== "string") return [];
-      const country = LOCATION_FILTER_COUNTRIES.find((option) => option.country === entry.country);
+      if (!entry || typeof entry.country !== "string" || !entry.country.trim()) return [];
+
+      const country = allowUnknownCountries
+        ? entry.country.trim()
+        : LOCATION_FILTER_COUNTRIES.find((option) => option.country === entry.country)?.country;
       if (!country) return [];
-      const validCities = Array.isArray(entry.cities)
-        ? entry.cities.filter((city: unknown): city is string => typeof city === "string" && country.cities.includes(city))
+
+      const listed = LOCATION_FILTER_COUNTRIES.find((option) => option.country === country);
+      const cities = Array.isArray(entry.cities)
+        ? entry.cities.filter((city: unknown): city is string => {
+            if (typeof city !== "string" || !city.trim()) return false;
+            if (allowUnknownCountries) return true;
+            return Boolean(listed?.cities.includes(city));
+          })
         : [];
-      return [{ country: country.country, cities: getUniqueStrings(validCities) }];
+      const region = typeof entry.region === "string" ? entry.region.trim() : "";
+      const countryCode =
+        typeof entry.country_code === "string" ? entry.country_code.trim().toUpperCase() : "";
+
+      return [
+        {
+          country,
+          cities: getUniqueStrings(cities),
+          ...(countryCode ? { country_code: countryCode } : {}),
+          ...(region ? { region } : {}),
+          ...(isLocationGranularity(entry.granularity) ? { granularity: entry.granularity } : {}),
+        },
+      ];
     });
   } catch {
     return [];
   }
 }
 
+export function parseLocationFilter(value: string): LocationFilterSelection[] {
+  if (!value) return [];
+
+  if (value.startsWith(LOCATION_FILTER_PREFIX_V2)) {
+    return parseStructuredLocationFilter(value.slice(LOCATION_FILTER_PREFIX_V2.length), true);
+  }
+
+  if (value.startsWith(LOCATION_FILTER_PREFIX)) {
+    return parseStructuredLocationFilter(value.slice(LOCATION_FILTER_PREFIX.length), false);
+  }
+
+  const normalizedValue = normalizeLocationText(value);
+  const legacyMatch = LOCATION_FILTER_COUNTRIES.find(
+    (option) =>
+      getCountryMatchTerms(option).some((term) => locationContainsTerm(normalizedValue, term)) ||
+      option.cities.some((city) => locationContainsTerm(normalizedValue, normalizeLocationText(city))),
+  );
+
+  if (!legacyMatch) return [];
+
+  const legacyCities = legacyMatch.cities.filter((city) =>
+    locationContainsTerm(normalizedValue, normalizeLocationText(city)),
+  );
+  return [{ country: legacyMatch.country, cities: legacyCities }];
+}
+
 export function encodeLocationFilter(selections: readonly LocationFilterSelection[]) {
   const cleanSelections = selections
     .map((selection) => {
-      const country = LOCATION_FILTER_COUNTRIES.find((option) => option.country === selection.country);
+      const country = selection.country.trim();
       if (!country) return null;
-      const cities = getUniqueStrings(selection.cities).filter((city) => country.cities.includes(city));
-      return { country: country.country, cities };
+      const cities = getUniqueStrings(selection.cities);
+      const region = selection.region?.trim() ?? "";
+      const countryCode = selection.country_code?.trim().toUpperCase() ?? "";
+      const granularity = resolveSelectionGranularity({
+        ...selection,
+        country,
+        cities,
+        region,
+      });
+      const next: LocationFilterSelection = {
+        country,
+        cities,
+        granularity,
+      };
+      if (countryCode) next.country_code = countryCode;
+      if (region) next.region = region;
+      return next;
     })
-    .filter((selection): selection is LocationFilterSelection => Boolean(selection));
+    .filter((selection): selection is LocationFilterSelection => selection != null);
 
-  return cleanSelections.length ? `${LOCATION_FILTER_PREFIX}${JSON.stringify(cleanSelections)}` : "";
+  return cleanSelections.length ? `${LOCATION_FILTER_PREFIX_V2}${JSON.stringify(cleanSelections)}` : "";
 }
 
 export function locationFilterMatches(itemLocation: string, filterValue: string) {
@@ -152,31 +254,100 @@ export function locationFilterMatches(itemLocation: string, filterValue: string)
 
   return selections.some((selection) => {
     const option = LOCATION_FILTER_COUNTRIES.find((country) => country.country === selection.country);
-    if (!option) return false;
+    const countryTerms = [
+      selection.country,
+      ...(selection.country_code ? [selection.country_code] : []),
+      ...(option ? getCountryMatchTerms(option) : []),
+    ].map(normalizeLocationText);
+    const countryMatch = countryTerms.some((term) => locationContainsTerm(normalizedItemLocation, term));
+    if (!countryMatch) return false;
 
-    if (selection.cities.length === 0) {
-      return getCountryMatchTerms(option).some((term) => locationContainsTerm(normalizedItemLocation, term));
+    const granularity = resolveSelectionGranularity(selection);
+    if (granularity === "country") return true;
+
+    if (granularity === "region") {
+      return Boolean(selection.region && locationContainsTerm(normalizedItemLocation, normalizeLocationText(selection.region)));
     }
 
-    return selection.cities.some((city) => locationContainsTerm(normalizedItemLocation, normalizeLocationText(city)));
+    const cities = selection.cities.length
+      ? selection.cities
+      : [];
+    return cities.some((city) => locationContainsTerm(normalizedItemLocation, normalizeLocationText(city)));
   });
 }
 
-export function getProfileLocationParts(profile?: { country?: string | null; city?: string | null; location?: string | null } | null) {
+export function getProfileLocationParts(profile?: {
+  country?: string | null;
+  city?: string | null;
+  region?: string | null;
+  country_code?: string | null;
+  location_granularity?: string | null;
+  location?: string | null;
+} | null) {
   const country = profile?.country?.trim() ?? "";
   const city = profile?.city?.trim() ?? "";
-  if (country) return { country, city };
+  const region = profile?.region?.trim() ?? "";
+  const countryCode = profile?.country_code?.trim().toUpperCase() ?? "";
+  const granularity = isLocationGranularity(profile?.location_granularity)
+    ? profile.location_granularity
+    : city
+      ? "city"
+      : region
+        ? "region"
+        : country
+          ? "country"
+          : null;
+
+  if (country || city || region) {
+    return { country, city, region, countryCode, granularity };
+  }
 
   const legacySelection = parseLocationFilter(profile?.location ?? "").at(0);
   return {
     country: legacySelection?.country ?? "",
     city: legacySelection?.cities.at(0) ?? "",
+    region: legacySelection?.region ?? "",
+    countryCode: legacySelection?.country_code ?? "",
+    granularity: legacySelection ? resolveSelectionGranularity(legacySelection) : null,
   };
 }
 
-export function formatProfileLocation(country: string, city: string) {
+export function formatProfileLocation(country: string, city: string, region?: string | null) {
   const nextCountry = country.trim();
   const nextCity = city.trim();
-  if (nextCountry && nextCity) return `${nextCity}, ${nextCountry}`;
-  return nextCountry || null;
+  const nextRegion = region?.trim() ?? "";
+  const parts = [nextCity, nextRegion, nextCountry].filter((part, index, all) => {
+    if (!part) return false;
+    return !all.slice(0, index).some((earlier) => normalizeLocationText(earlier) === normalizeLocationText(part));
+  });
+  return parts.length ? parts.join(", ") : null;
+}
+
+export function formatProfileLocationLabel(
+  profile?: {
+    country?: string | null;
+    city?: string | null;
+    region?: string | null;
+    country_code?: string | null;
+    location_granularity?: string | null;
+    location?: string | null;
+  } | null,
+) {
+  const parts = getProfileLocationParts(profile);
+  return formatProfileLocation(parts.country, parts.city, parts.region);
+}
+
+export function locationPartsToPlace(parts: ReturnType<typeof getProfileLocationParts>): LocationPlace | null {
+  if (!parts.country && !parts.city && !parts.region) return null;
+  const granularity = parts.granularity ?? (parts.city ? "city" : parts.region ? "region" : "country");
+  return {
+    label: formatProfileLocation(parts.country, parts.city, parts.region) ?? parts.country,
+    granularity,
+    country: parts.country,
+    country_code: parts.countryCode,
+    region: parts.region || null,
+    city: parts.city || null,
+    latitude: null,
+    longitude: null,
+  };
 }

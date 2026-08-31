@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { deleteAuthenticatedAccount } from "@/lib/delete-account-server";
 import { getAllowedMaxVideoSeconds } from "@/lib/pro-entitlements";
 import { createServiceRoleClient } from "@/lib/supabase-admin";
 
@@ -18,10 +19,6 @@ type ProfileDurationRow = {
   video_count: number | null;
   pro_subscription_active: boolean | null;
 };
-type AccountVideoRow = {
-  cloudflare_stream_id: string | null;
-};
-
 export async function POST(request: NextRequest) {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
   const apiToken = process.env.CLOUDFLARE_STREAM_API_TOKEN;
@@ -332,7 +329,6 @@ async function createTusDirectUpload(input: {
 export async function DELETE(request: NextRequest) {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
   const apiToken = process.env.CLOUDFLARE_STREAM_API_TOKEN;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const authHeader = request.headers.get("authorization");
   const accessToken = authHeader?.match(/^Bearer (.+)$/)?.[1];
 
@@ -364,92 +360,11 @@ export async function DELETE(request: NextRequest) {
     });
   }
 
-  if (!body.currentPassword || !user.email) {
-    return Response.json({ error: "Your current password is required." }, { status: 400 });
-  }
-
-  const passwordClient = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-  );
-  const { error: passwordError } = await passwordClient.auth.signInWithPassword({
-    email: user.email,
-    password: body.currentPassword,
+  // Older app builds posted account delete here. Same handler as /api/account.
+  return deleteAuthenticatedAccount({
+    accessToken,
+    currentPassword: typeof body.currentPassword === "string" ? body.currentPassword : "",
   });
-  if (passwordError) {
-    return Response.json({ error: "Your current password is incorrect." }, { status: 401 });
-  }
-
-  if (!serviceRoleKey) {
-    return Response.json(
-      { error: "Account deletion is not configured." },
-      { status: 500 },
-    );
-  }
-
-  const { data: videos, error: videosError } = await supabase
-    .from("videos")
-    .select("cloudflare_stream_id")
-    .eq("user_id", user.id)
-    .returns<AccountVideoRow[]>();
-  if (videosError) {
-    return Response.json({ error: "Could not load account videos." }, { status: 500 });
-  }
-
-  const streamIds = [...new Set(
-    (videos ?? [])
-      .map((video) => video.cloudflare_stream_id)
-      .filter((streamId): streamId is string => Boolean(streamId)),
-  )];
-
-  if (streamIds.length > 0 && (!accountId || !apiToken)) {
-    return Response.json(
-      { error: "Video deletion is not configured. Your account was not deleted." },
-      { status: 500 },
-    );
-  }
-
-  for (const streamId of streamIds) {
-    let response: Response;
-    try {
-      response = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${encodeURIComponent(streamId)}`,
-        {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${apiToken}` },
-        },
-      );
-    } catch {
-      return Response.json(
-        { error: "Could not delete your uploaded videos. Your account was not deleted." },
-        { status: 502 },
-      );
-    }
-
-    if (!response.ok && response.status !== 404) {
-      return Response.json(
-        { error: "Could not delete your uploaded videos. Your account was not deleted." },
-        { status: 502 },
-      );
-    }
-  }
-
-  const adminClient = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    serviceRoleKey,
-    {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-      },
-    },
-  );
-  const { error: deleteError } = await adminClient.auth.admin.deleteUser(user.id);
-  if (deleteError) {
-    return Response.json({ error: deleteError.message }, { status: 500 });
-  }
-
-  return Response.json({ deleted: true });
 }
 
 type VideoDeleteRow = {

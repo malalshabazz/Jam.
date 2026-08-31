@@ -4,6 +4,9 @@ import type {
   ProfileVideo,
 } from "@/lib/native-social-data";
 import type { VideoTextEffectId, VideoTextFontId } from "@/lib/video-presentation";
+import type { LocationGranularity, LocationPlace } from "@/lib/location-place";
+
+export type { LocationGranularity, LocationPlace };
 
 export type Route = "auth" | "onboarding" | "welcome" | "main";
 export type Tab = "discover" | "inbox" | "create" | "you";
@@ -51,6 +54,9 @@ export type LocationCountryOption = {
 export type LocationFilterSelection = {
   country: string;
   cities: string[];
+  country_code?: string;
+  region?: string;
+  granularity?: LocationGranularity;
 };
 
 export type PreloadedUserProfile = {

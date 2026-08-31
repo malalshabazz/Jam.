@@ -330,7 +330,7 @@ export async function probeHlsDurationMs(manifestUrl: string): Promise<number | 
   }
 }
 
-function getCloudflareStreamApiEndpoint(action: "clip" | "videos" | "publish-check" | "ready") {
+function getCloudflareStreamApiEndpoint(action: "clip" | "videos" | "publish-check") {
   if (!cloudflareUploadEndpoint) return "";
   try {
     const url = new URL(cloudflareUploadEndpoint);
@@ -577,32 +577,48 @@ export async function clipStreamVideo(input: {
     throw new Error("Log in again before uploading.");
   }
 
-  let response: Response;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000);
-  try {
-    response = await fetch(clipEndpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
-        cloudflareStreamId: input.cloudflareStreamId,
-        startTimeSeconds: input.startTimeSeconds,
-        endTimeSeconds: input.endTimeSeconds,
-        thumbnailTimestampPct: input.thumbnailTimestampPct,
-      }),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    logVideoUploadStep("stream clip request network error", getVideoUploadErrorDetails(error));
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("Trimming the video took too long. Try again.");
+  await waitForCloudflareStreamReady(input.cloudflareStreamId);
+
+  let response: Response | null = null;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    try {
+      response = await fetch(clipEndpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          cloudflareStreamId: input.cloudflareStreamId,
+          startTimeSeconds: input.startTimeSeconds,
+          endTimeSeconds: input.endTimeSeconds,
+          thumbnailTimestampPct: input.thumbnailTimestampPct,
+        }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      lastError = error;
+      logVideoUploadStep("stream clip request network error", getVideoUploadErrorDetails(error));
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error("Trimming the video took too long. Try again.");
+      }
+      throw new Error("Could not trim the video. Check your connection and try again.");
+    } finally {
+      clearTimeout(timeoutId);
     }
-    throw new Error("Could not trim the video. Check your connection and try again.");
-  } finally {
-    clearTimeout(timeoutId);
+
+    if (response.status !== 409) break;
+    logVideoUploadStep("stream clip source not ready — retry", { attempt });
+    await waitForCloudflareStreamReady(input.cloudflareStreamId);
+  }
+
+  if (!response) {
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("Could not trim the video. Check your connection and try again.");
   }
 
   const data = (await response.json().catch(() => ({}))) as {

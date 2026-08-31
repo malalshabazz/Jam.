@@ -10,7 +10,7 @@ import {
 import { normalizeVideoFilter } from "@/lib/video-filters";
 import { normalizeVideoTextOverlays } from "@/lib/video-presentation";
 import type { PreloadedUserProfile } from "@/types/app";
-import { formatProfileLocation, getProfileLocationParts } from "@/lib/location-filter";
+import { formatProfileLocationLabel } from "@/lib/location-filter";
 import {
   creatorRoleTagSet,
   getUniqueVideoTags,
@@ -78,7 +78,7 @@ export function profileToFeedVideo(
     userId: profile.id,
     creatorName: displayName,
     role,
-    location: formatProfileLocation(getProfileLocationParts(profile).country, getProfileLocationParts(profile).city) ?? "unknown",
+    location: formatProfileLocationLabel(profile) ?? "unknown",
     avatarUrl: profile.avatar_url,
     bio: profile.bio,
     caption: video?.caption ?? "",
@@ -164,6 +164,9 @@ export function feedItemToPreloadedProfile(item: FeedVideo, feedItems: FeedVideo
       location: item.location,
       country: null,
       city: null,
+      region: null,
+      country_code: null,
+      location_granularity: null,
       latitude: null,
       longitude: null,
       live_latitude: null,

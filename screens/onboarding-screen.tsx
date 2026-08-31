@@ -29,7 +29,9 @@ import { getUniqueStrings } from "@/lib/format";
 import {
   formatProfileLocation,
   getProfileLocationParts,
+  locationPartsToPlace,
 } from "@/lib/location-filter";
+import type { LocationPlace } from "@/types/app";
 import { useSuggestions } from "@/lib/use-suggestions";
 import {
   MAX_ACCOUNT_CREATOR_TYPES,
@@ -59,8 +61,7 @@ export function OnboardingScreen({
   const [bio, setBio] = useState("");
   const [creatorTypes, setCreatorTypes] = useState<string[]>([]);
   const [creatorQuery, setCreatorQuery] = useState("");
-  const [country, setCountry] = useState("");
-  const [city, setCity] = useState("");
+  const [locationPlace, setLocationPlace] = useState<LocationPlace | null>(null);
   const [locationQuery, setLocationQuery] = useState("");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [avatarAsset, setAvatarAsset] = useState<NativeAvatarAsset | null>(null);
@@ -78,9 +79,7 @@ export function OnboardingScreen({
       setDisplayName(profile.display_name ?? "");
       setBio(profile.bio ?? "");
       setCreatorTypes(getUniqueStrings(profile.creator_types ?? []).slice(0, MAX_ACCOUNT_CREATOR_TYPES));
-      const nextLocation = getProfileLocationParts(profile);
-      setCountry(nextLocation.country);
-      setCity(nextLocation.city);
+      setLocationPlace(locationPartsToPlace(getProfileLocationParts(profile)));
       setLocationQuery("");
       setAvatarUrl(profile.avatar_url ?? null);
     });
@@ -216,9 +215,22 @@ export function OnboardingScreen({
         display_name: displayName.trim(),
         bio: bio.trim(),
         creator_types: nextCreatorTypes,
-        country: country.trim() || null,
-        city: city.trim() || null,
-        location: formatProfileLocation(country, city),
+        country: locationPlace?.country.trim() || null,
+        city: locationPlace?.city?.trim() || null,
+        region: locationPlace?.region?.trim() || null,
+        country_code: locationPlace?.country_code?.trim() || null,
+        location_granularity: locationPlace?.granularity ?? null,
+        location: formatProfileLocation(
+          locationPlace?.country ?? "",
+          locationPlace?.city ?? "",
+          locationPlace?.region,
+        ),
+        location_coordinates:
+          locationPlace?.granularity === "city" &&
+          locationPlace.latitude != null &&
+          locationPlace.longitude != null
+            ? { latitude: locationPlace.latitude, longitude: locationPlace.longitude }
+            : null,
         avatar_url: nextAvatarUrl,
         onboarding_complete: true,
         welcome_seen: false,
@@ -339,14 +351,10 @@ export function OnboardingScreen({
 
               <SectionLabel label="location" />
               <ProfileLocationPicker
-                country={country}
-                city={city}
+                place={locationPlace}
                 query={locationQuery}
                 onQueryChange={setLocationQuery}
-                onChange={(nextCountry, nextCity) => {
-                  setCountry(nextCountry);
-                  setCity(nextCity);
-                }}
+                onChange={setLocationPlace}
               />
             </ScrollView>
 

@@ -1,4 +1,4 @@
-import { cloudflareUploadEndpoint, getAuthEmailRedirectUrl, supabase } from "@/lib/native-supabase";
+import { getAccountDeleteEndpoint, getAuthEmailRedirectUrl, supabase } from "@/lib/native-supabase";
 
 export type AccountDetails = {
   email: string | null;
@@ -61,7 +61,8 @@ export async function changeAccountPassword(currentPassword: string, newPassword
 }
 
 export async function deleteCurrentAccount(currentPassword: string) {
-  if (!cloudflareUploadEndpoint) {
+  const accountDeleteEndpoint = getAccountDeleteEndpoint();
+  if (!accountDeleteEndpoint) {
     throw new Error("Account deletion is not configured.");
   }
 
@@ -72,7 +73,7 @@ export async function deleteCurrentAccount(currentPassword: string) {
     throw new Error("Log in again before deleting your account.");
   }
 
-  const response = await fetch(cloudflareUploadEndpoint, {
+  const response = await fetch(accountDeleteEndpoint, {
     method: "DELETE",
     headers: {
       Authorization: `Bearer ${session.access_token}`,

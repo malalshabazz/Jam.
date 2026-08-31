@@ -51,9 +51,9 @@
           <key>NSIncludesSubdomains</key>
           <true/>
           <key>NSExceptionMinimumTLSVersion</key>
-          <string>TLSv1.0</string>
+          <string>TLSv1.2</string>
           <key>NSExceptionRequiresForwardSecrecy</key>
-          <false/>
+          <true/>
         </dict>
         <key>upload.cloudflarestream.com</key>
         <dict>
@@ -62,9 +62,9 @@
           <key>NSIncludesSubdomains</key>
           <true/>
           <key>NSExceptionMinimumTLSVersion</key>
-          <string>TLSv1.0</string>
+          <string>TLSv1.2</string>
           <key>NSExceptionRequiresForwardSecrecy</key>
-          <false/>
+          <true/>
         </dict>
         <key>upload.videodelivery.net</key>
         <dict>
@@ -75,7 +75,7 @@
           <key>NSExceptionMinimumTLSVersion</key>
           <string>TLSv1.2</string>
           <key>NSExceptionRequiresForwardSecrecy</key>
-          <false/>
+          <true/>
         </dict>
         <key>videodelivery.net</key>
         <dict>
@@ -86,7 +86,7 @@
           <key>NSExceptionMinimumTLSVersion</key>
           <string>TLSv1.2</string>
           <key>NSExceptionRequiresForwardSecrecy</key>
-          <false/>
+          <true/>
         </dict>
       </dict>
     </dict>

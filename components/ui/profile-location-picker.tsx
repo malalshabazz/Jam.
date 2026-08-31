@@ -1,110 +1,57 @@
-import { useMemo } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Text, TextInput, View } from "react-native";
 import { ChipRow } from "@/components/ui/chip-row";
-import {
-  LOCATION_FILTER_COUNTRIES,
-  formatProfileLocation,
-  getCountrySearchText,
-  normalizeLocationText,
-} from "@/lib/location-filter";
-import type { LocationCountryOption } from "@/types/app";
-import { LOCATION_PICKER_VISIBLE_HEIGHT } from "@/theme/tokens";
+import { LocationSearchResults } from "@/components/ui/location-search-results";
+import { formatProfileLocation } from "@/lib/location-filter";
+import { useLocationSearch } from "@/lib/use-location-search";
+import type { LocationPlace } from "@/types/app";
 import { styles } from "@/theme/styles";
 
 export function ProfileLocationPicker({
-  country,
-  city,
+  place,
   query,
   onQueryChange,
   onChange,
   onSearchFocus,
 }: {
-  country: string;
-  city: string;
+  place: LocationPlace | null;
   query: string;
   onQueryChange: (value: string) => void;
-  onChange: (country: string, city: string) => void;
+  onChange: (place: LocationPlace | null) => void;
   onSearchFocus?: () => void;
 }) {
-  const countryMatches = useMemo(() => {
-    const normalizedQuery = normalizeLocationText(query);
-    return LOCATION_FILTER_COUNTRIES.filter((option) => !normalizedQuery || getCountrySearchText(option).includes(normalizedQuery));
-  }, [query]);
-  const selectedLabel = formatProfileLocation(country, city);
-
-  function toggleCountry(option: LocationCountryOption) {
-    if (country === option.country && !city) {
-      onChange("", "");
-      return;
-    }
-
-    onChange(option.country, "");
-  }
-
-  function toggleCity(option: LocationCountryOption, nextCity: string) {
-    if (country === option.country && city === nextCity) {
-      onChange(option.country, "");
-      return;
-    }
-
-    onChange(option.country, nextCity);
-  }
+  const { results, status } = useLocationSearch(query);
+  const selectedLabel =
+    place?.label ||
+    formatProfileLocation(place?.country ?? "", place?.city ?? "", place?.region) ||
+    "";
 
   return (
     <View style={styles.profileLocationPicker}>
-      <ChipRow items={selectedLabel ? [selectedLabel] : []} onRemove={() => onChange("", "")} />
+      <ChipRow items={selectedLabel ? [selectedLabel] : []} onRemove={() => onChange(null)} />
       <TextInput
         value={query}
         onChangeText={onQueryChange}
         onFocus={onSearchFocus}
-        placeholder="search countries..."
+        placeholder="search city, region, or country"
         placeholderTextColor="#71717a"
         style={styles.input}
+        autoCorrect={false}
+        autoCapitalize="none"
       />
-      <ScrollView
-        nestedScrollEnabled
-        keyboardShouldPersistTaps="handled"
-        style={[
-          styles.locationFilterList,
-          { maxHeight: LOCATION_PICKER_VISIBLE_HEIGHT },
-        ]}
-      >
-        {countryMatches.map((option) => {
-          const isSelectedCountry = country === option.country;
-          const hasSelectedCity = isSelectedCountry && Boolean(city);
-
-          return (
-            <View key={option.country} style={styles.locationCountryGroup}>
-              <Pressable style={styles.locationOptionRow} onPress={() => toggleCountry(option)}>
-                <View
-                  style={[
-                    styles.locationCircle,
-                    isSelectedCountry && !hasSelectedCity && styles.locationCircleSelected,
-                    hasSelectedCity && styles.locationCirclePartial,
-                  ]}
-                >
-                  {hasSelectedCity && <View style={styles.locationCirclePartialFill} />}
-                </View>
-                <Text style={styles.locationCountryText}>{option.country}</Text>
-              </Pressable>
-              {isSelectedCountry && (
-                <View style={styles.locationCityList}>
-                  {option.cities.map((cityOption) => {
-                    const isCitySelected = city === cityOption;
-                    return (
-                      <Pressable key={cityOption} style={styles.locationCityRow} onPress={() => toggleCity(option, cityOption)}>
-                        <View style={[styles.locationCityCircle, isCitySelected && styles.locationCircleSelected]} />
-                        <Text style={styles.locationCityText}>{cityOption}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              )}
-            </View>
-          );
-        })}
-      </ScrollView>
-      <Text style={styles.helper}>{selectedLabel ? "city is optional — country-only shows your whole country" : "no selection — anywhere"}</Text>
+      <LocationSearchResults
+        query={query}
+        results={results}
+        status={status}
+        onPick={(next) => {
+          onChange(next);
+          onQueryChange("");
+        }}
+      />
+      <Text style={styles.helper}>
+        {selectedLabel
+          ? "city, region, or country — broader places stay out of city searches"
+          : "type at least 3 letters to search"}
+      </Text>
     </View>
   );
 }

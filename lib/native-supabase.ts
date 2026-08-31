@@ -33,6 +33,23 @@ export const cloudflareUploadEndpoint =
   extra.cloudflareUploadEndpoint ??
   "";
 
+export function getAccountDeleteEndpoint() {
+  return getApiPath("/api/account");
+}
+
+export function getGeocodeSearchEndpoint() {
+  return getApiPath("/api/geocode/search");
+}
+
+function getApiPath(path: string) {
+  if (!cloudflareUploadEndpoint) return "";
+  try {
+    return `${new URL(cloudflareUploadEndpoint).origin}${path}`;
+  } catch {
+    return "";
+  }
+}
+
 function resolveAuthBridgeBaseUrl() {
   const configured =
     process.env.EXPO_PUBLIC_AUTH_BRIDGE_URL ?? extra.authBridgeUrl ?? "";
