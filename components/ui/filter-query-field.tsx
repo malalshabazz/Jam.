@@ -71,6 +71,8 @@ export function FilterQueryField({
         onFocus={onFocus}
         placeholder={placeholder}
         placeholderTextColor="#71717a"
+        autoCorrect={false}
+        autoCapitalize="none"
         style={[darkStyles.input, styles.filterQueryInput]}
       />
       <FilterResetButton onReset={onReset} />

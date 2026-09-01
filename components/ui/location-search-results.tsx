@@ -23,8 +23,28 @@ export function LocationSearchResults({
   textStyle?: StyleProp<TextStyle>;
 }) {
   const trimmed = query.trim();
-  if (trimmed.length < LOCATION_SEARCH_MIN_LENGTH && status === "idle") {
+  if (trimmed.length < LOCATION_SEARCH_MIN_LENGTH && status === "idle" && results.length === 0) {
     return null;
+  }
+
+  if (results.length > 0) {
+    return (
+      <ScrollView
+        nestedScrollEnabled
+        keyboardShouldPersistTaps="handled"
+        style={[styles.locationFilterList, { maxHeight: LOCATION_PICKER_VISIBLE_HEIGHT }, listStyle]}
+      >
+        {results.map((place) => (
+          <Pressable
+            key={`${place.granularity}:${place.country_code}:${place.region}:${place.city}:${place.label}`}
+            style={[styles.locationOptionRow, rowStyle]}
+            onPress={() => onPick(place)}
+          >
+            <Text style={[styles.locationCountryText, textStyle]}>{place.label}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+    );
   }
 
   if (status === "loading") {
@@ -39,23 +59,5 @@ export function LocationSearchResults({
     return <Text style={styles.helper}>no matches found</Text>;
   }
 
-  if (results.length === 0) return null;
-
-  return (
-    <ScrollView
-      nestedScrollEnabled
-      keyboardShouldPersistTaps="handled"
-      style={[styles.locationFilterList, { maxHeight: LOCATION_PICKER_VISIBLE_HEIGHT }, listStyle]}
-    >
-      {results.map((place) => (
-        <Pressable
-          key={`${place.granularity}:${place.country_code}:${place.region}:${place.city}:${place.label}`}
-          style={[styles.locationOptionRow, rowStyle]}
-          onPress={() => onPick(place)}
-        >
-          <Text style={[styles.locationCountryText, textStyle]}>{place.label}</Text>
-        </Pressable>
-      ))}
-    </ScrollView>
-  );
+  return null;
 }

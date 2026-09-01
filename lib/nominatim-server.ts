@@ -8,7 +8,6 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MIN_REQUEST_GAP_MS = 1000;
 
 const DROPPED_PLACE_TYPES = new Set([
-  "town",
   "village",
   "hamlet",
   "suburb",
@@ -61,7 +60,7 @@ const DROPPED_CLASSES = new Set([
   "building",
 ]);
 
-const CITY_TYPES = new Set(["city", "municipality"]);
+const CITY_TYPES = new Set(["city", "municipality", "town"]);
 const REGION_TYPES = new Set([
   "state",
   "region",
@@ -117,7 +116,7 @@ export async function searchNominatimPlaces(query: string): Promise<LocationPlac
   const url = `${NOMINATIM_SEARCH_URL}?${new URLSearchParams({
     format: "jsonv2",
     addressdetails: "1",
-    limit: "15",
+    limit: "25",
     "accept-language": "en",
     email: NOMINATIM_CONTACT_EMAIL,
     q: query,
@@ -136,13 +135,16 @@ export async function searchNominatimPlaces(query: string): Promise<LocationPlac
   }
 
   const hits = (await response.json()) as NominatimHit[];
-  const results = dedupePlaces(
-    (Array.isArray(hits) ? hits : [])
-      .map(classifyNominatimHit)
-      .filter((place): place is LocationPlace => place != null),
+  const results = rankPlacesByQuery(
+    queryKey,
+    dedupePlaces(
+      (Array.isArray(hits) ? hits : [])
+        .map((hit) => classifyNominatimHit(hit))
+        .filter((place): place is LocationPlace => place != null),
+    ),
   ).slice(0, 8);
 
-  await writeCache(queryKey, results);
+  if (results.length) await writeCache(queryKey, results);
   return results;
 }
 
@@ -209,7 +211,7 @@ async function readCache(queryKey: string): Promise<LocationPlace[] | null> {
 
   if (error || !data) return null;
   if (Date.parse(data.expires_at) <= Date.now()) return null;
-  if (!Array.isArray(data.results)) return null;
+  if (!Array.isArray(data.results) || data.results.length === 0) return null;
 
   const results = data.results as LocationPlace[];
   memoryCache.set(queryKey, { expiresAt: Date.parse(data.expires_at), results });
@@ -244,7 +246,7 @@ function classifyNominatimHit(hit: NominatimHit): LocationPlace | null {
   const countryCode = (address.country_code || "").trim().toUpperCase();
   if (!name) return null;
 
-  const granularity = inferGranularity({ addresstype, type, name, country });
+  const granularity = inferGranularity({ addresstype, type, name, country, address });
   if (!granularity) return null;
 
   const regionName = firstPresent(
@@ -254,7 +256,7 @@ function classifyNominatimHit(hit: NominatimHit): LocationPlace | null {
     address.province,
     address.county,
   );
-  const cityName = firstPresent(address.city, address.municipality, name);
+  const cityName = firstPresent(address.city, address.municipality, address.town, name);
   const region =
     granularity === "country"
       ? null
@@ -293,11 +295,13 @@ function inferGranularity({
   type,
   name,
   country,
+  address,
 }: {
   addresstype: string;
   type: string;
   name: string;
   country: string;
+  address: NominatimAddress;
 }): LocationGranularity | null {
   if (addresstype === "country" || type === "country") {
     if (country && normalizeToken(name) !== normalizeToken(country)) return "region";
@@ -306,7 +310,28 @@ function inferGranularity({
 
   if (REGION_TYPES.has(addresstype) || REGION_TYPES.has(type)) return "region";
   if (CITY_TYPES.has(addresstype) || CITY_TYPES.has(type)) return "city";
+  if (
+    type === "administrative" &&
+    (CITY_TYPES.has(addresstype) ||
+      normalizeToken(address.city) === normalizeToken(name) ||
+      normalizeToken(address.municipality) === normalizeToken(name) ||
+      normalizeToken(address.town) === normalizeToken(name))
+  ) {
+    return "city";
+  }
   return null;
+}
+
+function rankPlacesByQuery(queryKey: string, places: LocationPlace[]) {
+  const scored = places.map((place, index) => {
+    const name = normalizeToken(place.city || place.region || place.country || place.label);
+    let rank = 2;
+    if (name === queryKey) rank = 0;
+    else if (name.startsWith(queryKey)) rank = 1;
+    return { place, index, rank };
+  });
+  scored.sort((a, b) => a.rank - b.rank || a.index - b.index);
+  return scored.map((entry) => entry.place);
 }
 
 function buildPlaceLabel({

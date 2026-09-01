@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { mergeLocationPlaces, searchGazetteerPlaces } from "@/lib/location-gazetteer";
 import { searchLocationPlaces } from "@/lib/nominatim-search";
 import type { LocationPlace } from "@/types/app";
 
@@ -19,17 +20,26 @@ export function useLocationSearch(query: string) {
       return;
     }
 
+    const local = searchGazetteerPlaces(trimmed);
+    setResults(local);
+    setStatus(local.length ? "idle" : "loading");
+
     let cancelled = false;
-    setStatus("loading");
     const timer = setTimeout(() => {
       void searchLocationPlaces(trimmed)
-        .then((places) => {
+        .then((remote) => {
           if (cancelled) return;
-          setResults(places);
-          setStatus(places.length ? "idle" : "empty");
+          const merged = mergeLocationPlaces(remote, local);
+          setResults(merged);
+          setStatus(merged.length ? "idle" : "empty");
         })
         .catch(() => {
           if (cancelled) return;
+          if (local.length) {
+            setResults(local);
+            setStatus("idle");
+            return;
+          }
           setResults([]);
           setStatus("error");
         });
