@@ -1,0 +1,23 @@
+---
+description: Keep client feed filters aligned with fetch_filtered_feed_videos / fetch_nearby_feed_videos.
+globs: lib/feed-filters.ts,lib/location-filter.ts,lib/native-social-data.ts,screens/discover-screen.tsx,components/discover/**/*.tsx,supabase/migrations/*feed*.sql,supabase/migrations/*looking*.sql,supabase/migrations/*location*.sql
+alwaysApply: false
+---
+
+# Feed filters
+
+`feedVideoMatchesFilters` is the client copy of the SQL feed RPCs. Change them together. Looking-for is a real standalone filter (`lookingForOnly`), not something that only works with role/genre.
+
+```typescript
+// ❌ BAD — looking-for only when other filters are set
+lookingForOnly: filters.lookingForActive && (roles.length > 0 || genres.length > 0);
+
+// ✅ GOOD — explicit boolean, same as toFeedContentFilters
+lookingForOnly: Boolean(filters.lookingForActive);
+```
+
+- Looking-for **ON**: match `looking_for` posts and `lookingForRoles` / `lookingForGenres` (collaborator targets).
+- Looking-for **OFF**: match the post’s own `roles` / `genres`. Never the creator’s profile role.
+- Near Me is enforced in `fetch_nearby_feed_videos`. Keep the client matcher so already-loaded rows stay correct.
+- Filter changes that empty the feed or flash old clips are regressions. Preserve unseen → replay seen-video phases.
+- If you change `fetch_filtered_feed_videos` or `fetch_nearby_feed_videos`, update `lib/feed-filters.ts` (and tests, when they exist) in the same change.

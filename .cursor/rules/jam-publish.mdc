@@ -1,0 +1,27 @@
+---
+description: Protect Stream claim → clip → publish_own_video. No new videos.insert fallbacks.
+globs: lib/pending-*.ts,lib/native-cloudflare.ts,lib/native-social-data.ts,app/api/cloudflare-stream/**/*.ts,supabase/migrations/*claim*.sql,supabase/migrations/*publish*.sql,supabase/migrations/*stream*.sql
+alwaysApply: false
+---
+
+# Publish path
+
+New posts go through `publish_own_video`. After trim, pass both the clipped Stream id and `p_source_stream_id` so the claim can move onto the clipped UID.
+
+```typescript
+// ❌ BAD — extra client insert shapes when the RPC exists
+await supabase.from("videos").insert(payload);
+
+// ✅ GOOD — RPC is the write path (createVideo already does this first)
+await supabase.rpc("publish_own_video", {
+  p_cloudflare_stream_id: clippedUid,
+  p_source_stream_id: sourceUid,
+  // …
+});
+```
+
+- Do not add more `videos.insert` attempts in `createVideo`.
+- Clients must not insert/update `stream_upload_claims`. Only the Next Stream routes (service role) mint and mark claims `publishable`.
+- Clip must transfer the claim onto the clipped UID. Status `uploaded` on the pre-clip source is not enough to publish.
+- Video duration limits come from the claim’s `allowed_publish_seconds`.
+- Pending upload queues are in-memory today. Prefer persisting/resuming over more in-memory retries. Do not assume a killed process still has the queue.

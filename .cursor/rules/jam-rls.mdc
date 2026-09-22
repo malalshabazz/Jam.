@@ -1,0 +1,25 @@
+---
+description: RLS and SECURITY DEFINER rules for migrations, claims, jam-gates, and blocks.
+globs: supabase/migrations/**/*.sql,lib/supabase-admin.ts,lib/cloudflare-stream-ownership.ts
+alwaysApply: false
+---
+
+# RLS and definers
+
+`auth.uid()` is null inside some `SECURITY DEFINER` bodies. Use `request_user_id()`. Always set `search_path`.
+
+```sql
+-- ❌ BAD
+uid uuid := auth.uid();
+
+-- ✅ GOOD
+uid uuid := public.request_user_id();
+-- and: set search_path = public, auth
+```
+
+- Do not weaken RLS to make the client compile. Do not `GRANT` new definer functions to `anon` unless that is the explicit design.
+- Clients must not write `stream_upload_claims`. Service role / Next Stream routes only.
+- Video reads must keep `user_blocks`, hidden creators, and jam-gate (`048`) behavior.
+- `lib/supabase-admin.ts` is server-only. Never import it from `screens/`, `components/`, or the Expo client.
+- New definers: list who may `EXECUTE` them and why. Do not turn `row_security` off unless the function validates ownership the way `publish_own_video` does.
+- Reports (`content_reports`) are insert/select-own today. Do not add a public “fetch all reports” RPC.
