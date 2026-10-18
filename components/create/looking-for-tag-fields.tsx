@@ -1,4 +1,5 @@
-import { View, type RefObject } from "react-native";
+import { type RefObject } from "react";
+import { View } from "react-native";
 import { LinedTagField } from "@/components/create/lined-tag-field";
 import { creatorRoles, musicGenres } from "@/lib/options";
 import { styles } from "@/theme/styles";
