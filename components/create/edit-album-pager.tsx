@@ -10,7 +10,11 @@ import {
   type NativeSyntheticEvent,
 } from "react-native";
 import { VideoPresentationOverlays } from "@/components/VideoPresentationOverlays";
+import { FeedPausedPlayIcon } from "@/components/icons/feed-paused-play-icon";
+import { mediaFitForSize } from "@/components/video/aspect-cache";
 import { JamVideoView, type JamVideoPlaybackStatus } from "@/components/video/jam-video-view";
+import { styles } from "@/theme/styles";
+import { FEED_VIDEO_BOTTOM_CORNER_RADIUS } from "@/theme/tokens";
 import type { CreateEditItem } from "@/types/app";
 
 const DOT_SIZE = 6;
@@ -21,7 +25,9 @@ export function CreateEditAlbumPager({
   index,
   width,
   height,
+  cardRect,
   shouldPlay,
+  paused = false,
   needsSelfieMirror,
   trimStartRatio,
   trimEndRatio,
@@ -35,12 +41,16 @@ export function CreateEditAlbumPager({
   onPageScrollEnd,
   onDurationResolved,
   onPlaybackStatusUpdate,
+  onMediaPress,
 }: {
   items: CreateEditItem[];
   index: number;
   width: number;
   height: number;
+  /** 9:16 card in pager coordinates (pager origin = screen y=0). */
+  cardRect: { left: number; top: number; width: number; height: number };
   shouldPlay: boolean;
+  paused?: boolean;
   needsSelfieMirror: boolean;
   trimStartRatio: number;
   trimEndRatio: number;
@@ -54,6 +64,7 @@ export function CreateEditAlbumPager({
   onPageScrollEnd?: () => void;
   onDurationResolved: (durationMs: number) => void;
   onPlaybackStatusUpdate?: (status: JamVideoPlaybackStatus) => void;
+  onMediaPress?: () => void;
 }) {
   const listRef = useRef<FlatList<CreateEditItem>>(null);
   const pageWidth = Math.max(1, width);
@@ -71,13 +82,14 @@ export function CreateEditAlbumPager({
     ({ item, index: itemIndex }: ListRenderItemInfo<CreateEditItem>) => {
       const active = itemIndex === index;
       const showSlideOverlays = !active || hideActiveOverlays;
-      return (
-        <View style={{ width: pageWidth, height, backgroundColor: "#000" }}>
+      const imageFit = mediaFitForSize(item.width, item.height);
+      const media = (
+        <>
           {item.kind === "image" ? (
             <Image
               source={{ uri: item.uri }}
               style={StyleSheet.absoluteFill}
-              resizeMode="contain"
+              resizeMode={imageFit}
             />
           ) : (
             <JamVideoView
@@ -88,7 +100,7 @@ export function CreateEditAlbumPager({
               ]}
               knownWidth={item.width}
               knownHeight={item.height}
-              shouldPlay={shouldPlay && active}
+              shouldPlay={shouldPlay && active && !paused}
               isLooping
               isMuted={muteVideos}
               volume={muteVideos || !active ? 0 : 1}
@@ -101,21 +113,57 @@ export function CreateEditAlbumPager({
               onPlaybackStatusUpdate={active ? onPlaybackStatusUpdate : undefined}
             />
           )}
-          {showSlideOverlays ? (
-            <VideoPresentationOverlays filter="none" textOverlays={item.textOverlays} />
+        </>
+      );
+      return (
+        <View style={{ width: pageWidth, height, backgroundColor: "#000" }}>
+          <View
+            style={[
+              styles.createNineSixteenMediaCard,
+              {
+                position: "absolute",
+                left: cardRect.left,
+                top: cardRect.top,
+                width: cardRect.width,
+                height: cardRect.height,
+                borderRadius: FEED_VIDEO_BOTTOM_CORNER_RADIUS,
+              },
+            ]}
+          >
+            {onMediaPress ? (
+              <Pressable style={StyleSheet.absoluteFill} onPress={onMediaPress}>
+                {media}
+              </Pressable>
+            ) : (
+              media
+            )}
+            {showSlideOverlays ? (
+              <VideoPresentationOverlays filter="none" textOverlays={item.textOverlays} />
+            ) : null}
+          </View>
+          {active && paused ? (
+            <View pointerEvents="none" style={styles.feedPausedPlayOverlay}>
+              <FeedPausedPlayIcon />
+            </View>
           ) : null}
         </View>
       );
     },
     [
+      cardRect.height,
+      cardRect.left,
+      cardRect.top,
+      cardRect.width,
       height,
       hideActiveOverlays,
       index,
       muteVideos,
       needsSelfieMirror,
       onDurationResolved,
+      onMediaPress,
       onPlaybackStatusUpdate,
       pageWidth,
+      paused,
       scrubToRatio,
       shouldPlay,
       timeUpdateIntervalSec,
@@ -141,8 +189,10 @@ export function CreateEditAlbumPager({
         renderItem={renderItem}
         onScrollBeginDrag={onPageScrollStart}
         onScrollEndDrag={(event) => {
+          onPageScrollEnd?.();
           if (Math.abs(event.nativeEvent.velocity?.x ?? 0) > 0.08) return;
-          onMomentumEnd(event);
+          const next = Math.round(event.nativeEvent.contentOffset.x / pageWidth);
+          onIndexChange(Math.max(0, Math.min(items.length - 1, next)));
         }}
         onMomentumScrollEnd={onMomentumEnd}
         getItemLayout={(_, itemIndex) => ({
@@ -152,7 +202,7 @@ export function CreateEditAlbumPager({
         })}
         initialNumToRender={2}
         windowSize={3}
-        extraData={`${index}:${shouldPlay}:${muteVideos}:${hideActiveOverlays}:${trimStartRatio}:${trimEndRatio}`}
+        extraData={`${index}:${shouldPlay}:${paused}:${muteVideos}:${hideActiveOverlays}:${trimStartRatio}:${trimEndRatio}`}
       />
       {items.length > 1 ? (
         <View pointerEvents="box-none" style={pagerStyles.dotsWrap}>

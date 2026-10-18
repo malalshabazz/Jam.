@@ -5,6 +5,7 @@ import { publishJamRelationship } from "@/lib/jam-relationship-sync";
 import { deleteCloudflareVideo, getCloudflarePlaybackUrl, assertStreamPublishable } from "@/lib/native-cloudflare";
 import { isOwnedPostMediaUrl } from "@/lib/native-slideshow-storage";
 import { creatorRoles, musicGenres } from "@/lib/options";
+import { MAX_VIDEO_GENRES, MAX_VIDEO_ROLES } from "@/theme/tokens";
 import { getProBadgeKind, type ProBadgeKind } from "@/lib/pro-entitlements";
 import { supabase } from "@/lib/native-supabase";
 import type { VideoFilterId } from "@/lib/video-filters";
@@ -13,6 +14,12 @@ import {
   normalizeVideoTextOverlays,
   type VideoTextOverlay,
 } from "@/lib/video-presentation";
+import {
+  ensureVideoAspectCached,
+  parsePositiveDisplaySize,
+  probeVideoDisplaySize,
+  seedRememberedDisplaySize,
+} from "@/components/video/aspect-cache";
 
 export type PostMediaType = "video" | "slideshow";
 
@@ -36,12 +43,22 @@ export type FeedVideo = {
   textOverlays: VideoTextOverlay[];
   /** Creator tagged this post as looking for collaborators. */
   lookingFor: boolean;
+  /** Roles the creator wants — independent of `roles` (this post's content). */
+  lookingForRoles: string[];
+  /** Genres the creator wants — independent of `genres` (this post's content). */
+  lookingForGenres: string[];
   /** 1–3 when pinned on the creator profile. */
   pinnedRank?: number | null;
   mediaType: PostMediaType;
   imageUrls: string[];
   audioUrl: string | null;
+  /** Slideshow audio crop start in ms. Null means play from 0 (uncropped). */
+  audioStartMs: number | null;
   audioDurationMs: number | null;
+  /** Display-oriented width (rotation applied). Fit is derived client-side. */
+  displayWidth: number | null;
+  /** Display-oriented height (rotation applied). Fit is derived client-side. */
+  displayHeight: number | null;
   earlyAdopter: boolean;
   proBadge: ProBadgeKind | null;
   videoCount: number;
@@ -97,6 +114,10 @@ export type ProfileVideo = {
   textOverlays?: VideoTextOverlay[] | null;
   looking_for?: boolean | null;
   lookingFor?: boolean;
+  looking_for_roles?: string[] | null;
+  lookingForRoles?: string[] | null;
+  looking_for_genres?: string[] | null;
+  lookingForGenres?: string[] | null;
   /** 1–3 when pinned on the creator profile; null/undefined when unpinned. */
   pinned_rank?: number | null;
   pinnedRank?: number | null;
@@ -106,8 +127,14 @@ export type ProfileVideo = {
   image_urls?: string[] | null;
   audioUrl?: string | null;
   audio_url?: string | null;
+  audioStartMs?: number | null;
+  audio_start_ms?: number | null;
   audioDurationMs?: number | null;
   audio_duration_ms?: number | null;
+  displayWidth?: number | null;
+  display_width?: number | null;
+  displayHeight?: number | null;
+  display_height?: number | null;
   created_at?: string;
   creatorName?: string;
   role?: string;
@@ -214,7 +241,7 @@ export type FeedContentFilters = {
   roles?: string[];
   genres?: string[];
   locations?: FeedLocationFilter[];
-  /** When true, only return videos tagged looking_for. */
+  /** When true, only return looking-for posts, matching looking_for_roles / looking_for_genres. */
   lookingForOnly?: boolean;
 };
 
@@ -299,11 +326,16 @@ type VideoRow = {
   video_filter?: string | null;
   text_overlays?: unknown;
   looking_for?: boolean | null;
+  looking_for_roles?: string[] | null;
+  looking_for_genres?: string[] | null;
   pinned_rank?: number | null;
   media_type?: string | null;
   image_urls?: string[] | null;
   audio_url?: string | null;
+  audio_start_ms?: number | null;
   audio_duration_ms?: number | null;
+  display_width?: number | null;
+  display_height?: number | null;
   created_at: string;
 };
 
@@ -353,6 +385,14 @@ type MessageRow = {
   video: MessageVideoRow | MessageVideoRow[] | null;
 };
 
+const VIDEO_COLUMNS_WITH_DISPLAY_SIZE =
+  "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, looking_for_roles, looking_for_genres, pinned_rank, media_type, image_urls, audio_url, audio_start_ms, audio_duration_ms, display_width, display_height, created_at";
+const OWN_VIDEO_COLUMNS_WITH_DISPLAY_SIZE =
+  "id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, looking_for_roles, looking_for_genres, pinned_rank, media_type, image_urls, audio_url, audio_start_ms, audio_duration_ms, display_width, display_height, created_at";
+const VIDEO_COLUMNS_WITH_LOOKING_FOR_TAGS =
+  "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, looking_for_roles, looking_for_genres, pinned_rank, media_type, image_urls, audio_url, audio_duration_ms, created_at";
+const OWN_VIDEO_COLUMNS_WITH_LOOKING_FOR_TAGS =
+  "id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, looking_for_roles, looking_for_genres, pinned_rank, media_type, image_urls, audio_url, audio_duration_ms, created_at";
 const VIDEO_COLUMNS_WITH_TAGS =
   "id, user_id, caption, hashtags, categories, roles, genres, media_url, cloudflare_stream_id, thumbnail_time_ms, video_filter, text_overlays, looking_for, pinned_rank, media_type, image_urls, audio_url, audio_duration_ms, created_at";
 const OWN_VIDEO_COLUMNS_WITH_TAGS =
@@ -448,13 +488,22 @@ export async function fetchCreatorVideos(viewerId: string, creatorId: string) {
 
   const result = await supabase
     .from("videos")
-    .select(OWN_VIDEO_COLUMNS_WITH_TAGS)
+    .select(OWN_VIDEO_COLUMNS_WITH_DISPLAY_SIZE)
     .eq("user_id", creatorId)
     .order("created_at", { ascending: false });
   let data = result.data as ProfileVideo[] | null;
   let error = result.error;
 
   if (error && isMissingSchemaError(error)) {
+    const lookingForTagsRetry = await supabase
+      .from("videos")
+      .select(OWN_VIDEO_COLUMNS_WITH_LOOKING_FOR_TAGS)
+      .eq("user_id", creatorId)
+      .order("created_at", { ascending: false });
+    if (!lookingForTagsRetry.error || !isMissingSchemaError(lookingForTagsRetry.error)) {
+      data = lookingForTagsRetry.data as ProfileVideo[] | null;
+      error = lookingForTagsRetry.error;
+    } else {
     const pinRetry = await supabase
       .from("videos")
       .select(OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PIN)
@@ -501,6 +550,7 @@ export async function fetchCreatorVideos(viewerId: string, creatorId: string) {
           }
         }
       }
+    }
     }
   }
 
@@ -841,26 +891,59 @@ export async function fetchNearbyUserIds(options: {
 
 /**
  * Inbox Looking For filter: creators in `userIds` who currently have at least
- * one video tagged looking_for.
+ * one looking-for video. When roles/genres are passed, those match the post's
+ * looking-for targets — not the creator's profile role or content tags.
  */
-export async function fetchLookingForUserIds(userIds: string[]): Promise<Set<string>> {
+export async function fetchLookingForUserIds(
+  userIds: string[],
+  filters?: { roles?: string[]; genres?: string[] },
+): Promise<Set<string>> {
   const uniqueIds = Array.from(new Set(userIds.filter(Boolean)));
   if (uniqueIds.length === 0) return new Set();
 
-  const { data, error } = await supabase
+  const roleFilter = getUniqueTags(filters?.roles ?? []);
+  const genreFilter = getUniqueTags(filters?.genres ?? []);
+  const hasTargetFilters = roleFilter.length > 0 || genreFilter.length > 0;
+
+  const withTargets = await supabase
     .from("videos")
-    .select("user_id")
+    .select("user_id, looking_for_roles, looking_for_genres")
     .in("user_id", uniqueIds)
     .eq("looking_for", true);
 
-  if (error) {
-    if (isMissingSchemaError(error)) return new Set();
-    throw error;
+  let rows: Array<{
+    user_id: string | null;
+    looking_for_roles?: string[] | null;
+    looking_for_genres?: string[] | null;
+  }> = [];
+
+  if (withTargets.error) {
+    if (!isMissingSchemaError(withTargets.error)) throw withTargets.error;
+    // Pre-062: no target columns. Role/genre looking-for can't be applied safely.
+    if (hasTargetFilters) return new Set();
+    const fallback = await supabase
+      .from("videos")
+      .select("user_id")
+      .in("user_id", uniqueIds)
+      .eq("looking_for", true);
+    if (fallback.error) {
+      if (isMissingSchemaError(fallback.error)) return new Set();
+      throw fallback.error;
+    }
+    rows = (fallback.data ?? []) as Array<{ user_id: string | null }>;
+  } else {
+    rows = (withTargets.data ?? []) as typeof rows;
   }
 
   const ids = new Set<string>();
-  for (const row of (data ?? []) as Array<{ user_id: string | null }>) {
-    if (row?.user_id) ids.add(row.user_id);
+  for (const row of rows) {
+    if (!row?.user_id) continue;
+    if (
+      lookingForTagsOverlap(row.looking_for_roles, roleFilter) &&
+      lookingForTagsOverlap(row.looking_for_genres, genreFilter)
+    ) {
+      ids.add(row.user_id);
+    }
   }
   return ids;
 }
@@ -908,7 +991,17 @@ async function hydrateFeedPageFromOrderedIds(input: {
       connected,
     );
     if (!item) continue;
+    seedRememberedDisplaySize(item);
     items.push(item);
+  }
+
+  const firstPlayable = items.find((item) => item.mediaType !== "slideshow");
+  if (firstPlayable) {
+    await ensureVideoAspectCached(firstPlayable);
+  }
+  for (const item of items.slice(0, 3)) {
+    if (item.id === firstPlayable?.id) continue;
+    void ensureVideoAspectCached(item);
   }
 
   const lastRow = pageIds[pageIds.length - 1];
@@ -925,13 +1018,22 @@ async function hydrateFeedPageFromOrderedIds(input: {
 export async function fetchMyVideos(currentUserId: string) {
   const result = await supabase
     .from("videos")
-    .select(OWN_VIDEO_COLUMNS_WITH_TAGS)
+    .select(OWN_VIDEO_COLUMNS_WITH_DISPLAY_SIZE)
     .eq("user_id", currentUserId)
     .order("created_at", { ascending: false });
   let data = result.data as ProfileVideo[] | null;
   let error = result.error;
 
   if (error && isMissingSchemaError(error)) {
+    const lookingForTagsRetry = await supabase
+      .from("videos")
+      .select(OWN_VIDEO_COLUMNS_WITH_LOOKING_FOR_TAGS)
+      .eq("user_id", currentUserId)
+      .order("created_at", { ascending: false });
+    if (!lookingForTagsRetry.error || !isMissingSchemaError(lookingForTagsRetry.error)) {
+      data = lookingForTagsRetry.data as ProfileVideo[] | null;
+      error = lookingForTagsRetry.error;
+    } else {
     const pinRetry = await supabase
       .from("videos")
       .select(OWN_VIDEO_COLUMNS_WITH_TAGS_NO_PIN)
@@ -979,6 +1081,7 @@ export async function fetchMyVideos(currentUserId: string) {
         }
       }
     }
+    }
   }
 
   if (error) throw error;
@@ -1020,6 +1123,7 @@ function normalizeOwnProfileVideo(video: ProfileVideo, ownerUserId?: string): Pr
   const mediaType = normalizePostMediaType(video.mediaType ?? video.media_type);
   const imageUrls = normalizeImageUrls(video.imageUrls ?? video.image_urls);
   const audioUrl = video.audioUrl ?? video.audio_url ?? null;
+  const audioStartMs = video.audioStartMs ?? video.audio_start_ms ?? null;
   const audioDurationMs = video.audioDurationMs ?? video.audio_duration_ms ?? null;
   const mediaUrl =
     video.mediaUrl ??
@@ -1030,11 +1134,16 @@ function normalizeOwnProfileVideo(video: ProfileVideo, ownerUserId?: string): Pr
         ? getCloudflarePlaybackUrl(cloudflareStreamId)
         : null);
   const lookingFor = Boolean(video.lookingFor ?? video.looking_for);
+  const lookingForTargets = getLookingForTargetTags(video);
   const pinnedRank = getProfileVideoPinnedRank(video);
+  const displaySize = parsePositiveDisplaySize(
+    video.displayWidth ?? video.display_width,
+    video.displayHeight ?? video.display_height,
+  );
   // Own/creator selects omit user_id — attach the known owner so profile → feed
   // mapping (and looking-for chrome) works in fullscreen.
   const userId = video.userId ?? ownerUserId;
-  return {
+  const normalized: ProfileVideo = {
     ...video,
     userId,
     cloudflareStreamId,
@@ -1047,6 +1156,10 @@ function normalizeOwnProfileVideo(video: ProfileVideo, ownerUserId?: string): Pr
     textOverlays: normalizeVideoTextOverlays(video.textOverlays ?? video.text_overlays),
     lookingFor,
     looking_for: lookingFor,
+    lookingForRoles: lookingForTargets.roles,
+    looking_for_roles: lookingForTargets.roles,
+    lookingForGenres: lookingForTargets.genres,
+    looking_for_genres: lookingForTargets.genres,
     pinnedRank,
     pinned_rank: pinnedRank,
     mediaType,
@@ -1055,9 +1168,17 @@ function normalizeOwnProfileVideo(video: ProfileVideo, ownerUserId?: string): Pr
     image_urls: imageUrls,
     audioUrl,
     audio_url: audioUrl,
+    audioStartMs,
+    audio_start_ms: audioStartMs,
     audioDurationMs,
     audio_duration_ms: audioDurationMs,
+    displayWidth: displaySize?.width ?? null,
+    display_width: displaySize?.width ?? null,
+    displayHeight: displaySize?.height ?? null,
+    display_height: displaySize?.height ?? null,
   };
+  seedRememberedDisplaySize(normalized);
+  return normalized;
 }
 
 /** Pin a profile video into the next free 1–3 slot. Throws if already at the cap. */
@@ -1595,6 +1716,8 @@ export async function updateOwnVideo(input: {
   genres?: string[];
   videoFilter?: string | null;
   lookingFor?: boolean;
+  lookingForRoles?: string[];
+  lookingForGenres?: string[];
   thumbnailTimeMs?: number | null;
 }) {
   const {
@@ -1602,12 +1725,18 @@ export async function updateOwnVideo(input: {
   } = await supabase.auth.getUser();
   if (!user) throw new Error("Log in again before editing.");
 
-  const roles = getUniqueTags(input.roles ?? []).slice(0, 1);
-  const genres = getUniqueTags(input.genres ?? []).slice(0, 3);
+  const roles = getUniqueTags(input.roles ?? []).slice(0, MAX_VIDEO_ROLES);
+  const genres = getUniqueTags(input.genres ?? []).slice(0, MAX_VIDEO_GENRES);
   const categories = getUniqueTags([...roles, ...genres]);
   const caption = (input.caption ?? "").trim().slice(0, 200);
   const videoFilter = normalizeVideoFilter(input.videoFilter);
   const lookingFor = Boolean(input.lookingFor);
+  const lookingForTargets = lookingFor
+    ? getLookingForTargetTags({
+        lookingForRoles: input.lookingForRoles,
+        lookingForGenres: input.lookingForGenres,
+      })
+    : { roles: [] as string[], genres: [] as string[] };
   const thumbnailTimeMs =
     typeof input.thumbnailTimeMs === "number" && Number.isFinite(input.thumbnailTimeMs)
       ? Math.max(0, Math.round(input.thumbnailTimeMs))
@@ -1615,55 +1744,99 @@ export async function updateOwnVideo(input: {
   const thumbnailFields =
     thumbnailTimeMs != null ? { thumbnail_time_ms: thumbnailTimeMs } : {};
 
-  const updateAttempts: Array<Record<string, unknown>> = [
+  const lookingForTargetPayload = {
+    looking_for: lookingFor,
+    looking_for_roles: lookingForTargets.roles,
+    looking_for_genres: lookingForTargets.genres,
+  };
+
+  const updateAttempts: Array<{ payload: Record<string, unknown>; columns: string }> = [
     {
-      caption,
-      roles,
-      genres,
-      categories,
-      video_filter: videoFilter,
-      looking_for: lookingFor,
-      ...thumbnailFields,
+      payload: {
+        caption,
+        roles,
+        genres,
+        categories,
+        video_filter: videoFilter,
+        ...lookingForTargetPayload,
+        ...thumbnailFields,
+      },
+      columns: OWN_VIDEO_COLUMNS_WITH_LOOKING_FOR_TAGS,
     },
     {
-      caption,
-      roles,
-      genres,
-      categories,
-      video_filter: videoFilter,
-      looking_for: lookingFor,
+      payload: {
+        caption,
+        roles,
+        genres,
+        categories,
+        video_filter: videoFilter,
+        ...lookingForTargetPayload,
+      },
+      columns: OWN_VIDEO_COLUMNS_WITH_LOOKING_FOR_TAGS,
     },
     {
-      caption,
-      roles,
-      genres,
-      categories,
-      video_filter: videoFilter,
+      payload: {
+        caption,
+        roles,
+        genres,
+        categories,
+        video_filter: videoFilter,
+        looking_for: lookingFor,
+        ...thumbnailFields,
+      },
+      columns: OWN_VIDEO_COLUMNS_WITH_TAGS,
     },
     {
-      caption,
-      categories,
-      video_filter: videoFilter,
+      payload: {
+        caption,
+        roles,
+        genres,
+        categories,
+        video_filter: videoFilter,
+        looking_for: lookingFor,
+      },
+      columns: OWN_VIDEO_COLUMNS_WITH_TAGS,
     },
     {
-      caption,
-      categories,
+      payload: {
+        caption,
+        roles,
+        genres,
+        categories,
+        video_filter: videoFilter,
+      },
+      columns: OWN_VIDEO_COLUMNS_WITH_TAGS,
+    },
+    {
+      payload: {
+        caption,
+        categories,
+        video_filter: videoFilter,
+      },
+      columns: OWN_VIDEO_COLUMNS_WITH_TAGS,
+    },
+    {
+      payload: {
+        caption,
+        categories,
+      },
+      columns: OWN_VIDEO_COLUMNS_WITH_TAGS,
     },
   ];
 
   let lastError: unknown = null;
-  for (const payload of updateAttempts) {
+  for (const attempt of updateAttempts) {
     const { data, error } = await supabase
       .from("videos")
-      .update(payload)
+      .update(attempt.payload)
       .eq("id", input.videoId)
       .eq("user_id", user.id)
-      .select(OWN_VIDEO_COLUMNS_WITH_TAGS)
+      .select(attempt.columns)
       .maybeSingle();
 
     if (!error) {
       if (!data) throw new Error("Video not found.");
-      return normalizeOwnProfileVideo(data as ProfileVideo, user.id);
+      return normalizeOwnProfileVideo(data as unknown as ProfileVideo, user.id);
     }
     lastError = error;
     if (!isMissingSchemaError(error)) break;
@@ -1931,6 +2104,78 @@ export async function fetchConversationMessages(
   };
 }
 
+async function publishOwnVideoViaRpc(input: {
+  ownerId: string;
+  caption: string;
+  roles: string[];
+  genres: string[];
+  categories: string[];
+  mediaUrl: string | null;
+  cloudflareStreamId: string | null;
+  sourceCloudflareStreamId: string | null;
+  thumbnailTimeMs: number | null;
+  videoFilter: string;
+  textOverlays: unknown;
+  lookingFor: boolean;
+  lookingForRoles: string[];
+  lookingForGenres: string[];
+  mediaType: PostMediaType;
+  imageUrls: string[];
+  audioUrl: string | null;
+  audioStartMs: number | null;
+  audioDurationMs: number | null;
+  displayWidth: number | null;
+  displayHeight: number | null;
+}): Promise<{ id: string } | null> {
+  logVideoDatabaseStep("createVideo rpc start", {
+    mediaType: input.mediaType,
+    hasCloudflareStreamId: Boolean(input.cloudflareStreamId),
+    hasSourceStreamId: Boolean(input.sourceCloudflareStreamId),
+    sessionUserId: input.ownerId,
+  });
+  const { data, error } = await supabase.rpc("publish_own_video", {
+    p_caption: input.caption,
+    p_roles: input.roles,
+    p_genres: input.genres,
+    p_categories: input.categories,
+    p_hashtags: [],
+    p_media_url: input.mediaUrl,
+    p_cloudflare_stream_id: input.cloudflareStreamId,
+    p_source_stream_id:
+      input.sourceCloudflareStreamId &&
+      input.sourceCloudflareStreamId !== input.cloudflareStreamId
+        ? input.sourceCloudflareStreamId
+        : null,
+    p_thumbnail_time_ms: input.thumbnailTimeMs,
+    p_video_filter: input.videoFilter,
+    p_text_overlays: input.textOverlays,
+    p_looking_for: input.lookingFor,
+    p_looking_for_roles: input.lookingForRoles,
+    p_looking_for_genres: input.lookingForGenres,
+    p_media_type: input.mediaType,
+    p_image_urls: input.imageUrls,
+    p_audio_url: input.audioUrl,
+    p_audio_duration_ms: input.audioDurationMs,
+    p_display_width: input.displayWidth,
+    p_display_height: input.displayHeight,
+    p_audio_start_ms: input.audioStartMs,
+  });
+  const videoId = data == null ? "" : String(data).trim();
+  if (!error && videoId && videoId !== "null" && videoId !== "undefined") {
+    logVideoDatabaseStep("createVideo rpc success", { videoId });
+    clearDiscoverFeedSessionCache();
+    return { id: videoId };
+  }
+  logVideoDatabaseStep("createVideo rpc failed", {
+    schemaFallback: isMissingFunctionError(error) || isMissingSchemaError(error),
+    ...getErrorDetails(error),
+  });
+  if (isMissingFunctionError(error) || isMissingSchemaError(error)) {
+    return null;
+  }
+  throw toCreateVideoError(error);
+}
+
 export async function createVideo(input: {
   userId: string;
   caption: string;
@@ -1942,21 +2187,40 @@ export async function createVideo(input: {
   videoFilter?: VideoFilterId | string | null;
   textOverlays?: VideoTextOverlay[] | unknown;
   lookingFor?: boolean;
+  lookingForRoles?: string[];
+  lookingForGenres?: string[];
+  /** Pre-clip Stream id — used to transfer the publish claim after trim. */
+  sourceCloudflareStreamId?: string | null;
   mediaType?: PostMediaType;
   imageUrls?: string[] | null;
   audioUrl?: string | null;
+  audioStartMs?: number | null;
   audioDurationMs?: number | null;
+  displayWidth?: number | null;
+  displayHeight?: number | null;
 }): Promise<{ id: string }> {
-  const roles = getUniqueTags(input.roles);
-  const genres = getUniqueTags(input.genres);
+  const roles = getUniqueTags(input.roles).slice(0, MAX_VIDEO_ROLES);
+  const genres = getUniqueTags(input.genres).slice(0, MAX_VIDEO_GENRES);
   const categories = getUniqueTags([...roles, ...genres]);
   const lookingFor = Boolean(input.lookingFor);
+  const lookingForTargets = lookingFor
+    ? getLookingForTargetTags({
+        lookingForRoles: input.lookingForRoles,
+        lookingForGenres: input.lookingForGenres,
+      })
+    : { roles: [] as string[], genres: [] as string[] };
   const mediaType: PostMediaType = input.mediaType === "slideshow" ? "slideshow" : "video";
   const imageUrls =
     mediaType === "slideshow"
       ? (input.imageUrls ?? []).map((url) => url.trim()).filter(Boolean).slice(0, 10)
       : [];
   const audioUrl = mediaType === "slideshow" ? input.audioUrl?.trim() || null : null;
+  const audioStartMs =
+    mediaType === "slideshow" &&
+    typeof input.audioStartMs === "number" &&
+    Number.isFinite(input.audioStartMs)
+      ? Math.max(0, Math.round(input.audioStartMs))
+      : null;
   const audioDurationMs =
     mediaType === "slideshow" &&
     typeof input.audioDurationMs === "number" &&
@@ -1976,9 +2240,22 @@ export async function createVideo(input: {
       : null;
   const videoFilter = normalizeVideoFilter(input.videoFilter);
   const textOverlays = normalizeVideoTextOverlays(input.textOverlays);
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) throw new Error("Log in again before posting.");
+  const ownerId = user.id;
+  if (input.userId && input.userId !== ownerId) {
+    logVideoDatabaseStep("createVideo session user differs from enqueue user", {
+      enqueueUserId: input.userId,
+      sessionUserId: ownerId,
+    });
+  }
+
   logVideoDatabaseStep("createVideo start", {
     mediaType,
     hasCloudflareStreamId: Boolean(input.cloudflareStreamId),
+    cloudflareStreamId: input.cloudflareStreamId ?? null,
     hasMediaUrl: Boolean(mediaUrl),
     imageCount: imageUrls.length,
     hasAudioUrl: Boolean(audioUrl),
@@ -1988,17 +2265,20 @@ export async function createVideo(input: {
     videoFilter,
     textOverlayCount: textOverlays.length,
     lookingFor,
+    lookingForRoleCount: lookingForTargets.roles.length,
+    lookingForGenreCount: lookingForTargets.genres.length,
+    sessionUserId: ownerId,
   });
 
   if (mediaType === "slideshow") {
     if (imageUrls.length === 0) throw new Error("Add at least one photo.");
-    if (imageUrls.some((url) => !isOwnedPostMediaUrl(url, input.userId))) {
+    if (imageUrls.some((url) => !isOwnedPostMediaUrl(url, ownerId))) {
       throw new Error("Slideshow photos must be your own uploads.");
     }
-    if (audioUrl && !isOwnedPostMediaUrl(audioUrl, input.userId)) {
+    if (audioUrl && !isOwnedPostMediaUrl(audioUrl, ownerId)) {
       throw new Error("Slideshow audio must be your own upload.");
     }
-    if (mediaUrl && !isOwnedPostMediaUrl(mediaUrl, input.userId)) {
+    if (mediaUrl && !isOwnedPostMediaUrl(mediaUrl, ownerId)) {
       throw new Error("Slideshow media must be your own upload.");
     }
   }
@@ -2007,30 +2287,109 @@ export async function createVideo(input: {
     await assertStreamPublishable(input.cloudflareStreamId);
   }
 
+  let displaySize = parsePositiveDisplaySize(input.displayWidth, input.displayHeight);
+  if (!displaySize && mediaType === "video") {
+    displaySize = await probeVideoDisplaySize(mediaUrl);
+  }
+
+  const published = await publishOwnVideoViaRpc({
+    ownerId,
+    caption: input.caption,
+    roles,
+    genres,
+    categories,
+    mediaUrl,
+    cloudflareStreamId: input.cloudflareStreamId ?? null,
+    sourceCloudflareStreamId: input.sourceCloudflareStreamId ?? null,
+    thumbnailTimeMs,
+    videoFilter,
+    textOverlays,
+    lookingFor,
+    lookingForRoles: lookingForTargets.roles,
+    lookingForGenres: lookingForTargets.genres,
+    mediaType,
+    imageUrls,
+    audioUrl,
+    audioStartMs,
+    audioDurationMs,
+    displayWidth: displaySize?.width ?? null,
+    displayHeight: displaySize?.height ?? null,
+  });
+  if (published) return published;
+
   const slideshowFields =
     mediaType === "slideshow"
       ? {
           media_type: "slideshow" as const,
           image_urls: imageUrls,
           audio_url: audioUrl,
+          audio_start_ms: audioStartMs,
           audio_duration_ms: audioDurationMs,
         }
       : {
           media_type: "video" as const,
           image_urls: [] as string[],
           audio_url: null as string | null,
+          audio_start_ms: null as number | null,
           audio_duration_ms: null as number | null,
         };
+
+  const lookingForTargetFields = {
+    looking_for_roles: lookingForTargets.roles,
+    looking_for_genres: lookingForTargets.genres,
+  };
 
   // Prefer payloads that keep video_filter/text_overlays. The live DB is missing
   // roles/genres columns, so categories+presentation must come before any fallback
   // that drops presentation (otherwise text/filter never persist).
   const insertAttempts: Array<Record<string, unknown>> = [
     {
-      user_id: input.userId,
+      user_id: ownerId,
       caption: input.caption,
       roles,
       genres,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+      thumbnail_time_ms: thumbnailTimeMs,
+      video_filter: videoFilter,
+      text_overlays: textOverlays,
+      looking_for: lookingFor,
+      ...lookingForTargetFields,
+      ...slideshowFields,
+    },
+    {
+      user_id: ownerId,
+      caption: input.caption,
+      roles,
+      genres,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+      thumbnail_time_ms: thumbnailTimeMs,
+      video_filter: videoFilter,
+      text_overlays: textOverlays,
+      looking_for: lookingFor,
+      ...lookingForTargetFields,
+    },
+    {
+      user_id: ownerId,
+      caption: input.caption,
+      roles,
+      genres,
+      categories,
+      hashtags: [],
+      media_url: mediaUrl,
+      cloudflare_stream_id: input.cloudflareStreamId ?? null,
+      thumbnail_time_ms: thumbnailTimeMs,
+      video_filter: videoFilter,
+      text_overlays: textOverlays,
+    },
+    {
+      user_id: ownerId,
+      caption: input.caption,
       categories,
       hashtags: [],
       media_url: mediaUrl,
@@ -2042,47 +2401,7 @@ export async function createVideo(input: {
       ...slideshowFields,
     },
     {
-      user_id: input.userId,
-      caption: input.caption,
-      roles,
-      genres,
-      categories,
-      hashtags: [],
-      media_url: mediaUrl,
-      cloudflare_stream_id: input.cloudflareStreamId ?? null,
-      thumbnail_time_ms: thumbnailTimeMs,
-      video_filter: videoFilter,
-      text_overlays: textOverlays,
-      looking_for: lookingFor,
-    },
-    {
-      user_id: input.userId,
-      caption: input.caption,
-      roles,
-      genres,
-      categories,
-      hashtags: [],
-      media_url: mediaUrl,
-      cloudflare_stream_id: input.cloudflareStreamId ?? null,
-      thumbnail_time_ms: thumbnailTimeMs,
-      video_filter: videoFilter,
-      text_overlays: textOverlays,
-    },
-    {
-      user_id: input.userId,
-      caption: input.caption,
-      categories,
-      hashtags: [],
-      media_url: mediaUrl,
-      cloudflare_stream_id: input.cloudflareStreamId ?? null,
-      thumbnail_time_ms: thumbnailTimeMs,
-      video_filter: videoFilter,
-      text_overlays: textOverlays,
-      looking_for: lookingFor,
-      ...slideshowFields,
-    },
-    {
-      user_id: input.userId,
+      user_id: ownerId,
       caption: input.caption,
       categories,
       hashtags: [],
@@ -2094,7 +2413,7 @@ export async function createVideo(input: {
       looking_for: lookingFor,
     },
     {
-      user_id: input.userId,
+      user_id: ownerId,
       caption: input.caption,
       categories,
       hashtags: [],
@@ -2105,7 +2424,7 @@ export async function createVideo(input: {
       text_overlays: textOverlays,
     },
     {
-      user_id: input.userId,
+      user_id: ownerId,
       caption: input.caption,
       roles,
       genres,
@@ -2118,7 +2437,7 @@ export async function createVideo(input: {
       ...slideshowFields,
     },
     {
-      user_id: input.userId,
+      user_id: ownerId,
       caption: input.caption,
       roles,
       genres,
@@ -2130,7 +2449,7 @@ export async function createVideo(input: {
       looking_for: lookingFor,
     },
     {
-      user_id: input.userId,
+      user_id: ownerId,
       caption: input.caption,
       roles,
       genres,
@@ -2141,7 +2460,7 @@ export async function createVideo(input: {
       thumbnail_time_ms: thumbnailTimeMs,
     },
     {
-      user_id: input.userId,
+      user_id: ownerId,
       caption: input.caption,
       categories,
       hashtags: [],
@@ -2150,7 +2469,7 @@ export async function createVideo(input: {
       thumbnail_time_ms: thumbnailTimeMs,
     },
     {
-      user_id: input.userId,
+      user_id: ownerId,
       caption: input.caption,
       hashtags: categories,
       media_url: mediaUrl,
@@ -2159,14 +2478,14 @@ export async function createVideo(input: {
       text_overlays: textOverlays,
     },
     {
-      user_id: input.userId,
+      user_id: ownerId,
       caption: input.caption,
       hashtags: categories,
       media_url: mediaUrl,
       cloudflare_stream_id: input.cloudflareStreamId ?? null,
     },
     {
-      user_id: input.userId,
+      user_id: ownerId,
       caption: input.caption,
       hashtags: categories,
       media_url: mediaUrl,
@@ -2214,13 +2533,13 @@ export async function createVideo(input: {
         attempt,
         ...getErrorDetails(error),
       });
-      throw error;
+      throw toCreateVideoError(error);
     }
     lastSchemaError = error;
   }
 
   logVideoDatabaseStep("createVideo failed all schema attempts", getErrorDetails(lastSchemaError));
-  throw lastSchemaError;
+  throw toCreateVideoError(lastSchemaError);
 }
 
 export async function deleteVideo(videoId: string) {
@@ -2355,6 +2674,8 @@ async function fetchFeedVideoRowsPage(
 ): Promise<{ rows: VideoRow[]; error: unknown | null }> {
   // Legacy direct-table fallback (unused). Feed paging goes through RPCs with seeded random order.
   const columnSets = [
+    VIDEO_COLUMNS_WITH_DISPLAY_SIZE,
+    VIDEO_COLUMNS_WITH_LOOKING_FOR_TAGS,
     VIDEO_COLUMNS_WITH_TAGS,
     VIDEO_COLUMNS_WITH_TAGS_NO_PIN,
     VIDEO_COLUMNS_WITH_TAGS_NO_LOOKING_FOR,
@@ -2398,6 +2719,8 @@ async function fetchVideoRowsByIds(videoIds: string[]): Promise<VideoRow[]> {
   }
 
   const columnSets = [
+    VIDEO_COLUMNS_WITH_DISPLAY_SIZE,
+    VIDEO_COLUMNS_WITH_LOOKING_FOR_TAGS,
     VIDEO_COLUMNS_WITH_TAGS,
     VIDEO_COLUMNS_WITH_TAGS_NO_PIN,
     VIDEO_COLUMNS_WITH_TAGS_NO_LOOKING_FOR,
@@ -2716,6 +3039,17 @@ function getErrorDetails(error: unknown) {
   };
 }
 
+function toCreateVideoError(error: unknown): Error {
+  if (isSupabaseError(error)) {
+    if (error.code === "42501" || /row-level security/i.test(error.message)) {
+      return new Error("Couldn't save this video. Retry the post from your profile.");
+    }
+    return new Error(error.message);
+  }
+  if (error instanceof Error) return error;
+  return new Error("Couldn't save this video.");
+}
+
 function isMissingSchemaError(error: unknown) {
   if (!isSupabaseError(error)) return false;
   return (
@@ -2855,6 +3189,7 @@ function toFeedVideo(
   const savedByCurrentUser = savedByMe.has(video.id);
   const connectedWithCurrentUser = connected.has(video.user_id);
   const tags = getVideoTags(video);
+  const lookingForTargets = getLookingForTargetTags(video);
   const creatorName = profile ? getDisplayName(profile) : "Creator";
   const proBadge = getProBadgeKind({
     earlyAdopter: profile?.early_adopter,
@@ -2862,7 +3197,7 @@ function toFeedVideo(
     proSubscriptionActive: profile?.pro_subscription_active,
   });
 
-  return {
+  const item: FeedVideo = {
     id: video.id,
     userId: video.user_id,
     creatorName,
@@ -2881,11 +3216,16 @@ function toFeedVideo(
     videoFilter: normalizeVideoFilter(video.video_filter),
     textOverlays: normalizeVideoTextOverlays(video.text_overlays),
     lookingFor: Boolean(video.looking_for),
+    lookingForRoles: lookingForTargets.roles,
+    lookingForGenres: lookingForTargets.genres,
     pinnedRank: getProfileVideoPinnedRank({ pinned_rank: video.pinned_rank }),
     mediaType: normalizePostMediaType(video.media_type),
     imageUrls: normalizeImageUrls(video.image_urls),
     audioUrl: video.audio_url ?? null,
+    audioStartMs: video.audio_start_ms ?? null,
     audioDurationMs: video.audio_duration_ms ?? null,
+    displayWidth: parsePositiveDisplaySize(video.display_width, video.display_height)?.width ?? null,
+    displayHeight: parsePositiveDisplaySize(video.display_width, video.display_height)?.height ?? null,
     earlyAdopter: Boolean(profile?.early_adopter),
     proBadge,
     videoCount: profile?.video_count ?? 0,
@@ -2895,6 +3235,8 @@ function toFeedVideo(
     jammedByMe: jammedByMe.has(video.user_id),
     jammedMe: jammedMe.has(video.user_id),
   };
+  seedRememberedDisplaySize(item);
+  return item;
 }
 
 function toSavedProfileVideo(
@@ -2908,8 +3250,9 @@ function toSavedProfileVideo(
   const creatorName = profile ? getDisplayName(profile) : "creator";
   const connectedWithCurrentUser = connected.has(video.user_id);
   const tags = getVideoTags(video);
+  const lookingForTargets = getLookingForTargetTags(video);
   const pinnedRank = getProfileVideoPinnedRank({ pinned_rank: video.pinned_rank });
-  return {
+  const saved: ProfileVideo = {
     id: video.id,
     userId: video.user_id,
     creatorName,
@@ -2934,6 +3277,10 @@ function toSavedProfileVideo(
     textOverlays: normalizeVideoTextOverlays(video.text_overlays),
     lookingFor: Boolean(video.looking_for),
     looking_for: Boolean(video.looking_for),
+    lookingForRoles: lookingForTargets.roles,
+    looking_for_roles: lookingForTargets.roles,
+    lookingForGenres: lookingForTargets.genres,
+    looking_for_genres: lookingForTargets.genres,
     pinnedRank,
     pinned_rank: pinnedRank,
     mediaType: normalizePostMediaType(video.media_type),
@@ -2942,14 +3289,22 @@ function toSavedProfileVideo(
     image_urls: normalizeImageUrls(video.image_urls),
     audioUrl: video.audio_url ?? null,
     audio_url: video.audio_url ?? null,
+    audioStartMs: video.audio_start_ms ?? null,
+    audio_start_ms: video.audio_start_ms ?? null,
     audioDurationMs: video.audio_duration_ms ?? null,
     audio_duration_ms: video.audio_duration_ms ?? null,
+    displayWidth: parsePositiveDisplaySize(video.display_width, video.display_height)?.width ?? null,
+    display_width: parsePositiveDisplaySize(video.display_width, video.display_height)?.width ?? null,
+    displayHeight: parsePositiveDisplaySize(video.display_width, video.display_height)?.height ?? null,
+    display_height: parsePositiveDisplaySize(video.display_width, video.display_height)?.height ?? null,
     created_at: video.created_at,
     savedByMe,
     mutual: connectedWithCurrentUser || (jammedByMe.has(video.user_id) && jammedMe.has(video.user_id)),
     jammedByMe: jammedByMe.has(video.user_id),
     jammedMe: jammedMe.has(video.user_id),
   };
+  seedRememberedDisplaySize(saved);
+  return saved;
 }
 
 function getConnectedJamUserIds(jams: JamRequestRow[], currentUserId: string) {
@@ -2987,6 +3342,27 @@ function getProfileLocation(
     return !parts.slice(0, index).some((earlier) => earlier.toLowerCase() === normalized);
   });
   return formatted.join(", ") || profile.location?.trim() || "Unknown";
+}
+
+function getLookingForTargetTags(video: {
+  lookingForRoles?: string[] | null;
+  looking_for_roles?: string[] | null;
+  lookingForGenres?: string[] | null;
+  looking_for_genres?: string[] | null;
+}) {
+  const roles = getUniqueTags(video.lookingForRoles ?? video.looking_for_roles ?? [])
+    .filter((tag) => creatorRoleSet.has(normalizeTag(tag)))
+    .slice(0, MAX_VIDEO_ROLES);
+  const genres = getUniqueTags(video.lookingForGenres ?? video.looking_for_genres ?? [])
+    .filter((tag) => musicGenreSet.has(normalizeTag(tag)))
+    .slice(0, MAX_VIDEO_GENRES);
+  return { roles, genres };
+}
+
+function lookingForTagsOverlap(haystack: string[] | null | undefined, needles: readonly string[]) {
+  if (needles.length === 0) return true;
+  const normalized = new Set((haystack ?? []).map((tag) => normalizeTag(tag)));
+  return needles.some((tag) => normalized.has(normalizeTag(tag)));
 }
 
 function getVideoTags(video: VideoRow) {

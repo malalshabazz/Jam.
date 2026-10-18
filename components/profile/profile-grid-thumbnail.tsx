@@ -1,25 +1,30 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
-import { Animated, Easing, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
+import { CachedGridImage, prefetchGridImage } from "@/components/media/cached-grid-image";
 import {
-  ensureVideoAspectCached,
   getRememberedVideoAspectSize,
-  getVideoAspectCacheKeyFromSource,
   getVideoAspectCacheKeyFromVideo,
+  getVideoDisplaySize,
   imageResizeModeForVideoSize,
   rememberVideoAspectSize,
 } from "@/components/video/aspect-cache";
 import {
+  LetterboxMediaShell,
+  MEDIA_LOADING_GREY,
+} from "@/components/media/letterbox-media-shell";
+import {
   VideoPresentationOverlays,
 } from "@/components/VideoPresentationOverlays";
-import { probeHlsVideoSize } from "@/lib/native-cloudflare";
 import type { FeedVideo, ProfileVideo } from "@/lib/native-social-data";
 import {
   prewarmProfileVideoSource,
   touchProfileVideoPrewarm,
 } from "@/lib/profile-video-prewarm";
+import { isSlideshowPost, prewarmSlideshowPost } from "@/lib/slideshow-prewarm";
 import { getVideoPresentation } from "@/lib/profile-mappers";
 import {
   getGridThumbnailCandidates,
+  getGridThumbnailPreviewUrl,
   getVideoCaption,
   getVideoThumbnailTimeMs,
 } from "@/lib/video-thumbnails";
@@ -40,14 +45,14 @@ export function ProfileGridThumbnail({
   /** When true, start buffering HLS once this thumb intersects the viewport. */
   prewarmEnabled?: boolean;
   visibilitySyncRef?: MutableRefObject<Set<() => void>>;
-  /** Skip the load crossfade (used for the long-press pin preview clone). */
+  /** Skip the load overlay (used for the long-press pin preview clone). */
   instantReveal?: boolean;
   /** Fires once the thumb image is painted (pin preview waits on this to avoid a blank flash). */
   onReady?: () => void;
 }) {
   const streamId = getVideoStreamId(video);
   const aspectCacheKey = getVideoAspectCacheKeyFromVideo(video);
-  const rememberedAspect = getRememberedVideoAspectSize(aspectCacheKey);
+  const displaySize = getVideoDisplaySize(video);
   const thumbnailTimeMs = getVideoThumbnailTimeMs(video);
   const mediaUri =
     ("mediaUrl" in video && video.mediaUrl) ||
@@ -59,67 +64,27 @@ export function ProfileGridThumbnail({
   );
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [thumbResizeMode, setThumbResizeMode] = useState<"contain" | "cover">(() =>
-    imageResizeModeForVideoSize(rememberedAspect?.width, rememberedAspect?.height),
+    imageResizeModeForVideoSize(displaySize?.width, displaySize?.height),
   );
   const uri = candidates[candidateIndex] ?? null;
+  const previewUri = useMemo(() => getGridThumbnailPreviewUrl(video), [video.id, streamId, thumbnailTimeMs, mediaUri]);
   const caption = getVideoCaption(video);
   const rootRef = useRef<View>(null);
   const prewarmedVisibleRef = useRef(false);
-  const revealedRef = useRef(false);
-  const revealGenerationRef = useRef(0);
+  const readyNotifiedRef = useRef(false);
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
-  // Soft-focus until the first paint reveal finishes (locked cells stay blurred).
-  const [softFocus, setSoftFocus] = useState(!instantReveal);
-  // Always start transparent; pin clones must never mount opaque before the bitmap paints.
-  const thumbOpacity = useRef(new Animated.Value(0)).current;
-  const placeholderOpacity = useRef(new Animated.Value(instantReveal ? 0 : 1)).current;
+  const [thumbReady, setThumbReady] = useState(instantReveal);
 
-  function armThumbReveal() {
-    const generation = ++revealGenerationRef.current;
-    revealedRef.current = false;
-    thumbOpacity.stopAnimation();
-    placeholderOpacity.stopAnimation();
-    placeholderOpacity.setValue(instantReveal ? 0 : 1);
-    setSoftFocus(!instantReveal);
-    if (instantReveal) {
-      // Don't yank thumbOpacity to 0 — cached onLoad often wins the race against this
-      // effect and a reset would blank the clone after onReady (flash).
-      return generation;
-    }
-    thumbOpacity.setValue(0);
-    return generation;
+  function notifyReady() {
+    if (readyNotifiedRef.current) return;
+    readyNotifiedRef.current = true;
+    onReadyRef.current?.();
   }
 
-  function revealThumb(generation?: number) {
-    if (generation != null && generation !== revealGenerationRef.current) return;
-    if (revealedRef.current) return;
-    revealedRef.current = true;
-    if (instantReveal) {
-      thumbOpacity.setValue(1);
-      placeholderOpacity.setValue(0);
-      setSoftFocus(false);
-      onReadyRef.current?.();
-      return;
-    }
-    // Fade the thumb in while still soft-focused so cells read as blurred, not black.
-    Animated.parallel([
-      Animated.timing(thumbOpacity, {
-        toValue: 1,
-        duration: 180,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-      Animated.timing(placeholderOpacity, {
-        toValue: 0,
-        duration: 180,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-    ]).start(({ finished }) => {
-      if (finished && !blurred) setSoftFocus(false);
-      onReadyRef.current?.();
-    });
+  function markThumbReady() {
+    setThumbReady(true);
+    notifyReady();
   }
 
   useEffect(() => {
@@ -127,40 +92,25 @@ export function ProfileGridThumbnail({
     const cached = getRememberedVideoAspectSize(aspectCacheKey);
     setThumbResizeMode(imageResizeModeForVideoSize(cached?.width, cached?.height));
     prewarmedVisibleRef.current = false;
-    armThumbReveal();
-  }, [aspectCacheKey, video.id, streamId, thumbnailTimeMs, mediaUri, instantReveal]);
+  }, [aspectCacheKey, video.id, streamId, thumbnailTimeMs, mediaUri]);
 
   useEffect(() => {
-    // Arm a new reveal for this URI. Cached images often fire onLoad before this
-    // effect; a blind reset afterward left opacity at 0 forever (blank grid cell
-    // while fullscreen playback still worked). Generation + fallback fixes that.
-    const generation = armThumbReveal();
-    if (!uri) return;
-    // Pin clones: short fallback so onReady still fires if load events are skipped.
-    const timer = setTimeout(() => revealThumb(generation), instantReveal ? 320 : 480);
+    readyNotifiedRef.current = false;
+    setThumbReady(instantReveal);
+    if (!uri) {
+      if (instantReveal) notifyReady();
+      return;
+    }
+    // Pin clones: still unblock onReady if load events are skipped. Do not
+    // strip the loading overlay on a timeout — that would flash letterbox black.
+    const timer = setTimeout(() => {
+      if (instantReveal) notifyReady();
+    }, instantReveal ? 320 : 480);
     return () => clearTimeout(timer);
   }, [uri, instantReveal]);
 
-  // Warm aspect cache from HLS before the user taps into fullscreen.
   useEffect(() => {
-    if (getRememberedVideoAspectSize(aspectCacheKey)) return;
-    const gridSource = getGridVideoSource(video);
-    if (!gridSource || !gridSource.includes(".m3u8")) return;
-    let cancelled = false;
-    void probeHlsVideoSize(gridSource).then((size) => {
-      if (cancelled || !size) return;
-      rememberVideoAspectSize(aspectCacheKey, size.width, size.height);
-      rememberVideoAspectSize(getVideoAspectCacheKeyFromSource(gridSource), size.width, size.height);
-      setThumbResizeMode(imageResizeModeForVideoSize(size.width, size.height));
-    });
-    return () => {
-      cancelled = true;
-    };
-    // Depend on identity fields only — pin toggles must not retrigger probes.
-  }, [aspectCacheKey, streamId, video.id]);
-
-  useEffect(() => {
-    if (!prewarmEnabled || blurred) return;
+    if (!prewarmEnabled || blurred || !thumbReady) return;
 
     const checkVisibility = () => {
       rootRef.current?.measureInWindow((x, y, width, height) => {
@@ -171,6 +121,10 @@ export function ProfileGridThumbnail({
           x < viewportWidth &&
           x + width > 0;
         if (!visible) return;
+        if (isSlideshowPost(video)) {
+          prewarmSlideshowPost(video);
+          return;
+        }
         const gridSource = getGridVideoSource(video);
         if (!gridSource) return;
         if (prewarmedVisibleRef.current) {
@@ -179,7 +133,6 @@ export function ProfileGridThumbnail({
         }
         prewarmedVisibleRef.current = true;
         prewarmProfileVideoSource(gridSource);
-        void ensureVideoAspectCached(video);
       });
     };
 
@@ -192,11 +145,16 @@ export function ProfileGridThumbnail({
       clearInterval(interval);
     };
     // video.id only — pin metadata updates must not restart prewarm timers.
-  }, [blurred, prewarmEnabled, video.id, visibilitySyncRef]);
+  }, [blurred, prewarmEnabled, thumbReady, video.id, visibilitySyncRef]);
 
-  if (!uri) {
+  useEffect(() => {
+    if (previewUri) void prefetchGridImage(previewUri);
+    if (uri) void prefetchGridImage(uri);
+  }, [previewUri, uri]);
+
+  if (!uri && !previewUri) {
     return (
-      <View style={[StyleSheet.absoluteFill, styles.gridThumbPlaceholder]}>
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: MEDIA_LOADING_GREY }]}>
         <Text style={styles.gridCaption}>{caption}</Text>
       </View>
     );
@@ -204,73 +162,65 @@ export function ProfileGridThumbnail({
 
   const presentation = getVideoPresentation(video);
 
-  const showBlur = blurred || softFocus;
-
   return (
-    <View
-      ref={rootRef}
-      collapsable={false}
-      pointerEvents="none"
-      style={[
-        StyleSheet.absoluteFill,
-        // Pin-preview clone stays transparent until the bitmap paints so the
-        // real grid thumb underneath doesn't get covered by a black flash.
-        // Normal cells use the slate placeholder — never a hard black void.
-        { backgroundColor: instantReveal ? "transparent" : "#3f3f46" },
-      ]}
+    <LetterboxMediaShell
+      loaded={thumbReady}
+      previewUri={previewUri}
+      letterboxColor={instantReveal ? "transparent" : undefined}
+      style={StyleSheet.absoluteFill}
     >
-      <Animated.View
-        style={[styles.gridThumbPlaceholder, { opacity: placeholderOpacity }]}
-      />
-      <Animated.Image
-        key={uri}
-        alt={caption}
-        source={{ uri }}
-        style={[StyleSheet.absoluteFill, { opacity: thumbOpacity }]}
-        resizeMode={thumbResizeMode}
-        blurRadius={showBlur ? 18 : 0}
-        onLoad={(event) => {
-          const { width, height } = event.nativeEvent.source;
-          // Wide clip thumbs are a reliable landscape signal; portrait image boxes are not
-          // (local bake posters can be a tall canvas around landscape footage).
-          if (width > height) {
-            rememberVideoAspectSize(aspectCacheKey, width, height);
-          }
-          const cached = getRememberedVideoAspectSize(aspectCacheKey);
-          setThumbResizeMode(
-            imageResizeModeForVideoSize(cached?.width ?? width, cached?.height ?? height),
-          );
-          revealThumb();
-        }}
-        onLoadEnd={() => {
-          // Cache hits sometimes skip onLoad after a late opacity reset; onLoadEnd
-          // still runs and recovers the visible thumb.
-          revealThumb();
-        }}
-        onError={() => {
-          setCandidateIndex((current) => {
-            if (current + 1 < candidates.length) return current + 1;
-            // Last candidate failed — still unblock pin-preview waiters.
-            onReadyRef.current?.();
-            return current;
-          });
-        }}
-      />
-      {showBlur ? (
-        <Animated.View
-          pointerEvents="none"
-          style={[styles.gridThumbLoadingBlur, { opacity: placeholderOpacity }]}
-        />
-      ) : null}
-      {!showBlur ? (
-        <Animated.View style={[StyleSheet.absoluteFill, { opacity: thumbOpacity }]} pointerEvents="none">
-          <VideoPresentationOverlays
-            filter={presentation.filter}
-            textOverlays={presentation.textOverlays}
-            density="thumb"
+      <View
+        ref={rootRef}
+        collapsable={false}
+        pointerEvents="none"
+        style={StyleSheet.absoluteFill}
+      >
+        {uri ? (
+          <CachedGridImage
+            uri={uri}
+            recyclingKey={uri}
+            alt={caption}
+            contentFit={thumbResizeMode}
+            decodeAtTileSize
+            priority="high"
+            blurRadius={blurred ? 18 : undefined}
+            onLoad={(event) => {
+              const { width, height } = event.source;
+              // Wide clip thumbs are a reliable landscape signal. Portrait JPEG boxes
+              // are not — Cloudflare fill stills are a 9:16 canvas around landscape.
+              if (width > height) {
+                rememberVideoAspectSize(aspectCacheKey, width, height);
+                setThumbResizeMode("contain");
+              } else {
+                const cached = getRememberedVideoAspectSize(aspectCacheKey);
+                if (cached) {
+                  setThumbResizeMode(imageResizeModeForVideoSize(cached.width, cached.height));
+                }
+              }
+              markThumbReady();
+            }}
+            onLoadEnd={() => {
+              markThumbReady();
+            }}
+            onError={() => {
+              setCandidateIndex((current) => {
+                if (current + 1 < candidates.length) return current + 1;
+                notifyReady();
+                return current;
+              });
+            }}
           />
-        </Animated.View>
-      ) : null}
-    </View>
+        ) : null}
+        {!blurred ? (
+          <View style={StyleSheet.absoluteFill} pointerEvents="none">
+            <VideoPresentationOverlays
+              filter={presentation.filter}
+              textOverlays={presentation.textOverlays}
+              density="thumb"
+            />
+          </View>
+        ) : null}
+      </View>
+    </LetterboxMediaShell>
   );
 }

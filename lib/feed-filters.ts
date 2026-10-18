@@ -88,21 +88,24 @@ export function buildDiscoverFeedQueryKey(filters: FeedFilterState) {
   return `global:${contentKey}`;
 }
 
+function videoTagsOverlap(haystack: readonly string[], needles: readonly string[]) {
+  if (needles.length === 0) return true;
+  const normalized = new Set(haystack.map((tag) => tag.toLowerCase()));
+  return needles.some((tag) => normalized.has(tag.toLowerCase()));
+}
+
 export function feedVideoMatchesFilters(item: FeedVideo, filters: FeedFilterState) {
   // Match video tags only — never the creator's profile role.
-  const itemRoles = item.roles.map((role) => role.toLowerCase());
-  const itemGenres = item.genres.map((genre) => genre.toLowerCase());
-  const roleMatch =
-    filters.roles.length === 0 ||
-    filters.roles.some((role) => itemRoles.includes(role.toLowerCase()));
-  const genreMatch =
-    filters.genres.length === 0 ||
-    filters.genres.some((genre) => itemGenres.includes(genre.toLowerCase()));
+  // Looking-for ON queries collaborator targets; OFF queries this post's content tags.
+  if (filters.lookingForActive && !item.lookingFor) return false;
+  const itemRoles = filters.lookingForActive ? item.lookingForRoles ?? [] : item.roles;
+  const itemGenres = filters.lookingForActive ? item.lookingForGenres ?? [] : item.genres;
+  const roleMatch = videoTagsOverlap(itemRoles, filters.roles);
+  const genreMatch = videoTagsOverlap(itemGenres, filters.genres);
   const locationMatch = !filters.location || locationFilterMatches(item.location, filters.location);
-  const lookingForMatch = !filters.lookingForActive || item.lookingFor;
   // Near-me + role/genre are enforced server-side on new page fetches.
   // Client filter remains so already-loaded / bridged clips stay correct instantly.
-  return roleMatch && genreMatch && locationMatch && lookingForMatch;
+  return roleMatch && genreMatch && locationMatch;
 }
 
 export function isFeedFilterStateActive(filters: FeedFilterState) {

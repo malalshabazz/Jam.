@@ -5,11 +5,12 @@ import {
   useRef,
   useState,
   type MutableRefObject,
+  type Ref,
 } from "react";
 import {
   Animated,
   Easing,
-  Image,
+  FlatList,
   Modal,
   Pressable,
   StyleSheet,
@@ -24,7 +25,9 @@ import {
   PIN_PREVIEW_EASE,
   PIN_PREVIEW_SCALE,
 } from "@/components/icons/pin-icon";
+import { prefetchGridImage } from "@/components/media/cached-grid-image";
 import { ProfileGridThumbnail } from "@/components/profile/profile-grid-thumbnail";
+import type { ProfileListAttach } from "@/components/profile/profile-scroll-fade";
 import { UploadProgressRing } from "@/components/profile/upload-progress-ring";
 import { triggerHoldHaptic } from "@/lib/hold-haptic";
 import {
@@ -47,6 +50,7 @@ import { activeThemeMode, styles } from "@/theme/styles";
 import {
   PROFILE_GRID_GAP,
   PROFILE_GRID_ITEM_WIDTH,
+  SCREEN_CONTENT_PADDING,
   dark,
   viewportHeight,
   viewportWidth,
@@ -76,15 +80,40 @@ function resolvePendingGridUpload(videoId: string) {
   return null;
 }
 
+const GRID_COLUMNS = 3;
+const GRID_INITIAL_TILES = 9;
+const GRID_WINDOW_SIZE = 2;
+const GRID_BATCH_SIZE = 6;
+
+function ProfileGridLoadingPlaceholder() {
+  return (
+    <View style={styles.grid} accessibilityLabel="loading videos">
+      {Array.from({ length: 6 }, (_, index) => (
+        <View key={index} style={styles.gridItem}>
+          <View style={styles.gridThumbPlaceholder} />
+          <View style={styles.gridThumbLoadingBlur} />
+        </View>
+      ))}
+    </View>
+  );
+}
+
 export function VideoGrid({
   videos,
   locked,
   lockMessage,
   lockScrollSyncRef,
   privateCopy,
+  loading = false,
   showPendingUploadState = false,
   prewarmVisibleVideos = false,
   allowPinning = false,
+  listRef,
+  onScroll,
+  scrollEventThrottle,
+  ListHeaderComponent,
+  scrollEnabled,
+  onScrollBeginDrag,
   onRetryPendingUpload,
   onTogglePin,
   onPinPreviewChange,
@@ -97,6 +126,7 @@ export function VideoGrid({
   /** Parent calls this on every scroll frame so the lock copy stays viewport-centred. */
   lockScrollSyncRef?: MutableRefObject<(() => void) | null>;
   privateCopy?: boolean;
+  loading?: boolean;
   showPendingUploadState?: boolean;
   /** Pre-buffer HLS for thumbs that intersect the viewport. */
   prewarmVisibleVideos?: boolean;
@@ -114,7 +144,7 @@ export function VideoGrid({
     bottomExtra?: number;
   }) => Promise<void>;
   onVideoPress?: (video: ProfileVideo | FeedVideo, index: number) => void;
-}) {
+} & Partial<ProfileListAttach>) {
   usePendingVideoUploads();
   usePendingSlideshowUploads();
   const lockGateRef = useRef<View>(null);
@@ -173,7 +203,7 @@ export function VideoGrid({
       // Warm cache in the background; the grid thumb is usually already decoded.
       const thumbUri = targetVideo ? getGridThumbnailCandidates(targetVideo)[0] : null;
       if (thumbUri) {
-        void Image.prefetch(thumbUri);
+        void prefetchGridImage(thumbUri);
       }
 
       const presentAfterLayout = () => {
@@ -339,14 +369,27 @@ export function VideoGrid({
     showLockGate,
   ]);
 
+  const headerHeightRef = useRef(0);
+  const listScrollYRef = useRef(0);
+
   const runGridScrollSync = useCallback(() => {
-    if (showLockGate) updateLockMessagePosition();
+    if (showLockGate) {
+      const gateTop = Math.max(0, headerHeightRef.current + lockGateTop - listScrollYRef.current);
+      lockGateRef.current?.setNativeProps({ style: { top: gateTop } });
+      updateLockMessagePosition();
+    }
     if (prewarmVisibleVideos) {
       for (const check of thumbVisibilityCheckersRef.current) {
         check();
       }
     }
-  }, [prewarmVisibleVideos, showLockGate, updateLockMessagePosition]);
+  }, [lockGateTop, prewarmVisibleVideos, showLockGate, updateLockMessagePosition]);
+
+  function handleListScroll(event: Parameters<NonNullable<ProfileListAttach["onScroll"]>>[0]) {
+    listScrollYRef.current = event.nativeEvent.contentOffset.y;
+    onScroll?.(event);
+    runGridScrollSync();
+  }
 
   useLayoutEffect(() => {
     if (!lockScrollSyncRef) return;
@@ -366,102 +409,145 @@ export function VideoGrid({
     updateLockMessagePosition();
   }, [showLockGate, videos.length, updateLockMessagePosition]);
 
-  if (videos.length === 0) {
-    return <Text style={styles.profileSavedEmptyText}>no videos yet</Text>;
-  }
+  const renderGridItem = useCallback(
+    ({ item: video, index }: { item: ProfileVideo | FeedVideo; index: number }) => {
+      const isLocked = Boolean(locked && index >= 3);
+      const pendingUpload =
+        showPendingUploadState ? resolvePendingGridUpload(video.id) : null;
+      const isPendingFailed = pendingUpload?.phase === "failed";
+      const isPinned = getProfileVideoPinnedRank(video as ProfileVideo) != null;
+      const canPin =
+        allowPinning &&
+        !isLocked &&
+        !isPendingFailed &&
+        !pendingUpload &&
+        !isPendingProfileVideoId(video.id);
+      const content = (
+        <>
+          <ProfileGridThumbnail
+            video={video}
+            blurred={isLocked}
+            prewarmEnabled={prewarmVisibleVideos && !isLocked}
+            visibilitySyncRef={thumbVisibilityCheckersRef}
+          />
+          {isPinned ? (
+            <View style={styles.gridPinnedBadge} accessibilityLabel="pinned">
+              <PinIcon size={28} />
+            </View>
+          ) : null}
+          {pendingUpload && !isPendingFailed ? (
+            <View style={styles.gridPendingOverlay}>
+              <UploadProgressRing progress={pendingUpload.progress} />
+              <Text style={styles.gridPendingStatusText}>
+                {pendingUpload.phase === "processing"
+                  ? pendingUpload.progress < 32 && !pendingUpload.presentationBaked
+                    ? "rendering"
+                    : "processing"
+                  : pendingUpload.phase === "saving"
+                    ? "posting"
+                    : "uploading"}
+              </Text>
+            </View>
+          ) : null}
+          {pendingUpload && isPendingFailed ? (
+            <View style={styles.gridPendingErrorOverlay}>
+              <Text style={styles.gridPendingErrorText}>upload failed</Text>
+              <Pressable
+                onPress={() => onRetryPendingUpload?.(pendingUpload.id)}
+                style={styles.gridPendingRetryButton}
+                accessibilityLabel="retry upload"
+              >
+                <Text style={styles.gridPendingRetryText}>retry</Text>
+              </Pressable>
+            </View>
+          ) : null}
+          {isLocked ? <View style={styles.lockedOverlay} /> : null}
+        </>
+      );
+
+      // Pending uploads stay visible with a ring, but aren't openable until Stream is ready.
+      if ((onVideoPress || canPin) && !isLocked && !isPendingFailed && !pendingUpload) {
+        return (
+          <Pressable
+            ref={(node) => {
+              if (node) gridItemRefs.current.set(video.id, node);
+              else gridItemRefs.current.delete(video.id);
+            }}
+            collapsable={false}
+            style={styles.gridItem}
+            onPress={() => {
+              if (pinMenu) {
+                dismissPinMenu();
+                return;
+              }
+              onVideoPress?.(video, index);
+            }}
+            onLongPress={canPin ? () => openPinMenuForVideo(video.id) : undefined}
+            delayLongPress={50}
+          >
+            {content}
+          </Pressable>
+        );
+      }
+
+      return <View style={styles.gridItem}>{content}</View>;
+    },
+    [
+      allowPinning,
+      locked,
+      onRetryPendingUpload,
+      onVideoPress,
+      pinMenu,
+      prewarmVisibleVideos,
+      showPendingUploadState,
+    ],
+  );
+
+  const listHeader = (
+    <View
+      onLayout={(event) => {
+        headerHeightRef.current = event.nativeEvent.layout.height;
+      }}
+    >
+      {ListHeaderComponent}
+      {privateCopy ? (
+        <Text style={[styles.helper, { paddingHorizontal: SCREEN_CONTENT_PADDING }]}>
+          only visible to you.
+        </Text>
+      ) : null}
+    </View>
+  );
 
   return (
-    <View>
-      {privateCopy ? <Text style={styles.helper}>only visible to you.</Text> : null}
-      <View style={styles.grid}>
-        {videos.map((video, index) => {
-          const isLocked = Boolean(locked && index >= 3);
-          const pendingUpload =
-            showPendingUploadState ? resolvePendingGridUpload(video.id) : null;
-          const isPendingFailed = pendingUpload?.phase === "failed";
-          const isPinned = getProfileVideoPinnedRank(video as ProfileVideo) != null;
-          const canPin =
-            allowPinning &&
-            !isLocked &&
-            !isPendingFailed &&
-            !pendingUpload &&
-            !isPendingProfileVideoId(video.id);
-          const content = (
-            <>
-              <ProfileGridThumbnail
-                video={video}
-                blurred={isLocked}
-                prewarmEnabled={prewarmVisibleVideos && !isLocked}
-                visibilitySyncRef={thumbVisibilityCheckersRef}
-              />
-              {isPinned ? (
-                <View style={styles.gridPinnedBadge} accessibilityLabel="pinned">
-                  <PinIcon size={28} />
-                </View>
-              ) : null}
-              {pendingUpload && !isPendingFailed ? (
-                <View style={styles.gridPendingOverlay}>
-                  <UploadProgressRing progress={pendingUpload.progress} />
-                  <Text style={styles.gridPendingStatusText}>
-                    {pendingUpload.phase === "processing"
-                      ? pendingUpload.progress < 32 && !pendingUpload.presentationBaked
-                        ? "rendering"
-                        : "processing"
-                      : pendingUpload.phase === "saving"
-                        ? "posting"
-                        : "uploading"}
-                  </Text>
-                </View>
-              ) : null}
-              {pendingUpload && isPendingFailed ? (
-                <View style={styles.gridPendingErrorOverlay}>
-                  <Text style={styles.gridPendingErrorText}>upload failed</Text>
-                  <Pressable
-                    onPress={() => onRetryPendingUpload?.(pendingUpload.id)}
-                    style={styles.gridPendingRetryButton}
-                    accessibilityLabel="retry upload"
-                  >
-                    <Text style={styles.gridPendingRetryText}>retry</Text>
-                  </Pressable>
-                </View>
-              ) : null}
-              {isLocked ? <View style={styles.lockedOverlay} /> : null}
-            </>
-          );
-
-          // Pending uploads stay visible with a ring, but aren't openable until Stream is ready.
-          if ((onVideoPress || canPin) && !isLocked && !isPendingFailed && !pendingUpload) {
-            return (
-              <Pressable
-                key={video.id}
-                ref={(node) => {
-                  if (node) gridItemRefs.current.set(video.id, node);
-                  else gridItemRefs.current.delete(video.id);
-                }}
-                collapsable={false}
-                style={styles.gridItem}
-                onPress={() => {
-                  if (pinMenu) {
-                    dismissPinMenu();
-                    return;
-                  }
-                  onVideoPress?.(video, index);
-                }}
-                onLongPress={canPin ? () => openPinMenuForVideo(video.id) : undefined}
-                delayLongPress={50}
-              >
-                {content}
-              </Pressable>
-            );
-          }
-
-          return (
-            <View key={video.id} style={styles.gridItem}>
-              {content}
-            </View>
-          );
-        })}
-      </View>
+    <View style={gridStyles.root}>
+      <FlatList
+        ref={listRef as Ref<FlatList<ProfileVideo | FeedVideo>>}
+        data={loading ? [] : videos}
+        keyExtractor={(item) => item.id}
+        numColumns={GRID_COLUMNS}
+        renderItem={renderGridItem}
+        ListHeaderComponent={listHeader}
+        ListEmptyComponent={
+          loading ? (
+            <ProfileGridLoadingPlaceholder />
+          ) : (
+            <Text style={styles.profileSavedEmptyText}>no videos yet</Text>
+          )
+        }
+        extraData={`${pinMenu?.videoId ?? ""}:${locked ? 1 : 0}:${allowPinning ? 1 : 0}:${videos.length}`}
+        onScroll={handleListScroll}
+        scrollEventThrottle={scrollEventThrottle ?? 16}
+        scrollEnabled={scrollEnabled}
+        onScrollBeginDrag={onScrollBeginDrag}
+        showsVerticalScrollIndicator={false}
+        initialNumToRender={GRID_INITIAL_TILES}
+        maxToRenderPerBatch={GRID_BATCH_SIZE}
+        windowSize={GRID_WINDOW_SIZE}
+        updateCellsBatchingPeriod={50}
+        removeClippedSubviews
+        columnWrapperStyle={gridStyles.row}
+        contentContainerStyle={gridStyles.listContent}
+      />
       <Modal
         transparent
         animationType="none"
@@ -565,7 +651,7 @@ export function VideoGrid({
           ref={lockGateRef}
           collapsable={false}
           pointerEvents="none"
-          style={[styles.profileLockGate, { top: lockGateTop }]}
+          style={[styles.profileLockGate, { top: lockGateTop, left: 0, right: 0 }]}
           onLayout={updateLockMessagePosition}
         >
           <LinearGradient
@@ -594,3 +680,17 @@ export function VideoGrid({
     </View>
   );
 }
+
+const gridStyles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
+  listContent: {
+    paddingBottom: 24,
+  },
+  row: {
+    width: viewportWidth,
+    gap: PROFILE_GRID_GAP,
+    marginBottom: PROFILE_GRID_GAP,
+  },
+});

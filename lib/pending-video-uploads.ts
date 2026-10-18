@@ -23,6 +23,11 @@ import {
   normalizeVideoTextOverlays,
   type VideoTextOverlay,
 } from "@/lib/video-presentation";
+import {
+  getGridVideoPreviewUrl,
+  getGridVideoThumbnailUrl,
+  warmGridThumbnailUrls,
+} from "@/lib/video-thumbnails";
 
 export const PENDING_VIDEO_ID_PREFIX = "pending:";
 
@@ -44,6 +49,8 @@ export type PendingVideoUpload = {
   videoFilter: VideoFilterId;
   textOverlays: VideoTextOverlay[];
   lookingFor: boolean;
+  lookingForRoles: string[];
+  lookingForGenres: string[];
   progress: number;
   phase: PendingVideoUploadPhase;
   errorMessage: string | null;
@@ -157,6 +164,14 @@ export function pendingUploadToProfileVideo(upload: PendingVideoUpload): Profile
     textOverlays: upload.textOverlays,
     lookingFor: upload.lookingFor,
     looking_for: upload.lookingFor,
+    lookingForRoles: upload.lookingForRoles,
+    looking_for_roles: upload.lookingForRoles,
+    lookingForGenres: upload.lookingForGenres,
+    looking_for_genres: upload.lookingForGenres,
+    displayWidth: upload.asset.width ?? null,
+    display_width: upload.asset.width ?? null,
+    displayHeight: upload.asset.height ?? null,
+    display_height: upload.asset.height ?? null,
     created_at: new Date().toISOString(),
   };
 }
@@ -488,7 +503,7 @@ async function runPendingUpload(uploadId: string) {
       });
     }, 1600);
     try {
-      await waitForCloudflareStreamReady(finalStreamId);
+      await waitForCloudflareStreamReady(finalStreamId, thumbnailTimeMs);
     } finally {
       clearInterval(processingPulse);
     }
@@ -501,10 +516,18 @@ async function runPendingUpload(uploadId: string) {
       roles: working.roles,
       genres: working.genres,
       cloudflareStreamId: finalStreamId,
+      sourceCloudflareStreamId:
+        working.cloudflareStreamId && working.cloudflareStreamId !== finalStreamId
+          ? working.cloudflareStreamId
+          : null,
       thumbnailTimeMs,
       videoFilter: publishFilter,
       textOverlays: publishOverlays,
       lookingFor: working.lookingFor,
+      lookingForRoles: working.lookingForRoles,
+      lookingForGenres: working.lookingForGenres,
+      displayWidth: assetToUpload.width ?? working.asset.width ?? null,
+      displayHeight: assetToUpload.height ?? working.asset.height ?? null,
     });
 
     updatePendingUpload(uploadId, { phase: "saving", progress: 100 });
@@ -520,10 +543,19 @@ async function runPendingUpload(uploadId: string) {
     });
 
     rememberLocalPosterForVideo(createdVideo.id, working.localThumbnailUri);
+    await warmGridThumbnailUrls([
+      getGridVideoThumbnailUrl(finalStreamId, thumbnailTimeMs),
+      getGridVideoPreviewUrl(finalStreamId, thumbnailTimeMs),
+    ]);
     removePendingUpload(uploadId);
     notifyPosted({ userId: working.userId, videoId: createdVideo.id });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Upload failed.";
+    const message =
+      error instanceof Error
+        ? error.message
+        : typeof error === "object" && error && "message" in error && typeof (error as { message: unknown }).message === "string"
+          ? (error as { message: string }).message
+          : "Upload failed.";
     logVideoUploadStep("background upload failed", { uploadId, ...getVideoUploadErrorDetails(error) });
     updatePendingUpload(uploadId, {
       phase: "failed",
@@ -550,6 +582,8 @@ export type EnqueuePendingVideoUploadInput = {
   videoFilter?: VideoFilterId | string | null;
   textOverlays?: VideoTextOverlay[] | unknown;
   lookingFor?: boolean;
+  lookingForRoles?: string[];
+  lookingForGenres?: string[];
   /** True when asset is already the composed export (skip re-bake). */
   presentationBaked?: boolean;
   bakedAsset?: NativeVideoAsset | null;
@@ -575,6 +609,8 @@ export function enqueuePendingVideoUpload(input: EnqueuePendingVideoUploadInput)
     videoFilter: presentationBaked ? "none" : normalizeVideoFilter(input.videoFilter),
     textOverlays: presentationBaked ? [] : normalizeVideoTextOverlays(input.textOverlays),
     lookingFor: Boolean(input.lookingFor),
+    lookingForRoles: input.lookingFor ? input.lookingForRoles ?? [] : [],
+    lookingForGenres: input.lookingFor ? input.lookingForGenres ?? [] : [],
     progress: 1,
     phase: "uploading",
     errorMessage: null,

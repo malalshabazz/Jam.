@@ -200,9 +200,10 @@ export function InboxScreen({
 
   const matchesInboxFilters = useCallback(
     (role: string, location: string, otherUserId: string) => {
-      const roleMatch =
-        filterRoles.length === 0 ||
-        filterRoles.some((selectedRole) => selectedRole.toLowerCase() === role.toLowerCase());
+      const roleMatch = lookingForActive
+        ? true
+        : filterRoles.length === 0 ||
+          filterRoles.some((selectedRole) => selectedRole.toLowerCase() === role.toLowerCase());
       const locationMatch = !filterLocation || locationFilterMatches(location, filterLocation);
       const nearMeMatch = !nearMeActive || (nearbyUserIds?.has(otherUserId) ?? false);
       const lookingForMatch = !lookingForActive || (lookingForUserIds?.has(otherUserId) ?? false);
@@ -359,7 +360,7 @@ export function InboxScreen({
     );
 
     setLookingForLoading(true);
-    void fetchLookingForUserIds(inboxUserIds)
+    void fetchLookingForUserIds(inboxUserIds, { roles: filterRoles })
       .then((ids) => {
         if (!cancelled) setLookingForUserIds(ids);
       })
@@ -373,7 +374,7 @@ export function InboxScreen({
     return () => {
       cancelled = true;
     };
-  }, [jams, lookingForActive, requests, sent]);
+  }, [filterRoles, jams, lookingForActive, requests, sent]);
 
   useEffect(() => {
     const chatUserId =

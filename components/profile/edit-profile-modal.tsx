@@ -2,17 +2,14 @@ import * as ImagePicker from "expo-image-picker";
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
-  Keyboard,
-  KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   Text,
   TextInput,
   View,
 } from "react-native";
-import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { creatorRoles } from "@/lib/options";
 import {
   saveProfile,
@@ -29,7 +26,11 @@ import {
   locationPartsToPlace,
 } from "@/lib/location-filter";
 import type { LocationPlace } from "@/types/app";
-import { MAX_ACCOUNT_CREATOR_TYPES } from "@/theme/tokens";
+import {
+  MAX_ACCOUNT_CREATOR_TYPES,
+  TAB_SCREEN_MIN_TOP_PADDING,
+  TAB_SCREEN_TOP_PADDING,
+} from "@/theme/tokens";
 import { styles } from "@/theme/styles";
 import { Avatar } from "@/components/ui/avatar";
 import { ChipRow } from "@/components/ui/chip-row";
@@ -61,36 +62,7 @@ export function EditProfileModal({
   const [avatarAsset, setAvatarAsset] = useState<NativeAvatarAsset | null>(null);
   const [saving, setSaving] = useState(false);
   const initializedProfileIdRef = useRef<string | null>(null);
-  const scrollRef = useRef<ScrollView>(null);
   const insets = useSafeAreaInsets();
-  const [keyboardInset, setKeyboardInset] = useState(0);
-
-  useEffect(() => {
-    if (!visible) {
-      setKeyboardInset(0);
-      return;
-    }
-
-    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
-    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
-    const showSubscription = Keyboard.addListener(showEvent, (event) => {
-      setKeyboardInset(event.endCoordinates.height);
-    });
-    const hideSubscription = Keyboard.addListener(hideEvent, () => {
-      setKeyboardInset(0);
-    });
-
-    return () => {
-      showSubscription.remove();
-      hideSubscription.remove();
-    };
-  }, [visible]);
-
-  function ensureFieldVisible() {
-    requestAnimationFrame(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
-    });
-  }
 
   useEffect(() => {
     if (!visible) {
@@ -208,17 +180,14 @@ export function EditProfileModal({
   return (
     <Modal animationType="none" transparent visible={visible} onRequestClose={onClose}>
       <SwipeBackSurface resetKey={visible} onBack={onClose} style={styles.flex} enterFromRight>
-        <SafeAreaView style={styles.safe}>
-          <KeyboardAvoidingView
-            behavior={Platform.OS === "ios" ? "padding" : undefined}
-            style={styles.flex}
-            keyboardVerticalOffset={Platform.OS === "ios" ? insets.top : 0}
-          >
+        <View style={styles.safe}>
             <ScrollView
-              ref={scrollRef}
               contentContainerStyle={[
                 styles.screenContent,
-                { paddingBottom: Math.max(insets.bottom, 16) + keyboardInset + 24 },
+                {
+                  paddingTop: Math.max(insets.top + TAB_SCREEN_TOP_PADDING, TAB_SCREEN_MIN_TOP_PADDING),
+                  paddingBottom: Math.max(insets.bottom, 16) + 24,
+                },
               ]}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
@@ -256,7 +225,6 @@ export function EditProfileModal({
             <TextInput
               value={creatorQuery}
               onChangeText={setCreatorQuery}
-              onFocus={ensureFieldVisible}
               placeholder="search creator type"
               placeholderTextColor="#71717a"
               style={styles.input}
@@ -269,13 +237,11 @@ export function EditProfileModal({
               place={locationPlace}
               query={locationQuery}
               onQueryChange={setLocationQuery}
-              onSearchFocus={ensureFieldVisible}
               onChange={setLocationPlace}
             />
             <PrimaryButton label={saving ? "saving..." : "save profile"} disabled={saving} onPress={save} />
             </ScrollView>
-          </KeyboardAvoidingView>
-        </SafeAreaView>
+        </View>
       </SwipeBackSurface>
     </Modal>
   );

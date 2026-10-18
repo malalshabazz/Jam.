@@ -50,6 +50,26 @@ export function getProfileVideoTags(video: ProfileVideo | FeedVideo | undefined)
   };
 }
 
+export function getLookingForVideoTags(video: ProfileVideo | FeedVideo | undefined) {
+  if (!video) return { roles: [] as string[], genres: [] as string[] };
+  const roleSource =
+    "lookingForRoles" in video && Array.isArray(video.lookingForRoles)
+      ? video.lookingForRoles
+      : "looking_for_roles" in video && Array.isArray(video.looking_for_roles)
+        ? video.looking_for_roles ?? []
+        : [];
+  const genreSource =
+    "lookingForGenres" in video && Array.isArray(video.lookingForGenres)
+      ? video.lookingForGenres
+      : "looking_for_genres" in video && Array.isArray(video.looking_for_genres)
+        ? video.looking_for_genres ?? []
+        : [];
+  return {
+    roles: getUniqueVideoTags(roleSource).filter((tag) => creatorRoleTagSet.has(normalizeVideoTag(tag))),
+    genres: getUniqueVideoTags(genreSource).filter((tag) => musicGenreTagSet.has(normalizeVideoTag(tag))),
+  };
+}
+
 export function getProfileFullscreenTags(video: ProfileVideo | FeedVideo | undefined) {
   const tags = getProfileVideoTags(video);
   const roleGenreTags = [...tags.roles, ...tags.genres];
@@ -67,6 +87,7 @@ export function profileToFeedVideo(
   const displayName = profile.display_name?.trim() || "creator";
   const role = profile.creator_types?.[0] ?? "creator";
   const tags = getProfileVideoTags(video);
+  const lookingForTags = getLookingForVideoTags(video);
   const videoCount = Math.max(postedVideoCount, profile.video_count ?? 0);
   const proBadge = getProBadgeKind({
     earlyAdopter: profile.early_adopter,
@@ -94,6 +115,8 @@ export function profileToFeedVideo(
     lookingFor: Boolean(
       video && ("lookingFor" in video ? video.lookingFor : "looking_for" in video ? video.looking_for : false),
     ),
+    lookingForRoles: lookingForTags.roles,
+    lookingForGenres: lookingForTags.genres,
     pinnedRank: getProfileVideoPinnedRank(video),
     mediaType: video?.mediaType === "slideshow" || video?.media_type === "slideshow" ? "slideshow" : "video",
     imageUrls: Array.isArray(video?.imageUrls)
@@ -102,7 +125,10 @@ export function profileToFeedVideo(
         ? video.image_urls
         : [],
     audioUrl: video?.audioUrl ?? video?.audio_url ?? null,
+    audioStartMs: video?.audioStartMs ?? video?.audio_start_ms ?? null,
     audioDurationMs: video?.audioDurationMs ?? video?.audio_duration_ms ?? null,
+    displayWidth: video?.displayWidth ?? video?.display_width ?? null,
+    displayHeight: video?.displayHeight ?? video?.display_height ?? null,
     earlyAdopter: Boolean(profile.early_adopter),
     proBadge,
     videoCount,
@@ -131,6 +157,10 @@ export function feedItemToPreloadedProfile(item: FeedVideo, feedItems: FeedVideo
       videoFilter: video.videoFilter,
       textOverlays: video.textOverlays,
       lookingFor: video.lookingFor,
+      lookingForRoles: video.lookingForRoles ?? [],
+      lookingForGenres: video.lookingForGenres ?? [],
+      looking_for_roles: video.lookingForRoles ?? [],
+      looking_for_genres: video.lookingForGenres ?? [],
       pinnedRank: video.pinnedRank ?? null,
       pinned_rank: video.pinnedRank ?? null,
       mediaType: video.mediaType,
@@ -139,8 +169,14 @@ export function feedItemToPreloadedProfile(item: FeedVideo, feedItems: FeedVideo
       image_urls: video.imageUrls,
       audioUrl: video.audioUrl,
       audio_url: video.audioUrl,
+      audioStartMs: video.audioStartMs,
+      audio_start_ms: video.audioStartMs,
       audioDurationMs: video.audioDurationMs,
       audio_duration_ms: video.audioDurationMs,
+      displayWidth: video.displayWidth,
+      display_width: video.displayWidth,
+      displayHeight: video.displayHeight,
+      display_height: video.displayHeight,
       created_at: video.createdAt,
       creatorName: video.creatorName,
       role: video.role,
@@ -204,6 +240,7 @@ export function profileVideoToFeedVideo(video: ProfileVideo | FeedVideo): FeedVi
         ? video.created_at ?? new Date().toISOString()
         : new Date().toISOString();
     const tags = getProfileVideoTags(video);
+    const lookingForTags = getLookingForVideoTags(video);
     const presentation = getVideoPresentation(video);
 
     return {
@@ -235,6 +272,8 @@ export function profileVideoToFeedVideo(video: ProfileVideo | FeedVideo): FeedVi
             ? (video as { looking_for?: boolean | null }).looking_for
             : false,
       ),
+      lookingForRoles: lookingForTags.roles,
+      lookingForGenres: lookingForTags.genres,
       pinnedRank: getProfileVideoPinnedRank(video as ProfileVideo),
       mediaType:
         ("mediaType" in video && video.mediaType === "slideshow") ||
@@ -250,9 +289,21 @@ export function profileVideoToFeedVideo(video: ProfileVideo | FeedVideo): FeedVi
         (video as ProfileVideo).audioUrl ??
         (video as ProfileVideo).audio_url ??
         null,
+      audioStartMs:
+        (video as ProfileVideo).audioStartMs ??
+        (video as ProfileVideo).audio_start_ms ??
+        null,
       audioDurationMs:
         (video as ProfileVideo).audioDurationMs ??
         (video as ProfileVideo).audio_duration_ms ??
+        null,
+      displayWidth:
+        (video as ProfileVideo).displayWidth ??
+        (video as ProfileVideo).display_width ??
+        null,
+      displayHeight:
+        (video as ProfileVideo).displayHeight ??
+        (video as ProfileVideo).display_height ??
         null,
       earlyAdopter: Boolean(video.earlyAdopter),
       proBadge: "proBadge" in video ? video.proBadge ?? null : null,

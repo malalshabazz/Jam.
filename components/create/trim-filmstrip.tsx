@@ -67,8 +67,7 @@ export function CreateTrimFilmstrip({
   const { progressTrackLeft, progressTrackWidth } = getTrimProgressTrackGeometry(trimLeft, selectionWidth);
   const leftHandleLeft = trimLeft;
   const rightHandleLeft = trimLeft + selectionWidth - CREATE_TRIM_HANDLE_WIDTH;
-  const isStartFlush = trimStartRatio <= 0.001;
-  const isEndFlush = trimEndRatio >= 0.999;
+  const selectionCornerRadius = CREATE_TRIM_FILMSTRIP_RADIUS - 1;
   const placeholderCount = Math.max(frames.length, CREATE_TRIM_FILMSTRIP_FRAME_COUNT);
   const targetSelectionProgress = getTrimSelectionProgress(
     scrubRatio ?? playbackRatio,
@@ -150,8 +149,20 @@ export function CreateTrimFilmstrip({
 
         {stripWidth > 0 ? (
           <>
-            <View pointerEvents="none" style={[styles.createTrimFilmstripDim, { left: 0, width: trimLeft }]} />
-            <View pointerEvents="none" style={[styles.createTrimFilmstripDim, { right: 0, width: trimRight }]} />
+            <View
+              pointerEvents="none"
+              style={[
+                styles.createTrimFilmstripDim,
+                { left: 0, width: trimLeft + selectionCornerRadius },
+              ]}
+            />
+            <View
+              pointerEvents="none"
+              style={[
+                styles.createTrimFilmstripDim,
+                { right: 0, width: trimRight + selectionCornerRadius },
+              ]}
+            />
             <View
               pointerEvents="none"
               style={[
@@ -161,10 +172,6 @@ export function CreateTrimFilmstrip({
                   width: selectionWidth,
                   borderLeftWidth: 0,
                   borderRightWidth: 0,
-                  borderTopLeftRadius: isStartFlush ? CREATE_TRIM_FILMSTRIP_RADIUS - 1 : 0,
-                  borderBottomLeftRadius: isStartFlush ? CREATE_TRIM_FILMSTRIP_RADIUS - 1 : 0,
-                  borderTopRightRadius: isEndFlush ? CREATE_TRIM_FILMSTRIP_RADIUS - 1 : 0,
-                  borderBottomRightRadius: isEndFlush ? CREATE_TRIM_FILMSTRIP_RADIUS - 1 : 0,
                 },
               ]}
             />
@@ -200,7 +207,6 @@ export function CreateTrimFilmstrip({
                 style={[
                   styles.createTrimHandleTab,
                   styles.createTrimHandleTabStart,
-                  isStartFlush && styles.createTrimHandleTabStartFlush,
                   { left: leftHandleLeft },
                 ]}
                 accessibilityLabel="trim start"
@@ -217,7 +223,6 @@ export function CreateTrimFilmstrip({
                 style={[
                   styles.createTrimHandleTab,
                   styles.createTrimHandleTabEnd,
-                  isEndFlush && styles.createTrimHandleTabEndFlush,
                   { left: rightHandleLeft },
                 ]}
                 accessibilityLabel="trim end"

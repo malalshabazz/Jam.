@@ -266,10 +266,10 @@ export async function bakeVideoPresentation(
   const mirrorHorizontal = Boolean(input.mirrorHorizontal);
   const hasPresentationOverlays =
     input.videoFilter !== "none" || textOverlays.length > 0;
-  // Only letterbox into a portrait canvas when overlays were placed on the full
-  // edit screen (including black bars). Otherwise keep native aspect so a
-  // 1920×1080 camera-roll clip stays ~1080p landscape instead of being crushed
-  // into a soft ~540×304 letterbox retry.
+  // Only letterbox into a 1080×1920 portrait canvas when overlays were placed on
+  // the 9:16 edit card (including letterbox bars). Otherwise keep native aspect
+  // so a 1920×1080 camera-roll clip stays ~1080p landscape instead of being
+  // crushed into a soft ~540×304 letterbox retry.
   const letterboxToPortrait =
     primarySize.width >= primarySize.height && hasPresentationOverlays;
   const canvasSize = letterboxToPortrait

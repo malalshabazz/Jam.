@@ -530,6 +530,24 @@ export function UserProfileModal({
               if (menuOpen) setMenuOpen(false);
               if (notifyConfirmAnchor) setNotifyConfirmAnchor(null);
             }}
+            renderList={
+              visibleProfile && !visibleLoading
+                ? (list) => (
+                    <VideoGrid
+                      {...list}
+                      videos={visibleFeedVideos}
+                      locked={!profileUnlocked}
+                      lockMessage={`you must be jamming with ${displayName} to see their full profile`}
+                      lockScrollSyncRef={profileLockScrollSyncRef}
+                      prewarmVisibleVideos
+                      onVideoPress={(video, index) => {
+                        setMenuOpen(false);
+                        openProfileVideoFullscreen(video, () => setFullscreenIndex(index));
+                      }}
+                    />
+                  )
+                : undefined
+            }
           >
             <View style={styles.headerRow}>
               {profileHeaderCollapsed ? (
@@ -550,7 +568,7 @@ export function UserProfileModal({
             ) : visibleProfile ? (
               <>
                 <View style={styles.profileCentered}>
-                  <ExpandableAvatar uri={visibleProfile.avatar_url} size={78} />
+                  <ExpandableAvatar uri={visibleProfile.avatar_url} size={90} />
                   <ProfileNameAnchor>
                     <View style={styles.centerRow}>
                       <Text style={styles.h2}>{displayName}</Text>
@@ -590,17 +608,6 @@ export function UserProfileModal({
                   />
                 </View>
                 <View style={styles.profileVideoDivider} />
-                <VideoGrid
-                  videos={visibleFeedVideos}
-                  locked={!profileUnlocked}
-                  lockMessage={`you must be jamming with ${displayName} to see their full profile`}
-                  lockScrollSyncRef={profileLockScrollSyncRef}
-                  prewarmVisibleVideos
-                  onVideoPress={(video, index) => {
-                    setMenuOpen(false);
-                    openProfileVideoFullscreen(video, () => setFullscreenIndex(index));
-                  }}
-                />
               </>
             ) : (
               <EmptyCard text={visibleError ?? "profile unavailable."} />

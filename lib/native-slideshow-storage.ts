@@ -105,6 +105,51 @@ function getPublicUrl(objectPath: string) {
   return data.publicUrl;
 }
 
+function getSlideshowTransformedUrl(
+  url: string,
+  options: { width: number; height: number; quality: number; resize: "cover" | "contain" },
+) {
+  const trimmed = url.trim();
+  if (!trimmed) return trimmed;
+  if (
+    trimmed.startsWith("file:") ||
+    trimmed.startsWith("content:") ||
+    trimmed.startsWith("ph://") ||
+    trimmed.startsWith("assets-library:")
+  ) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.pathname.includes("/storage/v1/object/public/post-media/")) {
+      parsed.pathname = parsed.pathname.replace(
+        "/storage/v1/object/public/",
+        "/storage/v1/render/image/public/",
+      );
+    }
+    if (!parsed.pathname.includes("/storage/v1/render/image/public/post-media/")) {
+      return trimmed;
+    }
+    parsed.searchParams.set("width", String(options.width));
+    parsed.searchParams.set("height", String(options.height));
+    parsed.searchParams.set("quality", String(options.quality));
+    parsed.searchParams.set("resize", options.resize);
+    return parsed.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
+/** Tiny transform URL so a blurred preview can paint before the full slide. */
+export function getSlideshowPreviewUrl(url: string) {
+  return getSlideshowTransformedUrl(url, { width: 48, height: 86, quality: 40, resize: "cover" });
+}
+
+/** Grid-tile still — never the original camera photo. */
+export function getSlideshowGridThumbUrl(url: string) {
+  return getSlideshowTransformedUrl(url, { width: 360, height: 640, quality: 70, resize: "cover" });
+}
+
 function inferImageMime(fileName: string | null | undefined, uri: string) {
   const extension = (fileName ?? uri).split(".").pop()?.toLowerCase();
   if (extension === "png") return "image/png";

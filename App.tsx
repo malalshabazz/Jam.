@@ -59,6 +59,7 @@ import {
   setActiveThemeMode,
   styles,
 } from "@/theme/styles";
+import { hydrateVideoAspectCache } from "@/components/video/aspect-cache";
 import { getUnreadInboxCount } from "@/lib/inbox-unread";
 import { LoadingScreen } from "@/components/ui/loading-screen";
 import { preloadRecentVideoThumbnail } from "@/components/create/create-media";
@@ -116,8 +117,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void AsyncStorage.getItem(THEME_STORAGE_KEY)
-      .then((savedThemeMode) => {
+    void Promise.all([AsyncStorage.getItem(THEME_STORAGE_KEY), hydrateVideoAspectCache()])
+      .then(([savedThemeMode]) => {
         if (savedThemeMode === "light" || savedThemeMode === "dark") {
           setActiveThemeMode(savedThemeMode);
           setThemeMode(savedThemeMode);
@@ -736,7 +737,7 @@ function MainTabs({
       <View style={styles.flex}>
         <MainTab.Navigator
           initialRouteName="discover"
-          detachInactiveScreens={false}
+          detachInactiveScreens={true}
           screenOptions={{
             headerShown: false,
             lazy: true,

@@ -19,6 +19,21 @@ export function getFeedVideoViewport(bottomInset: number) {
   };
 }
 
+/**
+ * Shared 9:16 media card for create camera + editor (screen coordinates).
+ * Top-aligned under the status bar — not vertically centred.
+ */
+export function getCreateMediaCardRect(insetsTop: number) {
+  const width = viewportWidth;
+  const height = width * (16 / 9);
+  return {
+    left: 0,
+    top: insetsTop,
+    width,
+    height,
+  };
+}
+
 export function getCreateCameraControlsBottom(navBarHeight: number) {
   return navBarHeight + CREATE_CAMERA_CONTROLS_BOTTOM_PADDING;
 }
@@ -32,8 +47,8 @@ export function getCreateCameraFilterSlideDistance(navBarHeight: number) {
 }
 
 export function clampTextOverlayCenterRatio(ratio: { x: number; y: number }) {
-  // Full edit canvas (including letterbox bars). Keep a thin inset so the
-  // overlay center stays on-screen while still allowing edge / bar placement.
+  // 9:16 edit canvas (including letterbox bars inside the card). Keep a thin
+  // inset so the overlay center stays on-canvas while still allowing edge placement.
   return { x: clamp(ratio.x, 0.02, 0.98), y: clamp(ratio.y, 0.02, 0.98) };
 }
 

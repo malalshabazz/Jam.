@@ -38,6 +38,9 @@ import {
   type Profile,
   type ReportReason,
 } from "@/lib/native-social-data";
+import { ensureVideoAspectCached } from "@/components/video/aspect-cache";
+import { prewarmProfileVideoSource } from "@/lib/profile-video-prewarm";
+import { prewarmSlideshowPost } from "@/lib/slideshow-prewarm";
 import { getCloudflareFreezeFrameUri, getFeedPosterSource, getVideoSource } from "@/lib/video-display";
 import type { SavedVideoController } from "@/types/app";
 import {
@@ -84,6 +87,13 @@ import { FeedRoleFilterWheel } from "@/components/discover/feed-role-filter-whee
 import { EndOfFeedState, getEndOfFeedCopy } from "@/components/discover/end-of-feed";
 import { FilterSheet } from "@/components/discover/filter-sheet";
 import { FeedItem } from "@/components/discover/feed-item";
+import { FeedProductTour } from "@/components/discover/feed-product-tour";
+import {
+  hasCompletedFeedProductTour,
+  markFeedProductTourComplete,
+  type FeedProductTourAnchor,
+  type FeedProductTourStep,
+} from "@/lib/feed-product-tour";
 
 export function DiscoverScreen({
   userId,
@@ -131,6 +141,10 @@ export function DiscoverScreen({
   const [reportSubmitting, setReportSubmitting] = useState(false);
   const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
   const [firstClipReady, setFirstClipReady] = useState(!showBootOverlay);
+  const [feedTourStep, setFeedTourStep] = useState<FeedProductTourStep | null>(null);
+  const [feedTourEligible, setFeedTourEligible] = useState(false);
+  const [filterTourAnchor, setFilterTourAnchor] = useState<FeedProductTourAnchor | null>(null);
+  const [jamTourAnchor, setJamTourAnchor] = useState<FeedProductTourAnchor | null>(null);
   const [initialBootComplete, setInitialBootComplete] = useState(!showBootOverlay);
   const [feedCursor, setFeedCursor] = useState<FeedCursor | null>(null);
   const [feedPhase, setFeedPhase] = useState<FeedPhase>("unseen");
@@ -157,6 +171,7 @@ export function DiscoverScreen({
   const feedReloadGenerationRef = useRef(0);
   const itemsRef = useRef<FeedVideo[]>([]);
   const listRef = useRef<FlatList<FeedVideo>>(null);
+  const filterTourButtonRef = useRef<View>(null);
   const feedQueryKeyRef = useRef<string | null>(null);
   const markedSeenVideoIdsRef = useRef<Set<string>>(new Set());
   const replayToastHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -319,6 +334,28 @@ export function DiscoverScreen({
   const handleFeedSpeedHoldEnd = useCallback(() => {
     setFeedSpeedHolding(false);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void hasCompletedFeedProductTour(userId).then((done) => {
+      if (active) setFeedTourEligible(!done);
+    });
+    return () => {
+      active = false;
+    };
+  }, [userId]);
+
+  const advanceFeedProductTour = useCallback(() => {
+    if (feedTourStep === "filter") {
+      restoreFeedChrome();
+      setFeedTourStep("jam");
+      return;
+    }
+    if (feedTourStep !== "jam") return;
+    setFeedTourStep(null);
+    setFeedTourEligible(false);
+    void markFeedProductTourComplete(userId);
+  }, [feedTourStep, restoreFeedChrome, userId]);
 
   useEffect(() => {
     if (filtersOpen || activeProfile || activeDm) {
@@ -1046,7 +1083,7 @@ export function DiscoverScreen({
           : [];
   const wasHoldingFilterBridgeRef = useRef(false);
 
-  // Warm neighbor posters so half-swipes paint immediately (no black VideoView).
+  // Warm neighbor posters, aspect, and HLS so the next swipe starts on frame 0.
   useEffect(() => {
     if (!activeVideoId || visibleFeed.length === 0) return;
     const activeIndex = visibleFeed.findIndex((item) => item.id === activeVideoId);
@@ -1056,6 +1093,12 @@ export function DiscoverScreen({
       if (!item) continue;
       const poster = getFeedPosterSource(item);
       if (poster) void Image.prefetch(poster);
+      void ensureVideoAspectCached(item);
+      if (item.mediaType === "slideshow") {
+        prewarmSlideshowPost(item);
+        continue;
+      }
+      prewarmProfileVideoSource(getVideoSource(item));
     }
   }, [activeVideoId, visibleFeed]);
 
@@ -1263,17 +1306,20 @@ export function DiscoverScreen({
   // still snaps by the list viewport, which is constrained to this same height.
   const feedItemHeight = viewportHeight - navBarHeight;
 
-  function updateActiveVideo(event: NativeSyntheticEvent<NativeScrollEvent>) {
-    const nextIndex = Math.round(event.nativeEvent.contentOffset.y / feedItemHeight);
+  function syncActiveVideoFromOffset(offsetY: number) {
+    const nextIndex = Math.round(offsetY / feedItemHeight);
     const safeIndex = Math.max(0, Math.min(nextIndex, visibleFeed.length - 1));
     const nextItem = visibleFeed[safeIndex];
-    if (nextItem) {
-      if (activeVideoId && activeVideoId !== nextItem.id) {
-        setUserPausedVideoId(null);
-      }
+    if (nextItem && nextItem.id !== activeVideoIdRef.current) {
+      setUserPausedVideoId(null);
       setActiveVideoId(nextItem.id);
       resumeFeedVideoIdRef.current = nextItem.id;
     }
+    return safeIndex;
+  }
+
+  function updateActiveVideo(event: NativeSyntheticEvent<NativeScrollEvent>) {
+    const safeIndex = syncActiveVideoFromOffset(event.nativeEvent.contentOffset.y);
     // Prefetch the next page before the end-of-feed footer, like TikTok.
     // Only hand off to replay when the user is actually near the last clips.
     if (safeIndex >= visibleFeed.length - 3) {
@@ -1283,11 +1329,19 @@ export function DiscoverScreen({
     }
   }
 
-  // Keep the feed playing under the jam compose sheet; pause for profiles/chats/filters.
-  // Keep the active clip playing under the filter sheet — only pause for
-  // full-screen routes / filter-wheel bridge holds.
-  const shouldPlayFeedVideos =
-    isFocused && !activeProfile && !suspendFeedVideo;
+  /** Finger-up can land mid-page; only commit if paging already settled. */
+  function handleFeedScrollEndDrag(event: NativeSyntheticEvent<NativeScrollEvent>) {
+    const velocityY = event.nativeEvent.velocity?.y ?? 0;
+    if (Math.abs(velocityY) > 0.05) return;
+    const offsetY = event.nativeEvent.contentOffset.y;
+    const snapped = Math.round(offsetY / feedItemHeight) * feedItemHeight;
+    if (Math.abs(offsetY - snapped) > 8) return;
+    updateActiveVideo(event);
+  }
+
+  // Keep the active clip mounted under a profile overlay or while another tab
+  // is focused. holdPlayback soft-pauses in place (no solid cover) and resumes
+  // without waiting for a new first-frame. Do not clear isActive (that remounts).
 
   // Remember the clip on blur; restore active id on focus without scrolling.
   // Forced scrollToOffset remounts the cell and flashes black over the video.
@@ -1334,7 +1388,28 @@ export function DiscoverScreen({
     onBootReady?.();
   }, [initialBootComplete, onBootReady, showFeedBootOverlay]);
 
-  const feedChromeInteractive = !feedChromeHolding && !feedChromeLocked;
+  const feedChromeInteractive = !feedChromeHolding && !feedChromeLocked && !feedTourStep;
+
+  useEffect(() => {
+    if (!feedTourEligible || feedTourStep || showFeedBootOverlay || !isFocused) return;
+    if (visibleFeed.length === 0 || !firstClipReady) return;
+    restoreFeedChrome();
+    const timer = setTimeout(() => {
+      filterTourButtonRef.current?.measureInWindow((x, y, width, height) => {
+        if (width > 0 && height > 0) setFilterTourAnchor({ x, y, width, height });
+      });
+      setFeedTourStep("filter");
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [
+    feedTourEligible,
+    feedTourStep,
+    firstClipReady,
+    isFocused,
+    restoreFeedChrome,
+    showFeedBootOverlay,
+    visibleFeed.length,
+  ]);
 
   return (
     <View style={darkStyles.feedRoot}>
@@ -1357,7 +1432,12 @@ export function DiscoverScreen({
           )}
         </Pressable>
         <FeedRoleFilterWheel selectedRoles={roles} onSelectRole={applyFeedFilterPill} />
-        <Pressable onPress={() => setFiltersOpen(true)} style={styles.feedFilterButton}>
+        <Pressable
+          ref={filterTourButtonRef}
+          onPress={() => setFiltersOpen(true)}
+          style={styles.feedFilterButton}
+          collapsable={false}
+        >
           <FeedFilterIcon />
         </Pressable>
       </Animated.View>
@@ -1378,7 +1458,7 @@ export function DiscoverScreen({
       {visibleFeed.length === 0 ? (
         searchingForFilterMatches ? (
           <View style={styles.endOfFeedFullscreen}>
-            <ActivityIndicator color={getActivityIndicatorColor()} />
+            <ActivityIndicator color="#fff" />
             <Text style={[styles.emptyText, { marginTop: 18 }]}>looking for creators...</Text>
           </View>
         ) : (
@@ -1391,8 +1471,8 @@ export function DiscoverScreen({
               })}
             </Text>
             {nearMeActive ? null : (
-              <Pressable style={styles.createNav} onPress={onCreate} accessibilityLabel="upload">
-                <Text style={styles.createNavText}>+</Text>
+              <Pressable style={darkStyles.createNav} onPress={onCreate} accessibilityLabel="upload">
+                <Text style={darkStyles.createNavText}>+</Text>
               </Pressable>
             )}
           </View>
@@ -1408,7 +1488,11 @@ export function DiscoverScreen({
             pagingEnabled
             directionalLockEnabled
             scrollEnabled={
-              !suspendFeedVideo && !feedModeSwitching && !feedChromeHolding && !feedSpeedHolding
+              !suspendFeedVideo &&
+              !feedModeSwitching &&
+              !feedChromeHolding &&
+              !feedSpeedHolding &&
+              !feedTourStep
             }
             decelerationRate="fast"
             disableIntervalMomentum
@@ -1428,6 +1512,7 @@ export function DiscoverScreen({
               index,
             })}
             showsVerticalScrollIndicator={false}
+            onScrollEndDrag={handleFeedScrollEndDrag}
             onMomentumScrollEnd={updateActiveVideo}
             onEndReached={() => {
               if (suspendFeedVideo || feedModeSwitching) return;
@@ -1451,8 +1536,11 @@ export function DiscoverScreen({
                 item={item}
                 height={feedItemHeight}
                 navBarHeight={0}
-                isActive={shouldPlayFeedVideos && item.id === activeVideoId}
+                isActive={!suspendFeedVideo && item.id === activeVideoId}
                 paused={userPausedVideoId === item.id}
+                holdPlayback={Boolean(
+                  (activeProfile || !isFocused) && item.id === activeVideoId,
+                )}
                 suspendVideo={suspendFeedVideo}
                 resumePositionSec={
                   resumePlayback?.videoId === item.id ? resumePlayback.positionSec : null
@@ -1491,6 +1579,24 @@ export function DiscoverScreen({
                 onNotInterested={() => hideFeedCreator(item)}
                 onBlock={() => blockFeedCreator(item)}
                 onReport={() => setReportItem(item)}
+                onJamButtonLayout={
+                  item.id === activeVideoId
+                    ? (layout) => {
+                        setJamTourAnchor((current) => {
+                          if (
+                            current &&
+                            Math.abs(current.x - layout.x) < 1 &&
+                            Math.abs(current.y - layout.y) < 1 &&
+                            current.width === layout.width &&
+                            current.height === layout.height
+                          ) {
+                            return current;
+                          }
+                          return layout;
+                        });
+                      }
+                    : undefined
+                }
               />
             )}
           />
@@ -1501,6 +1607,12 @@ export function DiscoverScreen({
           <LoadingScreen label="finding creators..." logoOnly />
         </View>
       ) : null}
+      <FeedProductTour
+        visible={Boolean(feedTourStep)}
+        step={feedTourStep ?? "filter"}
+        target={feedTourStep === "jam" ? jamTourAnchor : filterTourAnchor}
+        onAdvance={advanceFeedProductTour}
+      />
       <FilterSheet
         visible={filtersOpen}
         selectedRoles={roles}

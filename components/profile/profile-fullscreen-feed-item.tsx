@@ -3,7 +3,6 @@ import {
   ActivityIndicator,
   Animated,
   Easing,
-  Image,
   Modal,
   Pressable,
   StyleSheet,
@@ -16,23 +15,20 @@ import type {
 } from "react-native-gesture-handler";
 import { LinearGradient } from "expo-linear-gradient";
 import { type VideoContentFit } from "expo-video";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Avatar } from "@/components/ui/avatar";
 import { ProBadge } from "@/components/ui/badges";
 import { BookmarkIcon } from "@/components/icons/bookmark-icon";
 import { FeedChromeLockIcon } from "@/components/icons/feed-chrome-lock-icon";
 import { FeedPausedPlayIcon } from "@/components/icons/feed-paused-play-icon";
 import { JamJarIcon } from "@/components/icons/jam-jar-icon";
-import { LookingForIcon } from "@/components/icons/looking-for-icon";
+import { FeedLookingForRow } from "@/components/discover/feed-looking-for-row";
 import {
   contentFitForVideoSize,
-  ensureVideoAspectCached,
-  getRememberedVideoAspectSize,
-  getVideoAspectCacheKeyFromVideo,
-  rememberVideoAspectSize,
+  getVideoDisplaySize,
 } from "@/components/video/aspect-cache";
 import {
   JamVideoView,
-  PROFILE_VIDEO_OPEN_GREY,
   type JamVideoPlaybackStatus,
 } from "@/components/video/jam-video-view";
 import { JamSlideshowView } from "@/components/video/jam-slideshow-view";
@@ -43,14 +39,17 @@ import { triggerHoldHaptic } from "@/lib/hold-haptic";
 import type { FeedVideo, ProfileVideo } from "@/lib/native-social-data";
 import type { ProBadgeKind } from "@/lib/pro-entitlements";
 import {
+  getLookingForVideoTags,
   getProfileFullscreenTags,
   getVideoPresentation,
   hasSentJam,
   isPendingSentJam,
   profileVideoToFeedVideo,
 } from "@/lib/profile-mappers";
-import { getGridVideoSource, getFeedPosterSource } from "@/lib/video-display";
-import { getGridThumbnailCandidates, getVideoCaption } from "@/lib/video-thumbnails";
+import { LetterboxMediaShell } from "@/components/media/letterbox-media-shell";
+import { prefetchGridImage } from "@/components/media/cached-grid-image";
+import { getGridVideoSource } from "@/lib/video-display";
+import { getProfileFullscreenCoverUrl, getVideoCaption } from "@/lib/video-thumbnails";
 import { getActivityIndicatorColor, styles } from "@/theme/styles";
 import type { FeedPlaybackSpeed } from "@/types/app";
 import {
@@ -149,6 +148,7 @@ export function ProfileFullscreenFeedItem({
   swipeBackTranslateY?: Animated.Value;
   onSwipeBackStateChange?: (event: PanGestureHandlerStateChangeEvent) => void;
 }) {
+  const insets = useSafeAreaInsets();
   const source = getGridVideoSource(video);
   const feedItem = profileVideoToFeedVideo(video);
   const slideshowImages =
@@ -166,32 +166,45 @@ export function ProfileFullscreenFeedItem({
     ("audioUrl" in video ? video.audioUrl : null) ??
     ("audio_url" in video ? video.audio_url : null) ??
     null;
+  const slideshowAudioStartMs =
+    feedItem?.audioStartMs ??
+    ("audioStartMs" in video ? video.audioStartMs : null) ??
+    ("audio_start_ms" in video ? (video as { audio_start_ms?: number | null }).audio_start_ms : null) ??
+    null;
+  const slideshowAudioDurationMs =
+    feedItem?.audioDurationMs ??
+    ("audioDurationMs" in video ? video.audioDurationMs : null) ??
+    ("audio_duration_ms" in video
+      ? (video as { audio_duration_ms?: number | null }).audio_duration_ms
+      : null) ??
+    null;
   const presentation = getVideoPresentation(video);
   const lookingFor = Boolean(
     feedItem?.lookingFor ||
       ("lookingFor" in video && video.lookingFor) ||
       ("looking_for" in video && (video as { looking_for?: boolean | null }).looking_for),
   );
-  const aspectCacheKey = getVideoAspectCacheKeyFromVideo(video);
-  const rememberedAspect = getRememberedVideoAspectSize(aspectCacheKey);
+  const displaySize = getVideoDisplaySize(video);
   const [paused, setPaused] = useState(false);
   const [saved, setSaved] = useState(Boolean(video.savedByMe));
   const [menuOpen, setMenuOpen] = useState(false);
-  const [waitingForFirstPlay, setWaitingForFirstPlay] = useState(Boolean(source));
-  const [showLoadingCover, setShowLoadingCover] = useState(Boolean(source));
+  const [waitingForFirstPlay, setWaitingForFirstPlay] = useState(
+    isSlideshow ? false : Boolean(source),
+  );
+  const [showLoadingCover, setShowLoadingCover] = useState(
+    isSlideshow ? false : Boolean(source),
+  );
   const [showWaitingSpinner, setShowWaitingSpinner] = useState(false);
-  const [posterFailed, setPosterFailed] = useState(false);
-  const posterUri = useMemo(() => {
-    if (feedItem) return getFeedPosterSource(feedItem);
-    return getGridThumbnailCandidates(video)[0] ?? null;
-  }, [feedItem, video]);
+  const loadingPreviewUri = useMemo(() => getProfileFullscreenCoverUrl(video), [
+    video.id,
+    slideshowImages[0],
+    isSlideshow,
+  ]);
   const [mediaContentFit, setMediaContentFit] = useState<VideoContentFit>(() =>
-    contentFitForVideoSize(rememberedAspect?.width, rememberedAspect?.height),
+    contentFitForVideoSize(displaySize?.width, displaySize?.height),
   );
   const [heartScale] = useState(() => new Animated.Value(1));
   const [jamShake] = useState(() => new Animated.Value(0));
-  const loadingCoverOpacity = useRef(new Animated.Value(1)).current;
-  /** Window Y of the top of own-video meta (avatar row); taps at/below ignore pause. */
   const ownMetaTopPageYRef = useRef<number | null>(null);
   const ownMetaMeasureRef = useRef<View>(null);
   const chromeHoldingRef = useRef(false);
@@ -218,6 +231,7 @@ export function ProfileFullscreenFeedItem({
   const pendingJam = Boolean(feedItem && isPendingSentJam(feedItem));
   const caption = getVideoCaption(video);
   const tags = getProfileFullscreenTags(video);
+  const lookingForTags = getLookingForVideoTags(video);
   const showModerationMenu = Boolean(onNotInterested && onBlock && onReport);
   const chromeInteractive = !chromeHolding && !chromeLocked;
   const overlayOpacity = chromeOpacity ?? 1;
@@ -229,55 +243,57 @@ export function ProfileFullscreenFeedItem({
   useEffect(() => {
     setPaused(false);
     setMenuOpen(false);
-    setWaitingForFirstPlay(Boolean(source));
-    setShowLoadingCover(Boolean(source));
+    setWaitingForFirstPlay(isSlideshow ? false : Boolean(source));
+    setShowLoadingCover(isSlideshow ? false : Boolean(source));
     setShowWaitingSpinner(false);
-    setPosterFailed(false);
     ownMetaTopPageYRef.current = null;
-    loadingCoverOpacity.stopAnimation();
-    loadingCoverOpacity.setValue(1);
-    const cached = getRememberedVideoAspectSize(getVideoAspectCacheKeyFromVideo(video));
-    setMediaContentFit(contentFitForVideoSize(cached?.width, cached?.height));
+    const nextSize = getVideoDisplaySize(video);
+    setMediaContentFit(contentFitForVideoSize(nextSize?.width, nextSize?.height));
     speedIndexRef.current = FEED_SPEED_DEFAULT_INDEX;
     setSpeedIndex(FEED_SPEED_DEFAULT_INDEX);
     setPlaybackRate(1);
     speedHudOpacity.setValue(0);
-  }, [loadingCoverOpacity, source, speedHudOpacity, video.id]);
+  }, [isSlideshow, source, speedHudOpacity, video.id]);
 
   useEffect(() => {
-    setPosterFailed(false);
-    if (posterUri) void Image.prefetch(posterUri);
-  }, [posterUri]);
+    if (loadingPreviewUri) void prefetchGridImage(loadingPreviewUri);
+  }, [loadingPreviewUri]);
 
   useEffect(() => {
-    if (!isActive || paused || !source || !waitingForFirstPlay) {
+    if (!isActive || paused || !source || isSlideshow || !waitingForFirstPlay) {
       setShowWaitingSpinner(false);
       return;
     }
     const timer = setTimeout(() => setShowWaitingSpinner(true), 800);
     return () => clearTimeout(timer);
-  }, [isActive, paused, source, waitingForFirstPlay]);
+  }, [isActive, isSlideshow, paused, source, waitingForFirstPlay]);
 
   const greyRevealedRef = useRef(false);
+  const wasActiveRef = useRef(isActive);
 
   useEffect(() => {
     greyRevealedRef.current = false;
   }, [video.id, source]);
+
+  useEffect(() => {
+    const becameInactive = !isActive && wasActiveRef.current;
+    wasActiveRef.current = isActive;
+
+    if (becameInactive) {
+      greyRevealedRef.current = false;
+      if (!isSlideshow) {
+        setShowLoadingCover(true);
+        setWaitingForFirstPlay(Boolean(source));
+      }
+    }
+  }, [isActive, isSlideshow, source]);
 
   function revealFirstFrameFromGrey() {
     if (greyRevealedRef.current) return;
     greyRevealedRef.current = true;
     setWaitingForFirstPlay(false);
     setShowWaitingSpinner(false);
-    loadingCoverOpacity.stopAnimation();
-    Animated.timing(loadingCoverOpacity, {
-      toValue: 0,
-      duration: 200,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
-      if (finished) setShowLoadingCover(false);
-    });
+    setShowLoadingCover(false);
   }
 
   useEffect(() => {
@@ -578,7 +594,7 @@ export function ProfileFullscreenFeedItem({
 
   return (
     <Pressable
-      style={{ height, width: viewportWidth, backgroundColor: "#09090b" }}
+      style={{ height, width: viewportWidth, backgroundColor: "#000" }}
       onPress={handleProfilePress}
       onPressIn={(event) =>
         handleProfileTouchStart(event.nativeEvent.locationX, event.nativeEvent.pageY)
@@ -589,12 +605,21 @@ export function ProfileFullscreenFeedItem({
       onPressOut={handleProfileTouchEnd}
       delayLongPress={FEED_CHROME_HOLD_MS + 400}
     >
-      <View style={[videoFrameStyle, { backgroundColor: "#09090b" }]}>
+      <LetterboxMediaShell
+        loaded={isSlideshow || !showLoadingCover}
+        previewUri={isSlideshow ? null : loadingPreviewUri}
+        overlayFadeMs={0}
+        style={videoFrameStyle}
+      >
         {isSlideshow && slideshowImages.length > 0 ? (
           <>
             <JamSlideshowView
               imageUrls={slideshowImages as string[]}
               audioUrl={typeof slideshowAudio === "string" ? slideshowAudio : null}
+              audioStartMs={typeof slideshowAudioStartMs === "number" ? slideshowAudioStartMs : null}
+              audioDurationMs={
+                typeof slideshowAudioDurationMs === "number" ? slideshowAudioDurationMs : null
+              }
               shouldPlay={isActive && !paused}
               isActive={isActive}
               style={StyleSheet.absoluteFill}
@@ -605,30 +630,15 @@ export function ProfileFullscreenFeedItem({
               swipeBackTranslateY={swipeBackTranslateY}
               onSwipeBackStateChange={onSwipeBackStateChange}
             />
+            <VideoPresentationOverlays
+              filter={presentation.filter}
+              textOverlays={presentation.textOverlays}
+              contentTopInset={insets.top}
+            />
             {isActive && paused ? (
-              <View pointerEvents="none" style={styles.feedPausedPlayOverlay}>
+              <View pointerEvents="none" style={[styles.feedPausedPlayOverlay, { top: insets.top }]}>
                 <FeedPausedPlayIcon />
               </View>
-            ) : null}
-            {showLoadingCover ? (
-              <Animated.View
-                pointerEvents="none"
-                style={[
-                  StyleSheet.absoluteFill,
-                  { backgroundColor: "#09090b", opacity: loadingCoverOpacity },
-                ]}
-              >
-                {posterUri && !posterFailed ? (
-                  <Image
-                    source={{ uri: posterUri }}
-                    style={StyleSheet.absoluteFill}
-                    resizeMode={mediaContentFit === "contain" ? "contain" : "cover"}
-                    onError={() => setPosterFailed(true)}
-                  />
-                ) : (
-                  <View style={[StyleSheet.absoluteFill, { backgroundColor: PROFILE_VIDEO_OPEN_GREY }]} />
-                )}
-              </Animated.View>
             ) : null}
           </>
         ) : source ? (
@@ -638,16 +648,16 @@ export function ProfileFullscreenFeedItem({
               source={source}
               style={StyleSheet.absoluteFill}
               contentFit={mediaContentFit}
-              knownWidth={rememberedAspect?.width ?? null}
-              knownHeight={rememberedAspect?.height ?? null}
+              knownWidth={displaySize?.width ?? null}
+              knownHeight={displaySize?.height ?? null}
               shouldPlay={isActive && !paused}
               isLooping
               isMuted={!isActive || paused}
               volume={isActive && !paused ? 1 : 0}
               playbackRate={playbackRate}
-              // Match Discover: only cover with a thumb when scrolling away —
-              // tap-pause must keep the live decoded frame (CF thumb was black-flashing).
-              showFreezeFrameOnPause={!isActive}
+              whenPaused={isActive ? "pause" : "restart"}
+              posterUri={loadingPreviewUri}
+              timeUpdateIntervalSec={0.1}
               adoptPrewarmed={isActive}
               onFirstFrameRender={revealFirstFrameFromGrey}
               onContentFitChange={setMediaContentFit}
@@ -661,26 +671,6 @@ export function ProfileFullscreenFeedItem({
                 <FeedPausedPlayIcon />
               </View>
             ) : null}
-            {showLoadingCover ? (
-              <Animated.View
-                pointerEvents="none"
-                style={[
-                  StyleSheet.absoluteFill,
-                  { backgroundColor: "#09090b", opacity: loadingCoverOpacity },
-                ]}
-              >
-                {posterUri && !posterFailed ? (
-                  <Image
-                    source={{ uri: posterUri }}
-                    style={StyleSheet.absoluteFill}
-                    resizeMode={mediaContentFit === "contain" ? "contain" : "cover"}
-                    onError={() => setPosterFailed(true)}
-                  />
-                ) : (
-                  <View style={[StyleSheet.absoluteFill, { backgroundColor: PROFILE_VIDEO_OPEN_GREY }]} />
-                )}
-              </Animated.View>
-            ) : null}
           </>
         ) : (
           <View style={[StyleSheet.absoluteFill, styles.videoPlaceholder]}>
@@ -689,9 +679,9 @@ export function ProfileFullscreenFeedItem({
             <Text style={styles.helper}>video unavailable</Text>
           </View>
         )}
-      </View>
+      </LetterboxMediaShell>
 
-      {source && showWaitingSpinner ? (
+      {source && !isSlideshow && showWaitingSpinner ? (
         <View pointerEvents="none" style={styles.videoBufferingIndicator}>
           <ActivityIndicator color="#fff" />
         </View>
@@ -823,14 +813,14 @@ export function ProfileFullscreenFeedItem({
               </Text>
             </View>
           </View>
-          {lookingFor || caption ? (
+          <FeedLookingForRow
+            lookingFor={lookingFor}
+            roles={lookingForTags.roles}
+            genres={lookingForTags.genres}
+          />
+          {caption ? (
             <View style={styles.feedCaptionRow}>
-              {lookingFor ? (
-                <View style={styles.feedLookingForIcon} accessibilityLabel="looking for collaborators">
-                  <LookingForIcon active size={19} shadow />
-                </View>
-              ) : null}
-              {caption ? <Text style={[styles.caption, styles.feedCaptionText]}>{caption}</Text> : null}
+              <Text style={[styles.caption, styles.feedCaptionText]}>{caption}</Text>
             </View>
           ) : null}
           {tags.length > 0 ? (

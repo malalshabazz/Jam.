@@ -13,6 +13,7 @@ import React, {
 import {
   Animated,
   Easing,
+  FlatList,
   ScrollView,
   Text,
   View,
@@ -70,6 +71,16 @@ export type ProfileScrollFadeHandle = {
   }) => Promise<void>;
 };
 
+/** Chrome passed through so VideoGrid can own the page FlatList (needed to virtualize). */
+export type ProfileListAttach = {
+  listRef: React.RefObject<FlatList<unknown> | null>;
+  onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  scrollEventThrottle: number;
+  ListHeaderComponent: React.ReactElement;
+  scrollEnabled?: boolean;
+  onScrollBeginDrag?: ScrollViewProps["onScrollBeginDrag"];
+};
+
 export const ProfileTopScrollFade = forwardRef<
   ProfileScrollFadeHandle,
   {
@@ -82,6 +93,8 @@ export const ProfileTopScrollFade = forwardRef<
       right?: React.ReactNode;
     };
     onCollapseChange?: (collapsed: boolean) => void;
+    /** When set, children are the list header and this renders the virtualized grid scroller. */
+    renderList?: (list: ProfileListAttach) => React.ReactNode;
   } & Omit<ScrollViewProps, "contentContainerStyle" | "children" | "onScroll"> & {
     onScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
   }
@@ -92,6 +105,7 @@ export const ProfileTopScrollFade = forwardRef<
     children,
     collapsedHeader,
     onCollapseChange,
+    renderList,
     onScroll,
     ...scrollProps
   },
@@ -99,6 +113,7 @@ export const ProfileTopScrollFade = forwardRef<
 ) {
   const contentRef = useRef<View>(null);
   const scrollRef = useRef<ScrollView>(null);
+  const listRef = useRef<FlatList<unknown> | null>(null);
   const scrollYRef = useRef(0);
   const showCollapsedRef = useRef(false);
   const [nameEndY, setNameEndY] = useState(0);
@@ -124,7 +139,11 @@ export const ProfileTopScrollFade = forwardRef<
           return Promise.resolve();
         }
         const nextY = Math.max(0, scrollYRef.current + delta);
-        scrollRef.current?.scrollTo({ y: nextY, animated: true });
+        if (listRef.current) {
+          listRef.current.scrollToOffset({ offset: nextY, animated: true });
+        } else {
+          scrollRef.current?.scrollTo({ y: nextY, animated: true });
+        }
         return new Promise((resolve) => {
           setTimeout(resolve, 280);
         });
@@ -219,17 +238,32 @@ export const ProfileTopScrollFade = forwardRef<
             </View>
           </Animated.View>
         ) : null}
-        <ScrollView
-          ref={scrollRef}
-          {...scrollProps}
-          onScroll={handleScroll}
-          scrollEventThrottle={scrollProps.scrollEventThrottle ?? 16}
-          showsVerticalScrollIndicator={scrollProps.showsVerticalScrollIndicator ?? false}
-        >
-          <View ref={contentRef} collapsable={false} style={contentContainerStyle}>
-            {children}
-          </View>
-        </ScrollView>
+        {renderList ? (
+          renderList({
+            listRef,
+            onScroll: handleScroll,
+            scrollEventThrottle: scrollProps.scrollEventThrottle ?? 16,
+            scrollEnabled: scrollProps.scrollEnabled,
+            onScrollBeginDrag: scrollProps.onScrollBeginDrag,
+            ListHeaderComponent: (
+              <View ref={contentRef} collapsable={false} style={contentContainerStyle}>
+                {children}
+              </View>
+            ),
+          })
+        ) : (
+          <ScrollView
+            ref={scrollRef}
+            {...scrollProps}
+            onScroll={handleScroll}
+            scrollEventThrottle={scrollProps.scrollEventThrottle ?? 16}
+            showsVerticalScrollIndicator={scrollProps.showsVerticalScrollIndicator ?? false}
+          >
+            <View ref={contentRef} collapsable={false} style={contentContainerStyle}>
+              {children}
+            </View>
+          </ScrollView>
+        )}
         <LinearGradient
           pointerEvents="none"
           colors={

@@ -22,7 +22,7 @@ import {
 } from "@/lib/location-filter";
 import { useLocationSearch } from "@/lib/use-location-search";
 import { viewportHeight } from "@/theme/tokens";
-import { darkStyles, styles } from "@/theme/styles";
+import { styles } from "@/theme/styles";
 import type { LocationFilterSelection } from "@/types/app";
 import { ChipRow } from "@/components/ui/chip-row";
 import { LocationSearchResults } from "@/components/ui/location-search-results";
@@ -317,10 +317,10 @@ export function FilterSheet({
                 style={styles.filterLookingForControl}
                 onPress={() => setLookingForDraft((current) => !current)}
                 accessibilityRole="button"
-                accessibilityLabel="looking for collaborators"
+                accessibilityLabel="filter by what creators are looking for"
                 accessibilityState={{ selected: lookingForDraft }}
               >
-                <Text style={styles.filterLookingForLabel}>looking for?</Text>
+                <Text style={styles.filterLookingForLabel}>filter by what creators are looking for</Text>
                 <View
                   style={[
                     styles.filterLookingForIconSlot,
@@ -352,7 +352,7 @@ export function FilterSheet({
                 ensureSectionVisible("role", Platform.OS === "ios" ? 280 : 120);
               }}
             />
-            <SuggestionList items={roleMatches} maxVisibleItems={3} onPick={(role) => {
+            <SuggestionList flush items={roleMatches} maxVisibleItems={3} onPick={(role) => {
               setRoles((current) => [...current, role]);
               setRoleQuery("");
             }} />
@@ -379,7 +379,7 @@ export function FilterSheet({
                   ensureSectionVisible("genre", Platform.OS === "ios" ? 280 : 120);
                 }}
               />
-              <SuggestionList items={genreMatches} maxVisibleItems={3} onPick={(genre) => {
+              <SuggestionList flush items={genreMatches} maxVisibleItems={3} onPick={(genre) => {
                 setGenres((current) => [...current, genre]);
                 setGenreQuery("");
               }} />
@@ -407,13 +407,11 @@ export function FilterSheet({
               }}
             />
             <LocationSearchResults
+              flush
               query={locationQuery}
               results={locationResults}
               status={locationSearchStatus}
               onPick={addLocationPlace}
-              listStyle={darkStyles.locationFilterList}
-              rowStyle={darkStyles.locationOptionRow}
-              textStyle={darkStyles.locationCountryText}
             />
             <Text style={styles.helper}>
               {selectedLocationCount === 0

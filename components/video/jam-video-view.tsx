@@ -1,4 +1,5 @@
 import { useEventListener } from "expo";
+import { Image } from "expo-image";
 import {
   VideoView,
   useVideoPlayer,
@@ -6,12 +7,13 @@ import {
   type VideoPlayer,
   type VideoPlayerStatus,
   type VideoSource,
+  type VideoThumbnail,
 } from "expo-video";
 import { getThumbnailAsync } from "expo-video-thumbnails";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  Animated,
   AppState,
-  Image,
   Platform,
   StyleSheet,
   View,
@@ -21,11 +23,20 @@ import {
 } from "react-native";
 
 import {
+  CachedCoverImage,
+  prefetchGridImage,
+} from "@/components/media/cached-grid-image";
+import { MEDIA_LETTERBOX_BLACK } from "@/components/media/letterbox-media-shell";
+import {
   contentFitForVideoSize,
   ensureVideoAspectCached,
   getRememberedVideoAspectSize,
   getVideoAspectCacheKeyFromSource,
   getVideoAspectCacheKeyFromVideo,
+  isPortraitFillVideoSize,
+  letterboxVideoFrameStyle,
+  parsePositiveDisplaySize,
+  probeVideoDisplaySize,
   rememberVideoAspectSize,
 } from "@/components/video/aspect-cache";
 import { clamp } from "@/lib/format";
@@ -35,11 +46,13 @@ import {
   adoptPrewarmedProfileVideoPlayer,
   prewarmProfileVideoSource,
 } from "@/lib/profile-video-prewarm";
+import { isSlideshowPost, prewarmSlideshowPost } from "@/lib/slideshow-prewarm";
 import {
   getCloudflareFreezeFrameUri,
   getExpoVideoSource,
   getGridVideoSource,
 } from "@/lib/video-display";
+import { getProfileFullscreenCoverUrl } from "@/lib/video-thumbnails";
 
 export type JamVideoPlaybackStatus = {
   isLoaded: boolean;
@@ -49,14 +62,19 @@ export type JamVideoPlaybackStatus = {
   status: VideoPlayerStatus;
 };
 
-/** Open profile fullscreen; warm aspect cache without blocking the open. */
+/** Open profile fullscreen; warm a sharp first-frame cover without blocking the open. */
 export function openProfileVideoFullscreen(
   video: ProfileVideo | FeedVideo,
   open: () => void,
 ) {
   const source = getGridVideoSource(video);
-  // Kick prewarm if the thumb became visible but pool entry isn't ready yet.
-  prewarmProfileVideoSource(source);
+  const cover = getProfileFullscreenCoverUrl(video);
+  if (cover) void prefetchGridImage(cover);
+  if (isSlideshowPost(video)) {
+    prewarmSlideshowPost(video);
+  } else {
+    prewarmProfileVideoSource(source);
+  }
   if (!getRememberedVideoAspectSize(getVideoAspectCacheKeyFromVideo(video))) {
     void ensureVideoAspectCached(video);
   }
@@ -65,6 +83,79 @@ export function openProfileVideoFullscreen(
 
 export const PROFILE_VIDEO_OPEN_GREY = "#3f3f46";
 
+function feedHoldLogId(source: string | null) {
+  if (!source) return "none";
+  const bare = source.split("?")[0] ?? source;
+  const parts = bare.split("/");
+  return parts[parts.length - 1] || bare.slice(-24);
+}
+
+function logFeedHold(payload: Record<string, unknown>) {
+  if (__DEV__) {
+    console.log("[feed-hold]", payload);
+  }
+}
+
+type HoldStillKind = "midclip" | "poster" | "last" | "none";
+
+function describeHoldStill(
+  still: string | VideoThumbnail | null,
+  midClipUri: string | null,
+  posterUri: string | null | undefined,
+  lastLoadedUri: string | null,
+  loadedUris: Set<string>,
+): { kind: HoldStillKind; loaded: boolean } {
+  if (still == null) return { kind: "none", loaded: false };
+  if (typeof still !== "string") return { kind: "midclip", loaded: true };
+  if (midClipUri && still === midClipUri) {
+    return { kind: "midclip", loaded: loadedUris.has(still) };
+  }
+  if (posterUri && still === posterUri) {
+    return { kind: "poster", loaded: loadedUris.has(still) };
+  }
+  if (lastLoadedUri && still === lastLoadedUri) {
+    return { kind: "last", loaded: loadedUris.has(still) };
+  }
+  return {
+    kind: loadedUris.has(still) ? "last" : "none",
+    loaded: loadedUris.has(still),
+  };
+}
+
+/** Still shown over VideoView until a real frame paints — never leave a black hole. */
+function pickStillUri(
+  source: string | null,
+  posterUri: string | null | undefined,
+  timeSec = 0,
+) {
+  // Prefer the stable t=0 poster. Mid-clip Cloudflare thumbs are unique
+  // per timestamp and paint black until they download.
+  if (timeSec <= 0.2 && posterUri) return posterUri;
+  if (source && timeSec > 0.2) {
+    const freeze = getCloudflareFreezeFrameUri(source, timeSec);
+    if (freeze) return freeze;
+  }
+  if (posterUri) return posterUri;
+  if (source) return getCloudflareFreezeFrameUri(source, 0);
+  return null;
+}
+
+/** Unmute only in the same tick as play() + cover drop. Never play muted. */
+function applyVisibleAudio(
+  player: VideoPlayer,
+  isMuted: boolean,
+  volume: number,
+  surfaceReady: boolean,
+) {
+  const silent = isMuted || !surfaceReady;
+  try {
+    player.muted = silent;
+    player.volume = silent ? 0 : volume;
+  } catch {
+    /* native object already gone */
+  }
+}
+
 function configureJamVideoPlayer(
   nextPlayer: VideoPlayer,
   options: {
@@ -72,13 +163,18 @@ function configureJamVideoPlayer(
     isMuted: boolean;
     volume: number;
     timeUpdateIntervalSec: number;
+    surfaceReady?: boolean;
   },
 ) {
   nextPlayer.loop = options.isLooping;
-  nextPlayer.muted = options.isMuted;
-  nextPlayer.volume = options.volume;
   nextPlayer.timeUpdateEventInterval = options.timeUpdateIntervalSec;
   nextPlayer.audioMixingMode = "duckOthers";
+  applyVisibleAudio(
+    nextPlayer,
+    options.isMuted,
+    options.volume,
+    options.surfaceReady ?? false,
+  );
   // Never keep audio alive after navigate-away / app background. Playback is
   // resumed explicitly when the surface is active again.
   nextPlayer.staysActiveInBackground = false;
@@ -104,6 +200,41 @@ function playJamVideoPlayerWhenReady(player: VideoPlayer) {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Feed swipes start at t=0 so the incoming clip matches its start-frame cover. */
+function parkJamVideoPlayerAtStart(player: VideoPlayer) {
+  try {
+    if (player.currentTime > 0.05) {
+      player.currentTime = 0;
+    }
+  } catch {
+    /* native object already gone */
+  }
+}
+
+/** Seek without playing — keep the still up until beginVisiblePlayback. */
+function restoreJamVideoPosition(
+  player: VideoPlayer,
+  restoreSec?: number | null,
+) {
+  let current = 0;
+  try {
+    current = player.currentTime;
+  } catch {
+    current = 0;
+  }
+  if (current <= 0.2) {
+    if (restoreSec != null && restoreSec > 0.2) {
+      try {
+        player.currentTime = restoreSec;
+      } catch {
+        /* native object already gone */
+      }
+    } else {
+      parkJamVideoPlayerAtStart(player);
+    }
   }
 }
 
@@ -140,7 +271,7 @@ function stopJamVideoPlayer(
 export function JamVideoView({
   source,
   style,
-  contentFit = "cover",
+  contentFit = "contain",
   knownWidth = null,
   knownHeight = null,
   shouldPlay,
@@ -156,9 +287,9 @@ export function JamVideoView({
   resumePositionSec = null,
   timeUpdateIntervalSec = 0.25,
   adoptPrewarmed = false,
-  /** Cover with a thumbnail when pausing (scroll-away). Off for in-place user pause. */
-  showFreezeFrameOnPause = true,
-  surfaceColor = "#09090b",
+  whenPaused = "pause",
+  posterUri = null,
+  surfaceColor = PROFILE_VIDEO_OPEN_GREY,
   onDurationResolved,
   onPlaybackStatusUpdate,
   onFirstFrameRender,
@@ -190,10 +321,13 @@ export function JamVideoView({
   /** Reuse a grid-prewarmed player so the first frame can paint immediately. */
   adoptPrewarmed?: boolean;
   /**
-   * When true (default), pausing captures a Cloudflare thumb cover — good for
-   * scroll-away. When false, leave the live decoded frame (user tap-to-pause).
+   * `restart` — swipe away, park at 0 under a still.
+   * `hold` — profile/tab leave: pause in place (no solid cover); resume without waiting for first-frame.
+   * `pause` — tap-pause, keep the live frame (a still flashes black).
    */
-  showFreezeFrameOnPause?: boolean;
+  whenPaused?: "restart" | "hold" | "pause";
+  /** Fallback still when Cloudflare freeze frames are not available. */
+  posterUri?: string | null;
   surfaceColor?: string;
   onDurationResolved?: (durationMs: number) => void;
   onPlaybackStatusUpdate?: (status: JamVideoPlaybackStatus) => void;
@@ -204,8 +338,12 @@ export function JamVideoView({
   const videoSource = useMemo<VideoSource>(() => getExpoVideoSource(source), [source]);
   const aspectCacheKey = getVideoAspectCacheKeyFromSource(source);
   const rememberedSize = getRememberedVideoAspectSize(aspectCacheKey);
-  const seedWidth = knownWidth ?? rememberedSize?.width ?? null;
-  const seedHeight = knownHeight ?? rememberedSize?.height ?? null;
+  const seedSize = parsePositiveDisplaySize(
+    knownWidth ?? rememberedSize?.width,
+    knownHeight ?? rememberedSize?.height,
+  );
+  const seedWidth = seedSize?.width ?? null;
+  const seedHeight = seedSize?.height ?? null;
   const onPlaybackStatusUpdateRef = useRef(onPlaybackStatusUpdate);
   const onDurationResolvedRef = useRef(onDurationResolved);
   const onFirstFrameRenderRef = useRef(onFirstFrameRender);
@@ -213,6 +351,13 @@ export function JamVideoView({
   const [resolvedContentFit, setResolvedContentFit] = useState<VideoContentFit>(() =>
     contentFitForVideoSize(seedWidth, seedHeight, contentFit),
   );
+  const [resolvedVideoSize, setResolvedVideoSize] = useState<{ width: number; height: number } | null>(
+    () => seedSize,
+  );
+  const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 });
+  /** Rotation-applied frame size. iOS screen recordings are often portrait-coded. */
+  const displayOrientedSizeRef = useRef<{ width: number; height: number } | null>(seedSize);
+  const displayProbeSettledRef = useRef(Boolean(seedSize));
   const trimStartRatioRef = useRef(trimStartRatio ?? 0);
   const trimEndRatioRef = useRef(trimEndRatio ?? 1);
   const scrubToRatioRef = useRef<number | null>(scrubToRatio ?? null);
@@ -227,19 +372,61 @@ export function JamVideoView({
   const resumeConfirmRafRef = useRef<number | null>(null);
   const onResumePositionAppliedRef = useRef(onResumePositionApplied);
   const shouldPlayRef = useRef(shouldPlay);
+  const isMutedRef = useRef(isMuted);
+  const volumeRef = useRef(volume);
+  /** True once VideoView has painted — safe to unmute. Playback still starts at t=0. */
+  const surfaceReadyRef = useRef(false);
   const mountedRef = useRef(true);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const freezePositionRef = useRef<number | null>(null);
+  /** Last in-place pause time so tab return / tap-unpause can restore if native currentTime dropped. */
+  const heldPauseSecRef = useRef<number | null>(null);
+  /** Soft hold (profile/tab): paused AVPlayerLayer stays visible; no solid-colour cover. */
+  const softHoldActiveRef = useRef(false);
+  /** Soft-hold overlay is covering VideoView (hold + return until fade-clear). */
+  const holdOverlayActiveRef = useRef(false);
+  const holdThumbGenRef = useRef(0);
   const freezeCaptureIdRef = useRef(0);
   const wasScrubbingRef = useRef(false);
   const durationReportedRef = useRef(false);
-  const [freezeFrameUri, setFreezeFrameUri] = useState<string | null>(() => {
-    // Cover immediately on filter restore so remount never flashes black / start poster.
-    if (!source || resumePositionSec == null || resumePositionSec <= 0.05) return null;
-    return getCloudflareFreezeFrameUri(source, resumePositionSec);
+  const whenPausedRef = useRef(whenPaused);
+  const posterUriRef = useRef(posterUri);
+  const [freezeFrameUri, setFreezeFrameUri] = useState<string | null>(() =>
+    pickStillUri(source, posterUri, 0),
+  );
+  const [coverPosterFailed, setCoverPosterFailed] = useState(false);
+  const [coverFreezeFailed, setCoverFreezeFailed] = useState(false);
+  const [coverHeld, setCoverHeld] = useState(true);
+  /** Soft-hold safety still — overlay above VideoView (never a bare colour). */
+  const [holdFreezeSource, setHoldFreezeSource] = useState<string | VideoThumbnail | null>(null);
+  const [holdOverlayOpacity] = useState(() => new Animated.Value(1));
+  const holdFadeAnimRef = useRef<Animated.CompositeAnimation | null>(null);
+  const loadedStillUrisRef = useRef(new Set<string>());
+  const lastLoadedStillUriRef = useRef<string | null>(null);
+  /** Soft-hold overlay fades once playback passes this time (heldSec + 0.15). */
+  const holdOverlayClearAfterSecRef = useRef<number | null>(null);
+  /** Set on soft-hold return; used for progress/failsafe clear (never time-alone). */
+  const holdReturnPendingClearRef = useRef(false);
+  const holdReturnAtMsRef = useRef<number | null>(null);
+  const holdReturnHeldSecRef = useRef<number | null>(null);
+  const holdReturnFirstFrameSeenRef = useRef(false);
+  const holdReturnLoggedRef = useRef(false);
+  const firstFrameCountBySourceRef = useRef(0);
+  const holdShowingStillRef = useRef<{ kind: HoldStillKind; loaded: boolean }>({
+    kind: "none",
+    loaded: false,
   });
-  const firstFrameClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stillAdoptGenRef = useRef(0);
   const firstFrameNotifiedRef = useRef(false);
+  /** VideoView has painted at least one frame into this surface. */
+  const hasPaintedFrameRef = useRef(false);
+  /**
+   * This player already decoded a frame for the current source.
+   * Survives pause / restart / hold — reset only when source or player changes.
+   */
+  const hasDecodedFrameRef = useRef(false);
+  /** Native first-frame arrived while we were not allowed to drop the cover yet. */
+  const paintedFramePendingRevealRef = useRef(false);
   const playbackStatusRef = useRef<JamVideoPlaybackStatus>({
     isLoaded: false,
     isBuffering: Boolean(source),
@@ -260,8 +447,11 @@ export function JamVideoView({
         volume,
         timeUpdateIntervalSec,
       });
-      // Prewarm players buffer muted from 0 — ensure we start clean for fullscreen.
-      adopted.currentTime = 0;
+      // Prewarm players already buffer from 0. Seeking here blanks the
+      // VideoView and flashes black under the open still.
+      if (adopted.currentTime > 0.05) {
+        adopted.currentTime = 0;
+      }
     } catch {
       /* native configure can fail if the entry was already torn down */
     }
@@ -288,6 +478,7 @@ export function JamVideoView({
         isMuted,
         volume,
         timeUpdateIntervalSec,
+        surfaceReady: surfaceReadyRef.current,
       });
     } catch {
       /* native object already gone */
@@ -302,6 +493,15 @@ export function JamVideoView({
     return () => {
       mountedRef.current = false;
       shouldPlayRef.current = false;
+      holdFadeAnimRef.current?.stop();
+      holdFadeAnimRef.current = null;
+      holdOverlayClearAfterSecRef.current = null;
+      holdReturnPendingClearRef.current = false;
+      holdReturnAtMsRef.current = null;
+      holdReturnHeldSecRef.current = null;
+      holdReturnFirstFrameSeenRef.current = false;
+      holdReturnLoggedRef.current = false;
+      holdOverlayActiveRef.current = false;
       stopJamVideoPlayer(player, { clearSource: true });
       if (prewarmedPlayer) {
         try {
@@ -315,40 +515,444 @@ export function JamVideoView({
 
   const hasTrim =
     (trimStartRatio ?? 0) > 0.001 || (trimEndRatio ?? 1) < 0.999;
-  const prevShouldPlayRef = useRef(shouldPlay);
 
-  const revealAfterFirstFrame = useCallback(() => {
-    if (firstFrameClearTimeoutRef.current) {
-      clearTimeout(firstFrameClearTimeoutRef.current);
+  const markStillLoaded = useCallback((uri: string) => {
+    loadedStillUrisRef.current.add(uri);
+    lastLoadedStillUriRef.current = uri;
+  }, []);
+
+  const adoptStillUri = useCallback((uri: string | null, immediate: boolean) => {
+    if (!uri) return;
+    if (immediate || loadedStillUrisRef.current.has(uri)) {
+      setFreezeFrameUri(uri);
+      return;
     }
-    // onFirstFrameRender can fire before pixels are composited — delay cover removal.
-    // Prewarmed players often never re-fire onFirstFrameRender, so callers also
-    // invoke this from playingChange once audio/video is actually running.
-    // Always clear freeze covers on resume — firstFrameNotified only gates the
-    // parent callback (scroll-away captures a new freeze that must be removable).
-    firstFrameClearTimeoutRef.current = setTimeout(() => {
-      if (appStateRef.current !== "active") {
-        // Don't drop the reveal while backgrounded — retry so a stuck poster
-        // can't leave audio playing under a black/static cover.
-        firstFrameClearTimeoutRef.current = setTimeout(() => {
-          revealAfterFirstFrame();
-        }, 120);
+    // Mid-clip still: only paint once loaded. Never flash the t=0 poster
+    // as a placeholder over a hold that is not at the start.
+    if (uri === posterUriRef.current) return;
+    const adoptGen = stillAdoptGenRef.current + 1;
+    stillAdoptGenRef.current = adoptGen;
+    void prefetchGridImage(uri)
+      .then((ok) => {
+        if (!ok || stillAdoptGenRef.current !== adoptGen) return;
+        loadedStillUrisRef.current.add(uri);
+        lastLoadedStillUriRef.current = uri;
+        setCoverFreezeFailed(false);
+        setFreezeFrameUri(uri);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const showStill = useCallback(
+    (timeSec = 0) => {
+      const uri = pickStillUri(source, posterUriRef.current, timeSec);
+      adoptStillUri(uri, timeSec <= 0.2);
+    },
+    [adoptStillUri, source],
+  );
+
+  const clearHoldOverlayImmediate = useCallback(() => {
+    holdFadeAnimRef.current?.stop();
+    holdFadeAnimRef.current = null;
+    holdOverlayClearAfterSecRef.current = null;
+    holdReturnPendingClearRef.current = false;
+    holdReturnAtMsRef.current = null;
+    holdReturnHeldSecRef.current = null;
+    holdReturnFirstFrameSeenRef.current = false;
+    holdReturnLoggedRef.current = false;
+    holdOverlayActiveRef.current = false;
+    softHoldActiveRef.current = false;
+    holdOverlayOpacity.setValue(1);
+    setHoldFreezeSource(null);
+    holdShowingStillRef.current = { kind: "none", loaded: false };
+  }, [holdOverlayOpacity]);
+
+  const fadeClearHoldOverlay = useCallback(
+    (reason: string) => {
+      if (!holdOverlayActiveRef.current) return;
+      holdOverlayActiveRef.current = false;
+      softHoldActiveRef.current = false;
+      holdOverlayClearAfterSecRef.current = null;
+      holdReturnPendingClearRef.current = false;
+      let currentTime = 0;
+      try {
+        currentTime = player.currentTime;
+      } catch {
+        currentTime = 0;
+      }
+      const msSinceReturn =
+        holdReturnAtMsRef.current != null
+          ? Date.now() - holdReturnAtMsRef.current
+          : null;
+      logFeedHold({
+        phase: "overlay-clear",
+        id: feedHoldLogId(source),
+        reason,
+        currentTime,
+        msSinceReturn,
+      });
+      holdReturnAtMsRef.current = null;
+      holdReturnHeldSecRef.current = null;
+      holdReturnFirstFrameSeenRef.current = false;
+      holdReturnLoggedRef.current = false;
+      holdFadeAnimRef.current?.stop();
+      holdFadeAnimRef.current = Animated.timing(holdOverlayOpacity, {
+        toValue: 0,
+        duration: 120,
+        useNativeDriver: true,
+      });
+      holdFadeAnimRef.current.start(({ finished }) => {
+        holdFadeAnimRef.current = null;
+        if (!finished || !mountedRef.current) return;
+        setHoldFreezeSource(null);
+        holdOverlayOpacity.setValue(1);
+        holdShowingStillRef.current = { kind: "none", loaded: false };
+      });
+    },
+    [holdOverlayOpacity, player, source],
+  );
+
+  const clearSoftHoldFreeze = useCallback(() => {
+    holdThumbGenRef.current += 1;
+    softHoldActiveRef.current = false;
+    clearHoldOverlayImmediate();
+  }, [clearHoldOverlayImmediate]);
+
+  /**
+   * Soft-hold overlay still (above VideoView). Prefetch mid-clip when heldSec > 0.2;
+   * until it lands show loaded poster or last-loaded still. Never bare colour.
+   */
+  const captureHoldSafetyStill = useCallback(
+    (timeSec: number) => {
+      const gen = holdThumbGenRef.current + 1;
+      holdThumbGenRef.current = gen;
+      const startedAt = Date.now();
+      const holdId = feedHoldLogId(source);
+      const heldSec = Math.max(0, timeSec);
+      const midClipUri =
+        heldSec > 0.2 && source
+          ? getCloudflareFreezeFrameUri(source, heldSec)
+          : null;
+      const isHls = Boolean(source?.includes(".m3u8"));
+      const poster = posterUriRef.current;
+      const last = lastLoadedStillUriRef.current;
+      const loaded = loadedStillUrisRef.current;
+
+      holdFadeAnimRef.current?.stop();
+      holdFadeAnimRef.current = null;
+      holdOverlayOpacity.setValue(1);
+      holdOverlayActiveRef.current = true;
+      holdOverlayClearAfterSecRef.current = null;
+      holdReturnPendingClearRef.current = false;
+      holdReturnAtMsRef.current = null;
+      holdReturnHeldSecRef.current = null;
+      holdReturnFirstFrameSeenRef.current = false;
+      holdReturnLoggedRef.current = false;
+
+      let initial: string | null = null;
+      if (midClipUri && loaded.has(midClipUri)) {
+        initial = midClipUri;
+      } else if (poster && loaded.has(poster)) {
+        initial = poster;
+      } else if (last) {
+        initial = last;
+      } else if (poster) {
+        initial = poster;
+      } else if (lastLoadedStillUriRef.current) {
+        initial = lastLoadedStillUriRef.current;
+      }
+
+      setHoldFreezeSource((prev) => {
+        if (initial) return initial;
+        if (prev) return prev;
+        // Never null / bare colour — keep whatever we already have.
+        return prev ?? poster ?? last ?? null;
+      });
+
+      const showing = describeHoldStill(
+        initial,
+        midClipUri,
+        poster,
+        last,
+        loaded,
+      );
+      holdShowingStillRef.current = showing;
+      let status: VideoPlayerStatus = "idle";
+      try {
+        status = player.status;
+      } catch {
+        status = "idle";
+      }
+      logFeedHold({
+        phase: "hold",
+        id: holdId,
+        status,
+        heldSec,
+        still: showing.kind,
+        stillLoaded: showing.loaded,
+      });
+
+      if (midClipUri && heldSec > 0.2) {
+        void prefetchGridImage(midClipUri)
+          .then((ok) => {
+            logFeedHold({
+              phase: "midclip-prefetch",
+              id: holdId,
+              ms: Date.now() - startedAt,
+              ok,
+            });
+            if (!ok || holdThumbGenRef.current !== gen) return;
+            loadedStillUrisRef.current.add(midClipUri);
+            lastLoadedStillUriRef.current = midClipUri;
+            // Prefer a local generateThumbnailsAsync result if it already landed.
+            setHoldFreezeSource((prev) =>
+              prev != null && typeof prev !== "string" ? prev : midClipUri,
+            );
+            holdShowingStillRef.current = { kind: "midclip", loaded: true };
+          })
+          .catch(() => {
+            logFeedHold({
+              phase: "midclip-prefetch",
+              id: holdId,
+              ms: Date.now() - startedAt,
+              ok: false,
+            });
+          });
+      }
+
+      // AVAssetImageGenerator cannot grab HLS frames — local/file sources only.
+      if (isHls || !source) return;
+
+      void player
+        .generateThumbnailsAsync([heldSec])
+        .then((thumbs) => {
+          if (holdThumbGenRef.current !== gen) return;
+          const thumb = thumbs[0];
+          if (!thumb) return;
+          setCoverFreezeFailed(false);
+          setHoldFreezeSource(thumb);
+          holdShowingStillRef.current = { kind: "midclip", loaded: true };
+        })
+        .catch(() => undefined);
+    },
+    [holdOverlayOpacity, player, source],
+  );
+
+  /**
+   * Pause / cover the surface.
+   * `hold` — feed profile / tab blur: pause in place, no solid cover (AVPlayerLayer keeps the frame).
+   * `background` — AppState: hard cover then stop (may blank without a still).
+   * `restart` / `pause` — unchanged.
+   */
+  const coverAndStop = useCallback(
+    (timeSec: number, mode: "restart" | "hold" | "pause" | "background") => {
+      if (mode === "pause") {
+        // Returning from soft hold while still user-paused: keep the overlay
+        // until onFirstFrameRender after return, or until they resume.
+        if (!softHoldActiveRef.current && !holdOverlayActiveRef.current) {
+          clearSoftHoldFreeze();
+        } else {
+          holdReturnPendingClearRef.current = true;
+          holdReturnAtMsRef.current = Date.now();
+          holdReturnHeldSecRef.current = Math.max(0, timeSec);
+          holdReturnFirstFrameSeenRef.current = false;
+        }
+        if (timeSec > 0.2) heldPauseSecRef.current = timeSec;
+        if (!hasDecodedFrameRef.current) showStill(timeSec);
+        else if (timeSec > 0.2) {
+          const midClip = pickStillUri(source, posterUriRef.current, timeSec);
+          if (midClip) {
+            void prefetchGridImage(midClip)
+              .then((ok) => {
+                if (ok) loadedStillUrisRef.current.add(midClip);
+              })
+              .catch(() => undefined);
+          }
+        }
+        applyVisibleAudio(player, true, 0, surfaceReadyRef.current);
+        stopJamVideoPlayer(player);
         return;
       }
-      // Hold the mid-clip cover until HLS has actually reached the restore time.
-      if (resumeGateSecRef.current != null) {
+
+      if (mode === "hold") {
+        // Soft hold: keep decoded/painted/surface flags — resume must not wait for first-frame.
+        heldPauseSecRef.current = Math.max(0, timeSec);
+        softHoldActiveRef.current = true;
+        applyVisibleAudio(player, true, 0, surfaceReadyRef.current);
+        try {
+          player.pause();
+        } catch {
+          /* native object already gone */
+        }
+        captureHoldSafetyStill(timeSec);
         return;
       }
-      setFreezeFrameUri(null);
-      if (firstFrameNotifiedRef.current) return;
+
+      clearSoftHoldFreeze();
+      if (mode === "restart") {
+        heldPauseSecRef.current = null;
+        showStill(0);
+        parkJamVideoPlayerAtStart(player);
+      } else {
+        // AppState background — hard cover under a still.
+        if (timeSec > 0.2) heldPauseSecRef.current = timeSec;
+        showStill(timeSec);
+      }
+      firstFrameNotifiedRef.current = false;
+      hasPaintedFrameRef.current = false;
+      surfaceReadyRef.current = false;
+      paintedFramePendingRevealRef.current = true;
+      setCoverHeld(true);
+      applyVisibleAudio(player, true, 0, false);
+      stopJamVideoPlayer(player);
+    },
+    [captureHoldSafetyStill, clearSoftHoldFreeze, player, showStill, source],
+  );
+
+  /**
+   * Same tick: unmute, play, drop the still, tell the feed to drop its cover.
+   * Never play while muted or covered.
+   * Soft-hold resume keeps the on-screen paused frame — no new onFirstFrameRender wait.
+   */
+  const beginVisiblePlayback = useCallback(() => {
+    if (!shouldPlayRef.current) return false;
+    if (appStateRef.current !== "active") return false;
+    if (!mountedRef.current) return false;
+    if (resumeGateSecRef.current != null || resumeSeekPendingRef.current) return false;
+    const softHoldResume = softHoldActiveRef.current;
+    if (!hasDecodedFrameRef.current && !softHoldResume) return false;
+    if (player.status !== "readyToPlay") return false;
+
+    stillAdoptGenRef.current += 1;
+    holdThumbGenRef.current += 1;
+    const heldSec = heldPauseSecRef.current;
+    if (softHoldResume && heldSec != null && heldSec > 0.05) {
+      try {
+        if (Math.abs(player.currentTime - heldSec) > 0.05) {
+          player.currentTime = heldSec;
+        }
+      } catch {
+        /* native object already gone */
+      }
+    } else {
+      restoreJamVideoPosition(player, heldSec);
+    }
+    paintedFramePendingRevealRef.current = false;
+    hasDecodedFrameRef.current = true;
+    hasPaintedFrameRef.current = true;
+    surfaceReadyRef.current = true;
+    softHoldActiveRef.current = false;
+    applyVisibleAudio(player, isMutedRef.current, volumeRef.current, true);
+    playJamVideoPlayerWhenReady(player);
+    setCoverHeld(false);
+    setFreezeFrameUri(null);
+    // Soft-hold overlay stays above VideoView until playing past heldSec + 0.15
+    // (progress listener) or the first-frame failsafe after return.
+    if (softHoldResume && holdOverlayActiveRef.current) {
+      holdOverlayClearAfterSecRef.current = (heldSec ?? 0) + 0.15;
+      holdReturnPendingClearRef.current = true;
+      if (holdReturnAtMsRef.current == null) {
+        holdReturnAtMsRef.current = Date.now();
+      }
+      holdReturnHeldSecRef.current = heldSec ?? 0;
+      if (!holdReturnLoggedRef.current) {
+        holdReturnLoggedRef.current = true;
+        let currentTime = 0;
+        let playing = false;
+        let status: VideoPlayerStatus = "idle";
+        try {
+          currentTime = player.currentTime;
+          playing = player.playing;
+          status = player.status;
+        } catch {
+          /* native object already gone */
+        }
+        logFeedHold({
+          phase: "return",
+          id: feedHoldLogId(source),
+          status,
+          playing,
+          currentTime,
+          still: holdShowingStillRef.current.kind,
+          stillLoaded: holdShowingStillRef.current.loaded,
+          heldSec,
+        });
+      }
+    }
+    if (!firstFrameNotifiedRef.current) {
       firstFrameNotifiedRef.current = true;
       onFirstFrameRenderRef.current?.();
-    }, 48);
-  }, []);
+    }
+    return true;
+  }, [player, source]);
+
+  const handleViewFirstFrame = useCallback(() => {
+    hasDecodedFrameRef.current = true;
+    hasPaintedFrameRef.current = true;
+    paintedFramePendingRevealRef.current = true;
+    firstFrameCountBySourceRef.current += 1;
+    const count = firstFrameCountBySourceRef.current;
+    let playing = false;
+    let currentTime = 0;
+    try {
+      playing = player.playing;
+      currentTime = player.currentTime;
+    } catch {
+      /* native object already gone */
+    }
+    logFeedHold({
+      phase: "onFirstFrameRender",
+      id: feedHoldLogId(source),
+      count,
+      playing,
+      currentTime,
+      softHold: softHoldActiveRef.current,
+      overlay: holdOverlayActiveRef.current,
+    });
+
+    // Soft-hold return while user stayed paused: clear on first paint after return.
+    if (
+      holdReturnPendingClearRef.current &&
+      !shouldPlayRef.current &&
+      holdOverlayActiveRef.current
+    ) {
+      holdReturnFirstFrameSeenRef.current = true;
+      fadeClearHoldOverlay("paused-return-first-frame");
+      return;
+    }
+
+    // Failsafe: never on time alone — need first frame after return + playing + time advanced.
+    if (holdReturnPendingClearRef.current && holdOverlayActiveRef.current) {
+      holdReturnFirstFrameSeenRef.current = true;
+      const heldSec = holdReturnHeldSecRef.current ?? 0;
+      if (playing && currentTime > heldSec) {
+        fadeClearHoldOverlay("failsafe-first-frame");
+        return;
+      }
+    }
+
+    beginVisiblePlayback();
+  }, [beginVisiblePlayback, fadeClearHoldOverlay, player, source]);
+
+  useEffect(() => {
+    hasDecodedFrameRef.current = false;
+  }, [player, source]);
 
   useEffect(() => {
     firstFrameNotifiedRef.current = false;
-  }, [source]);
+    hasPaintedFrameRef.current = false;
+    paintedFramePendingRevealRef.current = false;
+    surfaceReadyRef.current = false;
+    softHoldActiveRef.current = false;
+    holdThumbGenRef.current += 1;
+    firstFrameCountBySourceRef.current = 0;
+    clearHoldOverlayImmediate();
+    setCoverPosterFailed(false);
+    setCoverFreezeFailed(false);
+    setCoverHeld(true);
+    applyVisibleAudio(player, true, 0, false);
+    showStill(resumePositionSec != null && resumePositionSec > 0.05 ? resumePositionSec : 0);
+  }, [clearHoldOverlayImmediate, player, resumePositionSec, showStill, source]);
 
   const captureFreezeFrame = useCallback(
     (atTimeSec: number) => {
@@ -358,9 +962,7 @@ export function JamVideoView({
 
       const cloudflareUri = getCloudflareFreezeFrameUri(source, atTimeSec);
       if (cloudflareUri) {
-        // Set immediately so swipe-away never exposes a blank VideoView while prefetching.
-        setFreezeFrameUri(cloudflareUri);
-        void Image.prefetch(cloudflareUri);
+        adoptStillUri(cloudflareUri, atTimeSec <= 0.2);
         return;
       }
 
@@ -381,12 +983,27 @@ export function JamVideoView({
           .catch(() => undefined);
       }
     },
-    [source],
+    [adoptStillUri, source],
   );
 
   useEffect(() => {
     shouldPlayRef.current = shouldPlay;
   }, [shouldPlay]);
+
+  useEffect(() => {
+    whenPausedRef.current = whenPaused;
+    posterUriRef.current = posterUri;
+    if (posterUri) {
+      loadedStillUrisRef.current.add(posterUri);
+      lastLoadedStillUriRef.current = posterUri;
+    }
+  }, [posterUri, whenPaused]);
+
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+    volumeRef.current = volume;
+    applyVisibleAudio(player, isMuted, volume, surfaceReadyRef.current);
+  }, [isMuted, player, volume]);
 
   useEffect(() => {
     onResumePositionAppliedRef.current = onResumePositionApplied;
@@ -399,15 +1016,12 @@ export function JamVideoView({
     }
   }, []);
 
-  /** After seek: wait until currentTime is near the restore point, then play + reveal. */
+  /** After seek: wait until currentTime is near the restore point, then play. Cover stays until a painted frame. */
   const confirmResumeAndPlay = useCallback(() => {
     clearResumeConfirmLoop();
     const target = resumeGateSecRef.current;
     if (target == null) {
-      if (shouldPlayRef.current && appStateRef.current === "active" && mountedRef.current) {
-        playJamVideoPlayerWhenReady(player);
-      }
-      revealAfterFirstFrame();
+      beginVisiblePlayback();
       return;
     }
 
@@ -429,13 +1043,10 @@ export function JamVideoView({
       resumeConfirmRafRef.current = null;
       resumeGateSecRef.current = null;
       onResumePositionAppliedRef.current?.();
-      if (shouldPlayRef.current && appStateRef.current === "active" && mountedRef.current) {
-        playJamVideoPlayerWhenReady(player);
-      }
-      revealAfterFirstFrame();
+      beginVisiblePlayback();
     };
     resumeConfirmRafRef.current = requestAnimationFrame(tick);
-  }, [clearResumeConfirmLoop, player, revealAfterFirstFrame]);
+  }, [beginVisiblePlayback, clearResumeConfirmLoop, player]);
 
   /** Seek while paused — never play until confirmResumeAndPlay says the frame is ready. */
   const applyResumePosition = useCallback(() => {
@@ -469,6 +1080,8 @@ export function JamVideoView({
   useEffect(() => {
     freezeCaptureIdRef.current += 1;
     freezePositionRef.current = null;
+    heldPauseSecRef.current = null;
+    clearSoftHoldFreeze();
     clearResumeConfirmLoop();
     if (resumePositionSec != null && resumePositionSec > 0.05) {
       resumeSeekPendingRef.current = true;
@@ -477,11 +1090,11 @@ export function JamVideoView({
     } else {
       resumeSeekPendingRef.current = false;
       resumeGateSecRef.current = null;
-      setFreezeFrameUri(null);
+      showStill(0);
     }
     // Only reset covers when the source identity changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- resume handled above
-  }, [captureFreezeFrame, clearResumeConfirmLoop, source]);
+  }, [captureFreezeFrame, clearResumeConfirmLoop, clearSoftHoldFreeze, showStill, source]);
 
   useEffect(() => {
     return () => clearResumeConfirmLoop();
@@ -492,11 +1105,22 @@ export function JamVideoView({
   }, [onContentFitChange]);
 
   useLayoutEffect(() => {
+    const display = displayOrientedSizeRef.current;
+    if (display) {
+      const nextFit = contentFitForVideoSize(display.width, display.height, contentFit);
+      setResolvedContentFit(nextFit);
+      setResolvedVideoSize(display);
+      return;
+    }
     const cached = getRememberedVideoAspectSize(aspectCacheKey);
-    const width = knownWidth ?? cached?.width ?? null;
-    const height = knownHeight ?? cached?.height ?? null;
-    const nextFit = contentFitForVideoSize(width, height, contentFit);
+    const size = parsePositiveDisplaySize(
+      knownWidth ?? cached?.width,
+      knownHeight ?? cached?.height,
+    );
+    if (!size) return;
+    const nextFit = contentFitForVideoSize(size.width, size.height, contentFit);
     setResolvedContentFit(nextFit);
+    setResolvedVideoSize(size);
   }, [aspectCacheKey, contentFit, knownHeight, knownWidth, source]);
 
   useEffect(() => {
@@ -510,6 +1134,9 @@ export function JamVideoView({
       }
       rememberVideoAspectSize(aspectCacheKey, width, height);
       const nextFit = contentFitForVideoSize(width, height, contentFit);
+      setResolvedVideoSize((current) =>
+        current?.width === width && current?.height === height ? current : { width, height },
+      );
       // Never call parent setState inside this updater — that updates
       // ProfileFullscreenFeedItem while JamVideoView is rendering.
       setResolvedContentFit((current) => (current === nextFit ? current : nextFit));
@@ -519,16 +1146,9 @@ export function JamVideoView({
 
   const applyBestTrackSize = useCallback(
     (tracks?: Array<{ size?: { width?: number; height?: number } | null } | null> | null) => {
-      // Oriented camera/picker size wins over coded track size. iOS often reports
-      // landscape natural size for portrait phone recordings (rotation metadata).
-      if (
-        typeof seedWidth === "number" &&
-        typeof seedHeight === "number" &&
-        seedWidth > 0 &&
-        seedHeight > 0 &&
-        seedWidth < seedHeight
-      ) {
-        applyVideoTrackSize(seedWidth, seedHeight);
+      const display = displayOrientedSizeRef.current;
+      if (display) {
+        applyVideoTrackSize(display.width, display.height);
         return;
       }
 
@@ -541,21 +1161,45 @@ export function JamVideoView({
             size.width > 0 &&
             size.height > 0,
         );
-      if (!sizes.length) return;
-      const largest = sizes.reduce((best, size) =>
-        size.width * size.height > best.width * best.height ? size : best,
-      );
-      // HLS/display probes are orientation-correct. Coded track size for portrait
-      // phone video is often landscape (rotation metadata). Preferring that used to
-      // force contentFit="contain", which left some Android surfaces blank while
-      // audio kept playing.
+      const largest = sizes.length
+        ? sizes.reduce((best, size) =>
+            size.width * size.height > best.width * best.height ? size : best,
+          )
+        : null;
+
+      // Wait for the display-size probe before treating a tall coded size as 9:16
+      // cover — landscape screen recordings are stored as portrait + rotation.
+      if (!displayProbeSettledRef.current) {
+        if (largest && largest.width > largest.height && !isPortraitFillVideoSize(seedWidth, seedHeight)) {
+          applyVideoTrackSize(largest.width, largest.height);
+        }
+        return;
+      }
+
+      // Oriented 9:16 camera size wins over coded track size. iOS often reports
+      // landscape natural size for portrait phone recordings (rotation metadata).
+      if (isPortraitFillVideoSize(seedWidth, seedHeight)) {
+        applyVideoTrackSize(seedWidth, seedHeight);
+        return;
+      }
+
+      if (!largest) {
+        if (
+          typeof seedWidth === "number" &&
+          typeof seedHeight === "number" &&
+          seedWidth > 0 &&
+          seedHeight > 0
+        ) {
+          applyVideoTrackSize(seedWidth, seedHeight);
+        }
+        return;
+      }
+      if (largest.width > largest.height) {
+        applyVideoTrackSize(largest.width, largest.height);
+        return;
+      }
       const cached = getRememberedVideoAspectSize(aspectCacheKey);
-      if (
-        cached &&
-        cached.width > 0 &&
-        cached.height > 0 &&
-        (cached.width < cached.height) !== (largest.width < largest.height)
-      ) {
+      if (cached && isPortraitFillVideoSize(cached.width, cached.height)) {
         applyVideoTrackSize(cached.width, cached.height);
         return;
       }
@@ -568,23 +1212,78 @@ export function JamVideoView({
     applyBestTrackSize([player.videoTrack, ...(player.availableVideoTracks ?? [])]);
   }, [applyBestTrackSize, player, source]);
 
+  // Display size (preferredTransform / CF native thumb) beats coded HLS.
+  // Landscape iPhone screen recordings are stored as tall buffers + 90° rotation.
+  // DB / cache size is authoritative — don't wait, and don't probe unless missing.
+  useEffect(() => {
+    const known = parsePositiveDisplaySize(
+      knownWidth ?? getRememberedVideoAspectSize(aspectCacheKey)?.width,
+      knownHeight ?? getRememberedVideoAspectSize(aspectCacheKey)?.height,
+    );
+    if (known) {
+      displayOrientedSizeRef.current = known;
+      displayProbeSettledRef.current = true;
+      applyVideoTrackSize(known.width, known.height);
+      return;
+    }
+    displayOrientedSizeRef.current = null;
+    displayProbeSettledRef.current = false;
+    if (!source) {
+      displayProbeSettledRef.current = true;
+      return;
+    }
+    let cancelled = false;
+    void probeVideoDisplaySize(source).then((size) => {
+      if (cancelled) return;
+      displayProbeSettledRef.current = true;
+      if (!size) return;
+      const previous = displayOrientedSizeRef.current;
+      const previousFit = contentFitForVideoSize(previous?.width, previous?.height, contentFit);
+      const nextFit = contentFitForVideoSize(size.width, size.height, contentFit);
+      displayOrientedSizeRef.current = size;
+      if (!previous || previousFit !== nextFit) {
+        applyVideoTrackSize(size.width, size.height);
+        return;
+      }
+      rememberVideoAspectSize(aspectCacheKey, size.width, size.height);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [applyVideoTrackSize, aspectCacheKey, contentFit, knownHeight, knownWidth, source]);
+
   // HLS often omits usable track sizes until late (or never). Probe the master
   // playlist RESOLUTION tags so landscape letterboxes instead of cover-zooming.
   useEffect(() => {
     if (!source || !source.includes(".m3u8")) return;
     const cached = getRememberedVideoAspectSize(aspectCacheKey);
-    if (cached) {
+    if (cached && cached.width > cached.height) {
       applyVideoTrackSize(cached.width, cached.height);
     }
     let cancelled = false;
     void probeHlsVideoSize(source).then((size) => {
       if (cancelled || !size) return;
-      applyVideoTrackSize(size.width, size.height);
+      const display = displayOrientedSizeRef.current;
+      if (display) {
+        applyVideoTrackSize(display.width, display.height);
+        return;
+      }
+      // Landscape HLS is authoritative — even if a portrait thumb canvas was cached.
+      if (size.width > size.height) {
+        applyVideoTrackSize(size.width, size.height);
+        return;
+      }
+      // Portrait HLS may be a rotated screen recording. Wait for display probe
+      // unless we already know this is a 9:16 camera clip.
+      if (isPortraitFillVideoSize(seedWidth, seedHeight) && size.width <= size.height) {
+        applyVideoTrackSize(seedWidth, seedHeight);
+        return;
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [applyVideoTrackSize, aspectCacheKey, source]);
+  }, [applyVideoTrackSize, aspectCacheKey, seedHeight, seedWidth, source]);
 
   useEffect(() => {
     player.timeUpdateEventInterval = timeUpdateIntervalSec;
@@ -640,8 +1339,7 @@ export function JamVideoView({
 
   useEffect(() => {
     player.loop = isLooping && !hasTrim;
-    player.muted = isMuted;
-    player.volume = volume;
+    applyVisibleAudio(player, isMuted, volume, surfaceReadyRef.current);
   }, [hasTrim, isLooping, isMuted, player, volume]);
 
   useEffect(() => {
@@ -699,7 +1397,15 @@ export function JamVideoView({
     applyBestTrackSize([...(availableVideoTracks ?? []), player.videoTrack]);
   });
 
-  useEventListener(player, "statusChange", ({ status }) => {
+  useEventListener(player, "statusChange", ({ status, error }) => {
+    if (softHoldActiveRef.current || holdOverlayActiveRef.current) {
+      logFeedHold({
+        phase: "statusChange",
+        id: feedHoldLogId(source),
+        status,
+        error: error?.message ?? error ?? null,
+      });
+    }
     const alreadyPlayable =
       playbackStatusRef.current.isLoaded || playbackStatusRef.current.isPlaying;
     // HLS can play while more data loads. Only treat the first load as buffering,
@@ -732,6 +1438,29 @@ export function JamVideoView({
       return;
     }
 
+    // Neighbors stay parked on frame 0 so a swipe-in doesn't flash a mid-clip poster.
+    // Mid-clip tap-pause / profile overlay must not rewind.
+    if (
+      status === "readyToPlay" &&
+      !shouldPlayRef.current &&
+      resumeGateSecRef.current == null &&
+      !resumeSeekPendingRef.current &&
+      scrubToRatioRef.current == null
+    ) {
+      let current = 0;
+      try {
+        current = player.currentTime;
+      } catch {
+        current = 0;
+      }
+      if (current <= 0.2) {
+        parkJamVideoPlayerAtStart(player);
+      } else {
+        stopJamVideoPlayer(player);
+      }
+      return;
+    }
+
     // Only auto-resume once ready and while the app is foregrounded.
     // Gate on mountedRef so filter remounts can't revive a tearing-down player.
     if (
@@ -743,7 +1472,8 @@ export function JamVideoView({
       resumeGateSecRef.current == null &&
       !resumeSeekPendingRef.current
     ) {
-      playJamVideoPlayerWhenReady(player);
+      restoreJamVideoPosition(player, heldPauseSecRef.current);
+      beginVisiblePlayback();
     }
   });
 
@@ -752,15 +1482,35 @@ export function JamVideoView({
       isPlaying,
       ...(isPlaying ? { isBuffering: false, isLoaded: true } : {}),
     });
-    // Clear covers once playback is running. Prewarmed/adopted players often skip
-    // VideoView.onFirstFrameRender, which left the profile grey cover stuck forever.
-    // During filter restore, keep the cover until the resume gate clears.
-    if (isPlaying && resumeGateSecRef.current == null) {
-      revealAfterFirstFrame();
+    if (isPlaying) {
+      softHoldActiveRef.current = false;
+      let current = 0;
+      try {
+        current = player.currentTime;
+      } catch {
+        current = 0;
+      }
+      const held = heldPauseSecRef.current;
+      if (current > 0.2 || (held != null && Math.abs(current - held) <= 0.45)) {
+        heldPauseSecRef.current = null;
+      }
     }
   });
 
   useEventListener(player, "timeUpdate", ({ currentTime }) => {
+    if (shouldPlayRef.current && currentTime > 0.2) {
+      heldPauseSecRef.current = null;
+    }
+    // Soft-hold overlay: fade once playing past heldSec + 0.15 (never time alone).
+    const clearAfter = holdOverlayClearAfterSecRef.current;
+    if (
+      clearAfter != null &&
+      holdOverlayActiveRef.current &&
+      player.playing &&
+      currentTime > clearAfter
+    ) {
+      fadeClearHoldOverlay("progress-past-hold");
+    }
     if (scrubToRatioRef.current != null) {
       emitPlaybackStatus({
         positionMillis: Math.max(0, Math.round(currentTime * 1000)),
@@ -791,53 +1541,26 @@ export function JamVideoView({
   });
 
   useEffect(() => {
-    return () => {
-      if (firstFrameClearTimeoutRef.current) {
-        clearTimeout(firstFrameClearTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    // True background teardown is owned by the AppState listener. "inactive"
-    // (Control Center / notification shade) must keep the surface painted.
-    if (appStateRef.current === "inactive") {
-      return;
-    }
+    // Control Center: keep the live frame. Don't tear down.
+    if (appStateRef.current === "inactive") return;
 
     if (!source || !shouldPlay || appStateRef.current !== "active") {
-      // Pause in place and fully silence so swipe-away / inactive pages can't leak audio.
-      prevShouldPlayRef.current = shouldPlay;
       const freezeAt = Math.max(
         0,
         player.currentTime || playbackStatusRef.current.positionMillis / 1000,
       );
-      // Cover BEFORE pause — pausing can blank the native VideoView on iOS, and a
-      // late Cloudflare thumb load used to leave a black gap during feed swipes.
-      if (showFreezeFrameOnPause) {
-        freezePositionRef.current = freezeAt;
-        captureFreezeFrame(freezeAt);
+
+      if (appStateRef.current !== "active") {
+        coverAndStop(freezeAt, "background");
+        return;
       }
-      stopJamVideoPlayer(player);
+
+      coverAndStop(freezeAt, whenPaused);
       return;
     }
 
-    prevShouldPlayRef.current = true;
-    // Hard-stop silences the player; restore prop audio before starting again.
-    try {
-      player.muted = isMuted;
-      player.volume = volume;
-    } catch {
-      /* ignore */
-    }
-    // Keep any freeze cover up until playingChange/first-frame clears it.
-    // Never play() before readyToPlay — that was the choppy-audio path.
-    // Never play from t=0 while a filter-restore seek is still pending.
-    if (player.playing) {
-      if (resumeGateSecRef.current == null) {
-        revealAfterFirstFrame();
-      }
-    } else if (resumeSeekPendingRef.current || resumeGateSecRef.current != null) {
+    applyVisibleAudio(player, isMuted, volume, surfaceReadyRef.current);
+    if (resumeSeekPendingRef.current || resumeGateSecRef.current != null) {
       if (player.status === "readyToPlay") {
         if (resumeSeekPendingRef.current) {
           applyResumePosition();
@@ -845,46 +1568,44 @@ export function JamVideoView({
           confirmResumeAndPlay();
         }
       }
-    } else {
-      playJamVideoPlayerWhenReady(player);
+      return;
     }
+    restoreJamVideoPosition(player, heldPauseSecRef.current);
+    beginVisiblePlayback();
   }, [
     applyResumePosition,
-    captureFreezeFrame,
+    beginVisiblePlayback,
     confirmResumeAndPlay,
+    coverAndStop,
     isMuted,
     player,
-    revealAfterFirstFrame,
     shouldPlay,
-    showFreezeFrameOnPause,
     source,
     volume,
+    whenPaused,
   ]);
 
-  // If play() doesn't emit playingChange (stale native state after recycle),
-  // retry play once ready and drop the freeze cover so scroll-back can't stay stuck.
+  // Already-loaded players may miss onFirstFrameRender. Retry the atomic start
+  // only — never play() under a muted cover.
   useEffect(() => {
     if (!source || !shouldPlay || appStateRef.current !== "active") return;
-    if (!freezeFrameUri) return;
     const retryDelays = [220, 600, 1200];
     const timeoutIds = retryDelays.map((delayMs) =>
       setTimeout(() => {
         if (!mountedRef.current || !shouldPlayRef.current || appStateRef.current !== "active") {
           return;
         }
-        if (!player.playing) {
-          if (resumeSeekPendingRef.current && player.status === "readyToPlay") {
-            applyResumePosition();
-          } else if (resumeGateSecRef.current != null) {
-            confirmResumeAndPlay();
-          } else {
-            playJamVideoPlayerWhenReady(player);
-          }
+        if (player.playing && surfaceReadyRef.current) return;
+        if (resumeSeekPendingRef.current && player.status === "readyToPlay") {
+          applyResumePosition();
+          return;
         }
-        // Don't yank the mid-clip cover off before the resume gate clears.
-        if (resumeGateSecRef.current == null) {
-          revealAfterFirstFrame();
+        if (resumeGateSecRef.current != null) {
+          confirmResumeAndPlay();
+          return;
         }
+        restoreJamVideoPosition(player, heldPauseSecRef.current);
+        beginVisiblePlayback();
       }, delayMs),
     );
     return () => {
@@ -892,10 +1613,9 @@ export function JamVideoView({
     };
   }, [
     applyResumePosition,
+    beginVisiblePlayback,
     confirmResumeAndPlay,
-    freezeFrameUri,
     player,
-    revealAfterFirstFrame,
     shouldPlay,
     source,
   ]);
@@ -918,10 +1638,11 @@ export function JamVideoView({
         }
         return;
       }
-      playJamVideoPlayerWhenReady(player);
+      restoreJamVideoPosition(player, heldPauseSecRef.current);
+      beginVisiblePlayback();
     }, 900);
     return () => clearTimeout(timeoutId);
-  }, [applyResumePosition, confirmResumeAndPlay, player, shouldPlay, source]);
+  }, [applyResumePosition, beginVisiblePlayback, confirmResumeAndPlay, player, shouldPlay, source]);
 
   useEffect(() => {
     const resumeRetryTimeouts: Array<ReturnType<typeof setTimeout>> = [];
@@ -943,9 +1664,8 @@ export function JamVideoView({
         return;
       }
 
-      // Keep any freeze/poster cover until first frame — clearing it here caused
-      // a black flash when returning from Control Center / background.
-      playJamVideoPlayerWhenReady(player);
+      restoreJamVideoPosition(player, heldPauseSecRef.current);
+      beginVisiblePlayback();
     };
 
     const syncPlaybackWithAppState = (nextState: AppStateStatus) => {
@@ -973,23 +1693,14 @@ export function JamVideoView({
           0,
           player.currentTime || playbackStatusRef.current.positionMillis / 1000,
         );
-        freezePositionRef.current = freezeAt;
-        // Set cover before pausing so the surface never sits uncovered.
-        captureFreezeFrame(freezeAt);
-        stopJamVideoPlayer(player);
+        coverAndStop(freezeAt, "background");
         return;
       }
 
       if (nextState !== "active") return;
 
       clearResumeRetries();
-      // Restore mute/volume from props before resume — background stop silenced the player.
-      try {
-        player.muted = isMuted;
-        player.volume = volume;
-      } catch {
-        /* ignore */
-      }
+      applyVisibleAudio(player, isMuted, volume, surfaceReadyRef.current);
       resumeForegroundPlayback();
       requestAnimationFrame(resumeForegroundPlayback);
       for (const delayMs of [16, 48, 120]) {
@@ -1002,29 +1713,105 @@ export function JamVideoView({
       clearResumeRetries();
       subscription.remove();
     };
-  }, [captureFreezeFrame, isMuted, player, source, volume]);
+  }, [beginVisiblePlayback, coverAndStop, isMuted, player, source, volume]);
+
+  const letterboxStyle = letterboxVideoFrameStyle(
+    surfaceSize.width,
+    surfaceSize.height,
+    resolvedVideoSize?.width ?? 0,
+    resolvedVideoSize?.height ?? 0,
+  );
+  const mediaFrameStyle = letterboxStyle ?? StyleSheet.absoluteFill;
+  const mediaContentFit = letterboxStyle ? "cover" : resolvedContentFit;
+  const coverFit = letterboxStyle || mediaContentFit === "cover" ? "cover" : "contain";
+  // Letterbox bars stay black; grey is only for cover-fit open/still surfaces.
+  const effectiveSurfaceColor =
+    resolvedContentFit === "contain" ? MEDIA_LETTERBOX_BLACK : surfaceColor;
+  const coverPosterUri = posterUri ?? null;
+  const coverFreezeUri =
+    freezeFrameUri && freezeFrameUri !== coverPosterUri ? freezeFrameUri : null;
+  const showStartPoster = Boolean(
+    coverPosterUri && freezeFrameUri && freezeFrameUri === coverPosterUri,
+  );
+  // Hard cover (initial load / swipe / app background) may use a solid surface.
+  // Soft hold uses an overlay still above VideoView — never a bare colour.
+  const showHardCoverLayer = coverHeld || Boolean(freezeFrameUri);
 
   return (
-    <View style={[style, { backgroundColor: surfaceColor }]}>
+    <View
+      style={[style, { backgroundColor: effectiveSurfaceColor }]}
+      onLayout={(event) => {
+        const { width, height } = event.nativeEvent.layout;
+        setSurfaceSize((current) =>
+          current.width === width && current.height === height ? current : { width, height },
+        );
+      }}
+    >
       <VideoView
         player={player}
-        style={StyleSheet.absoluteFill}
-        contentFit={resolvedContentFit}
+        style={mediaFrameStyle}
+        contentFit={mediaContentFit}
         nativeControls={nativeControls}
         fullscreenOptions={{ enable: nativeControls }}
         allowsPictureInPicture={false}
-        onFirstFrameRender={revealAfterFirstFrame}
+        onFirstFrameRender={handleViewFirstFrame}
       />
-      {freezeFrameUri ? (
+      {holdFreezeSource ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[StyleSheet.absoluteFill, { opacity: holdOverlayOpacity }]}
+        >
+          {typeof holdFreezeSource === "string" ? (
+            <CachedCoverImage
+              uri={holdFreezeSource}
+              contentFit={coverFit}
+              style={mediaFrameStyle}
+              onLoad={() => markStillLoaded(holdFreezeSource)}
+              onError={() => {
+                const fallback =
+                  posterUriRef.current || lastLoadedStillUriRef.current;
+                if (fallback && fallback !== holdFreezeSource) {
+                  setHoldFreezeSource(fallback);
+                }
+              }}
+            />
+          ) : (
+            <Image
+              source={holdFreezeSource}
+              contentFit={coverFit}
+              style={mediaFrameStyle}
+              transition={0}
+              alt=""
+            />
+          )}
+        </Animated.View>
+      ) : null}
+      {showHardCoverLayer ? (
         <View
           pointerEvents="none"
-          style={[StyleSheet.absoluteFill, { backgroundColor: surfaceColor }]}
+          style={[StyleSheet.absoluteFill, { backgroundColor: effectiveSurfaceColor }]}
         >
-          <Image
-            source={{ uri: freezeFrameUri }}
-            style={StyleSheet.absoluteFill}
-            resizeMode={resolvedContentFit === "contain" ? "contain" : "cover"}
-          />
+          {showStartPoster && coverPosterUri && !coverPosterFailed ? (
+            <CachedCoverImage
+              uri={coverPosterUri}
+              contentFit={coverFit}
+              style={mediaFrameStyle}
+              onLoad={() => markStillLoaded(coverPosterUri)}
+              onError={() => setCoverPosterFailed(true)}
+            />
+          ) : null}
+          {coverFreezeUri && !coverFreezeFailed ? (
+            <CachedCoverImage
+              uri={coverFreezeUri}
+              contentFit={coverFit}
+              style={mediaFrameStyle}
+              onLoad={() => markStillLoaded(coverFreezeUri)}
+              onError={() => {
+                setCoverFreezeFailed(true);
+                setFreezeFrameUri(null);
+              }}
+            />
+          ) : null}
         </View>
       ) : null}
     </View>

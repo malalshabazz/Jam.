@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["JamWaveformModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.jamwaveform.JamWaveformModule"]
+  }
+}

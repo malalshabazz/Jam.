@@ -1,12 +1,14 @@
+import { useState } from "react";
 import {
-  Dimensions,
   StyleSheet,
   Text,
   View,
+  type LayoutChangeEvent,
   type StyleProp,
   type TextStyle,
   type ViewStyle,
 } from "react-native";
+import { getNineSixteenCanvasRect } from "@/components/video/aspect-cache";
 import { getFilterOverlayStyle, type VideoFilterId } from "@/lib/video-filters";
 import {
   getVideoTextEffectChrome,
@@ -19,14 +21,16 @@ import {
   type VideoTextEffectId,
   type VideoTextOverlay,
 } from "@/lib/video-presentation";
+import { TEXT_OVERLAY_BASE_FONT_SIZE, viewportWidth } from "@/theme/tokens";
 
-const FEED_TEXT_MAX_WIDTH = Math.round(Dimensions.get("window").width * 0.86);
+/** Authoring canvas width (create edit 9:16 card is full screen width). */
+const EDITOR_CANVAS_WIDTH = viewportWidth;
 
 export function getVideoFilterOverlayStyle(filter: VideoFilterId | string | null | undefined): ViewStyle {
   return getFilterOverlayStyle(filter);
 }
 
-const FEED_BASE_FONT_SIZE = 30;
+const FEED_BASE_FONT_SIZE = TEXT_OVERLAY_BASE_FONT_SIZE;
 const THUMB_BASE_FONT_SIZE = 11;
 const MICRO_BASE_FONT_SIZE = 7;
 
@@ -55,17 +59,24 @@ function flattenTextStyle(textStyle: StyleProp<TextStyle>): TextStyle {
 function getOverlayTypeStyles(
   density: "feed" | "thumb" | "micro",
   overlay: VideoTextOverlay,
+  canvasWidth: number,
+  canvasFontScale: number,
 ): TextStyle {
   const base =
     density === "micro" ? MICRO_BASE_FONT_SIZE : density === "thumb" ? THUMB_BASE_FONT_SIZE : FEED_BASE_FONT_SIZE;
-  const fontSize = Math.max(6, Math.round(base * overlay.fontScale * 10) / 10);
+  const scaledBase = density === "feed" ? base * canvasFontScale : base;
+  const fontSize = Math.max(6, Math.round(scaledBase * overlay.fontScale * 10) / 10);
   const lineHeight = Math.round(fontSize * 1.25 * 10) / 10;
   const chrome = getVideoTextEffectChrome(overlay.effectId, { fontSize, density });
   const shadowRadius = density === "feed" ? 1.5 : 1;
   const fontWeight = getVideoTextOverlayFontWeight(overlay.fontId);
   // Leave room inside the frame for box padding so glyphs aren't pressed to the edge.
   const frameMax =
-    density === "micro" ? 48 : density === "thumb" ? 84 : FEED_TEXT_MAX_WIDTH;
+    density === "micro"
+      ? 48
+      : density === "thumb"
+        ? 84
+        : Math.max(48, Math.round(canvasWidth * 0.86));
   const textMaxWidth = Math.max(24, frameMax - chrome.paddingHorizontal * 2);
 
   return {
@@ -210,46 +221,78 @@ export function VideoPresentationOverlays({
   textOverlays,
   style,
   density = "feed",
+  contentTopInset = 0,
 }: {
   filter?: VideoFilterId | string | null;
   textOverlays?: VideoTextOverlay[] | unknown;
   style?: StyleProp<ViewStyle>;
   /** feed = playback size; thumb = create preview tile; micro = filmstrip / filter chips */
   density?: "feed" | "thumb" | "micro";
+  /**
+   * When set (slideshow fullscreen), 9:16 canvas is measured from the
+   * below-status-bar media box so text/stickers match the photo framing.
+   */
+  contentTopInset?: number;
 }) {
   const resolvedFilter = normalizeVideoFilter(filter);
   const overlays = normalizeVideoTextOverlays(textOverlays);
+  const [viewport, setViewport] = useState({ width: 0, height: 0 });
+
   if (resolvedFilter === "none" && overlays.length === 0) return null;
 
+  const canvas =
+    viewport.width > 0 && viewport.height > 0
+      ? getNineSixteenCanvasRect(viewport.width, viewport.height)
+      : null;
+  const canvasFontScale =
+    density === "feed" && canvas && EDITOR_CANVAS_WIDTH > 0
+      ? canvas.width / EDITOR_CANVAS_WIDTH
+      : 1;
+
+  function handleLayout(event: LayoutChangeEvent) {
+    const { width, height } = event.nativeEvent.layout;
+    setViewport((current) =>
+      current.width === width && current.height === height ? current : { width, height },
+    );
+  }
+
+  const topInset = Math.max(0, contentTopInset);
+
   return (
-    <View pointerEvents="none" style={[StyleSheet.absoluteFill, style]}>
+    <View
+      pointerEvents="none"
+      style={[StyleSheet.absoluteFill, topInset > 0 ? { top: topInset } : null, style]}
+      onLayout={handleLayout}
+    >
       {resolvedFilter !== "none" ? (
         <View
           pointerEvents="none"
           style={[StyleSheet.absoluteFill, getVideoFilterOverlayStyle(resolvedFilter)]}
         />
       ) : null}
-      {overlays.map((overlay) => (
-        <View
-          key={overlay.id}
-          pointerEvents="none"
-          style={[
-            styles.textAnchor,
-            {
-              left: `${overlay.centerRatio.x * 100}%`,
-              top: `${overlay.centerRatio.y * 100}%`,
-            },
-          ]}
-        >
-          <VideoTextOverlayGlyph
-            text={overlay.text}
-            effectId={overlay.effectId}
-            density={density}
-            textStyle={getOverlayTypeStyles(density, overlay)}
-            numberOfLines={density === "feed" ? undefined : 2}
-          />
-        </View>
-      ))}
+      {canvas
+        ? overlays.map((overlay) => (
+            <View
+              key={overlay.id}
+              pointerEvents="none"
+              style={[
+                styles.textAnchor,
+                {
+                  left: canvas.left + canvas.width * overlay.centerRatio.x,
+                  top: canvas.top + canvas.height * overlay.centerRatio.y,
+                },
+              ]}
+            >
+              <VideoTextOverlayGlyph
+                text={overlay.text}
+                effectId={overlay.effectId}
+                density={density}
+                textStyle={getOverlayTypeStyles(density, overlay, canvas.width, canvasFontScale)}
+                numberOfLines={density === "feed" ? undefined : 2}
+              />
+            </View>
+          ))
+        : null}
     </View>
   );
 }

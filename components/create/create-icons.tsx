@@ -1,7 +1,7 @@
 import { Text } from "react-native";
 import Svg, { Circle, Path } from "react-native-svg";
 import { styles } from "@/theme/styles";
-import { CREATE_CAMERA_CONTROL_ICON_SIZE } from "@/theme/tokens";
+import { CREATE_CAMERA_CONTROL_ICON_SIZE, overlayIconShadow } from "@/theme/tokens";
 import type { RecordingTimerSeconds } from "@/types/app";
 
 export function CreateEditTrimIcon({ active = false }: { active?: boolean }) {
@@ -154,7 +154,7 @@ export function CreateEditAudioIcon({ active = false }: { active?: boolean }) {
   const size = CREATE_CAMERA_CONTROL_ICON_SIZE;
   const strokeWidth = active ? 2.3 : 1.9;
   return (
-    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={overlayIconShadow}>
       <Path
         d="M9.2 18.4c0 1.55-1.25 2.8-2.8 2.8S3.6 19.95 3.6 18.4s1.25-2.8 2.8-2.8 2.8 1.25 2.8 2.8Z"
         stroke="#fff"
@@ -187,7 +187,7 @@ export function CreateEditAudioWaveformIcon({ active = false }: { active?: boole
     { x: 19.8, h: 8 },
   ];
   return (
-    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={overlayIconShadow}>
       {bars.map((bar) => (
         <Path
           key={bar.x}

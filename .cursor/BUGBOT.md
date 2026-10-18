@@ -18,7 +18,8 @@ Flag these as high severity:
 
 6. **Feed filter drift.** `lib/feed-filters.ts` (`feedVideoMatchesFilters`, `lookingForOnly`) must match `fetch_filtered_feed_videos` / `fetch_nearby_feed_videos`. Looking-for ON matches collaborator target tags; OFF matches the post’s own roles/genres, never the profile role. Changing only the client or only the SQL is a bug.
 7. **Jam-gate / blocks.** Video reads must still hide blocked users, hidden creators, and non-jam profile videos (`user_blocks`, jam-gate). Do not “simplify” RLS to make a query work.
-8. **Letterbox / aspect flash** on feed swipe or profile fullscreen. Do not reintroduce a DB `media_fit` column; aspect is client-side (`lib/video-display.ts`, letterbox shell, aspect-cache).
+8. **Letterbox / aspect flash** on feed swipe or profile fullscreen. Do not reintroduce a DB `media_fit` column. Persist `display_width` / `display_height` (rotation applied) and derive fit client-side from that size (`lib/video-display.ts`, letterbox shell, aspect-cache). The first poster and VideoView frame must use the same fit — never start `contain` and snap to `cover`.
+9. **Black frames, stuck covers, or muted-then-uncovered starts in the Discover feed.** Never play muted or covered. Start playback, unmute, and drop both covers in the same tick once a frame is displayable. Do not play under a still and flip audio/cover later. Do not clear the decoded-frame flag on pause/restart/hold. Do not swap to an uncached mid-clip Cloudflare thumb. Do not drop the cover on a timer. Do not leave the cover/spinner stuck over a playing video. Do not use `#000` as the feed cover fallback. Tab return must resume the exact leave position and pause/play state.
 
 ## Out of scope
 

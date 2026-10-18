@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Animated, Pressable, Text, View } from "react-native";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Animated, Easing, Pressable, Text, View } from "react-native";
 import { PanGestureHandler, type PanGestureHandlerStateChangeEvent } from "react-native-gesture-handler";
 import Svg, { Path } from "react-native-svg";
 import { getTrimProgressTrackGeometry, getTrimSelectionProgress } from "@/components/create/layout";
@@ -47,8 +47,171 @@ function TrimHandleChevron({ direction }: { direction: "left" | "right" }) {
   );
 }
 
+function AudioWaveformLoadingBars() {
+  const pulse = useRef(new Animated.Value(0)).current;
+  const bars = useMemo(
+    () => Array.from({ length: 28 }, (_, index) => 0.22 + 0.58 * Math.abs(Math.sin(index * 0.42))),
+    [],
+  );
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 640,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 0,
+          duration: 640,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+
+  return (
+    <View style={styles.createAudioWaveformBars}>
+      {bars.map((height, index) => {
+        const phase = (index % 8) / 8;
+        return (
+          <Animated.View
+            key={index}
+            style={[
+              styles.createAudioWaveformBar,
+              {
+                height: `${Math.round(height * 100)}%`,
+                opacity: pulse.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0.18 + phase * 0.2, 0.82 - phase * 0.12],
+                }),
+                transform: [
+                  {
+                    scaleY: pulse.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.38 + (1 - phase) * 0.18, 0.72 + phase * 0.28],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          />
+        );
+      })}
+    </View>
+  );
+}
+
+function PlaybackLoadingDots({ visible }: { visible: boolean }) {
+  const [rowOpacity] = useState(() => new Animated.Value(0));
+  const [dots] = useState(() => [
+    new Animated.Value(0),
+    new Animated.Value(0),
+    new Animated.Value(0),
+  ]);
+
+  useEffect(() => {
+    const fade = Animated.timing(rowOpacity, {
+      toValue: visible ? 1 : 0,
+      duration: 120,
+      useNativeDriver: true,
+    });
+    fade.start();
+    return () => fade.stop();
+  }, [rowOpacity, visible]);
+
+  useEffect(() => {
+    if (!visible) return;
+
+    const loops = dots.map((value, index) => {
+      value.setValue(0);
+      const loop = Animated.loop(
+        Animated.sequence([
+          Animated.timing(value, {
+            toValue: 1,
+            duration: 450,
+            easing: Easing.inOut(Easing.sin),
+            useNativeDriver: true,
+          }),
+          Animated.timing(value, {
+            toValue: 0,
+            duration: 450,
+            easing: Easing.inOut(Easing.sin),
+            useNativeDriver: true,
+          }),
+        ]),
+      );
+      const timeout = setTimeout(() => {
+        loop.start();
+      }, index * 150);
+      return { loop, timeout };
+    });
+
+    return () => {
+      for (const { loop, timeout } of loops) {
+        clearTimeout(timeout);
+        loop.stop();
+      }
+    };
+  }, [dots, visible]);
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: "100%",
+        height: 5,
+        marginBottom: 1,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 5,
+        opacity: rowOpacity,
+        zIndex: 2,
+      }}
+    >
+      {dots.map((value, index) => (
+        <Animated.View
+          key={index}
+          style={{
+            width: 5,
+            height: 5,
+            borderRadius: 2.5,
+            backgroundColor: "rgba(255,255,255,0.7)",
+            opacity: value.interpolate({
+              inputRange: [0, 1],
+              outputRange: [0.5, 1],
+            }),
+            transform: [
+              {
+                scale: value.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0.6, 1],
+                }),
+              },
+            ],
+          }}
+        />
+      ))}
+    </Animated.View>
+  );
+}
+
 export function CreateAudioTrimStrip({
   seed,
+  empty = false,
+  loading = false,
+  peaksLoading = false,
+  peaks = null,
+  playbackLoading = false,
   trimStartRatio,
   trimEndRatio,
   playbackRatio,
@@ -58,6 +221,11 @@ export function CreateAudioTrimStrip({
   onTrimHandleStateChange,
 }: {
   seed: string;
+  empty?: boolean;
+  loading?: boolean;
+  peaksLoading?: boolean;
+  peaks?: number[] | null;
+  playbackLoading?: boolean;
   trimStartRatio: number;
   trimEndRatio: number;
   playbackRatio: number;
@@ -67,15 +235,16 @@ export function CreateAudioTrimStrip({
   onTrimHandleStateChange: (handle: "start" | "end", event: PanGestureHandlerStateChangeEvent) => void;
 }) {
   const [stripWidth, setStripWidth] = useState(0);
-  const bars = useMemo(() => waveformHeights(seed), [seed]);
+  const fallbackBars = useMemo(() => waveformHeights(seed), [seed]);
+  const bars = peaks && peaks.length > 0 ? peaks : fallbackBars;
+  const showWaveformLoading = loading || (peaksLoading && !(peaks && peaks.length > 0));
   const trimLeft = trimStartRatio * stripWidth;
   const trimRight = (1 - trimEndRatio) * stripWidth;
   const selectionWidth = Math.max(0, stripWidth - trimLeft - trimRight);
   const { progressTrackLeft, progressTrackWidth } = getTrimProgressTrackGeometry(trimLeft, selectionWidth);
   const leftHandleLeft = trimLeft;
   const rightHandleLeft = trimLeft + selectionWidth - CREATE_TRIM_HANDLE_WIDTH;
-  const isStartFlush = trimStartRatio <= 0.001;
-  const isEndFlush = trimEndRatio >= 0.999;
+  const selectionCornerRadius = CREATE_TRIM_FILMSTRIP_RADIUS - 1;
   const selectionProgress = getTrimSelectionProgress(
     scrubRatio ?? playbackRatio,
     trimStartRatio,
@@ -93,23 +262,40 @@ export function CreateAudioTrimStrip({
         }
       }}
     >
+      <PlaybackLoadingDots visible={playbackLoading && !loading && !empty} />
       <View style={styles.createAudioWaveformStrip}>
-        <View style={styles.createAudioWaveformBars}>
-          {bars.map((height, index) => (
+        {showWaveformLoading ? (
+          <AudioWaveformLoadingBars />
+        ) : empty ? null : (
+          <View style={styles.createAudioWaveformBars}>
+            {bars.map((height, index) => (
+              <View
+                key={index}
+                style={[
+                  styles.createAudioWaveformBar,
+                  { height: `${Math.round(height * 100)}%` },
+                ]}
+              />
+            ))}
+          </View>
+        )}
+
+        {!empty && !showWaveformLoading && stripWidth > 0 ? (
+          <>
             <View
-              key={index}
+              pointerEvents="none"
               style={[
-                styles.createAudioWaveformBar,
-                { height: `${Math.round(height * 100)}%` },
+                styles.createTrimFilmstripDim,
+                { left: 0, width: trimLeft + selectionCornerRadius },
               ]}
             />
-          ))}
-        </View>
-
-        {stripWidth > 0 ? (
-          <>
-            <View pointerEvents="none" style={[styles.createTrimFilmstripDim, { left: 0, width: trimLeft }]} />
-            <View pointerEvents="none" style={[styles.createTrimFilmstripDim, { right: 0, width: trimRight }]} />
+            <View
+              pointerEvents="none"
+              style={[
+                styles.createTrimFilmstripDim,
+                { right: 0, width: trimRight + selectionCornerRadius },
+              ]}
+            />
             <View
               pointerEvents="none"
               style={[
@@ -119,10 +305,6 @@ export function CreateAudioTrimStrip({
                   width: selectionWidth,
                   borderLeftWidth: 0,
                   borderRightWidth: 0,
-                  borderTopLeftRadius: isStartFlush ? CREATE_TRIM_FILMSTRIP_RADIUS - 1 : 0,
-                  borderBottomLeftRadius: isStartFlush ? CREATE_TRIM_FILMSTRIP_RADIUS - 1 : 0,
-                  borderTopRightRadius: isEndFlush ? CREATE_TRIM_FILMSTRIP_RADIUS - 1 : 0,
-                  borderBottomRightRadius: isEndFlush ? CREATE_TRIM_FILMSTRIP_RADIUS - 1 : 0,
                 },
               ]}
             />
@@ -151,7 +333,6 @@ export function CreateAudioTrimStrip({
                 style={[
                   styles.createTrimHandleTab,
                   styles.createTrimHandleTabStart,
-                  isStartFlush && styles.createTrimHandleTabStartFlush,
                   { left: leftHandleLeft },
                 ]}
                 accessibilityLabel="audio start"
@@ -168,7 +349,6 @@ export function CreateAudioTrimStrip({
                 style={[
                   styles.createTrimHandleTab,
                   styles.createTrimHandleTabEnd,
-                  isEndFlush && styles.createTrimHandleTabEndFlush,
                   { left: rightHandleLeft },
                 ]}
                 accessibilityLabel="audio end"
@@ -185,6 +365,11 @@ export function CreateAudioTrimStrip({
 
 export function CreateAudioTrimPanel({
   seed,
+  empty = false,
+  loading = false,
+  peaksLoading = false,
+  peaks = null,
+  playbackLoading = false,
   durationLabel,
   trimStartRatio,
   trimEndRatio,
@@ -196,6 +381,11 @@ export function CreateAudioTrimPanel({
   onChangeAudio,
 }: {
   seed: string;
+  empty?: boolean;
+  loading?: boolean;
+  peaksLoading?: boolean;
+  peaks?: number[] | null;
+  playbackLoading?: boolean;
   durationLabel: string;
   trimStartRatio: number;
   trimEndRatio: number;
@@ -207,11 +397,11 @@ export function CreateAudioTrimPanel({
   onChangeAudio: () => void;
 }) {
   return (
-    <View style={styles.createTrimToolPanelContent}>
-      <View style={styles.createTrimHeader}>
+    <View style={styles.createAudioNextSlot}>
+      <View style={[styles.createTrimHeader, styles.createAudioNextHeader]}>
         <Text style={styles.sectionLabel}>audio</Text>
         <View style={styles.createAudioTrimHeaderActions}>
-          <Text style={styles.createTrimDuration}>{durationLabel}</Text>
+          <Text style={styles.createTrimDuration}>{loading ? "loading" : durationLabel}</Text>
           <Pressable onPress={onChangeAudio} accessibilityLabel="change audio">
             <Text style={styles.createAudioChangeText}>change</Text>
           </Pressable>
@@ -219,6 +409,11 @@ export function CreateAudioTrimPanel({
       </View>
       <CreateAudioTrimStrip
         seed={seed}
+        empty={empty}
+        loading={loading}
+        peaksLoading={peaksLoading}
+        peaks={peaks}
+        playbackLoading={playbackLoading}
         trimStartRatio={trimStartRatio}
         trimEndRatio={trimEndRatio}
         playbackRatio={playbackRatio}

@@ -1,6 +1,6 @@
 ---
-description: Keep client feed filters aligned with fetch_filtered_feed_videos / fetch_nearby_feed_videos.
-globs: lib/feed-filters.ts,lib/location-filter.ts,lib/native-social-data.ts,screens/discover-screen.tsx,components/discover/**/*.tsx,supabase/migrations/*feed*.sql,supabase/migrations/*looking*.sql,supabase/migrations/*location*.sql
+description: Keep client feed filters aligned with fetch_filtered_feed_videos / fetch_nearby_feed_videos. Never show a black feed frame.
+globs: lib/feed-filters.ts,lib/location-filter.ts,lib/native-social-data.ts,lib/video-display.ts,screens/discover-screen.tsx,components/discover/**/*.tsx,components/video/jam-video-view.tsx,components/video/aspect-cache.ts,supabase/migrations/*feed*.sql,supabase/migrations/*looking*.sql,supabase/migrations/*location*.sql,supabase/migrations/*display*.sql
 alwaysApply: false
 ---
 
@@ -21,3 +21,18 @@ lookingForOnly: Boolean(filters.lookingForActive);
 - Near Me is enforced in `fetch_nearby_feed_videos`. Keep the client matcher so already-loaded rows stay correct.
 - Filter changes that empty the feed or flash old clips are regressions. Preserve unseen → replay seen-video phases.
 - If you change `fetch_filtered_feed_videos` or `fetch_nearby_feed_videos`, update `lib/feed-filters.ts` (and tests, when they exist) in the same change.
+- `videos.display_width` / `display_height` are display-oriented pixels (rotation applied). Feed RPCs still return ids; hydration via `fetch_videos_by_ids_for_viewer` includes the columns on `FeedVideo`. Fit is derived client-side from that size — never a `media_fit` column. Do not start a clip on `contain` and snap to `cover`.
+
+## No black frames
+
+The Discover feed must never show a black VideoView. If playback is not ready, keep a frozen still up (the already-loaded t=0 poster, or a mid-clip thumb only after it has fully loaded). Use dark grey / the poster as the fallback, never `#000`.
+
+Never play muted or covered. Keep the player paused at the start (or tab-return) position under the still until it is `readyToPlay` and has a displayable frame (`onFirstFrameRender` / `hasDecodedFrameRef`). Then in the same tick: unmute, `play()`, and drop both covers. Do not start playback under a still and flip audio/cover later. Do not use a 48ms timer or wait on `timeUpdate` progress.
+
+Do not clear `hasDecodedFrameRef` on pause / restart / hold. Reset it only when the source or player changes. Already-loaded players (swipe-back, tab return) start immediately on activation. Never leave the cover or spinner stuck over a playing video.
+
+A buffering spinner may appear over the still after ~800ms only when the player is genuinely not ready (`status !== readyToPlay` or no decoded frame yet).
+
+Tab return must restore the exact prior state: resume from the leave position (not t=0). If it was playing, keep playing; if the user had paused, stay paused on that frame. Do not remount the Discover tab to “fix” a black flash. Do not swap the cover to an uncached Cloudflare `time=` thumbnail.
+
+Never re-show a cover after playback has started. Cover visibility must follow the real playback state, not a one-shot event. Do not re-arm the feed poster (`waitingForFirstPlay`) on tab return after `beginVisiblePlayback` has already dropped the still.

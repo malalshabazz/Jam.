@@ -66,11 +66,24 @@ function resolveAuthBridgeBaseUrl() {
 /**
  * Supabase email links must land on HTTPS first. The bridge page then forwards
  * into the app deep link (jam:// in builds, exp:// in Expo Go).
+ *
+ * Native jam:// returns are omitted from the query string: Redirect URLs
+ * allowlists often reject `?return=` and fall back to Site URL (localhost),
+ * which is what made confirmation emails fail to reopen the app. The bridge
+ * already defaults to jam://auth. Expo Go still needs ?return=exp://...
  */
 export function getAuthEmailRedirectUrl(path = "auth") {
   const returnTo = Linking.createURL(path);
   const bridge = resolveAuthBridgeBaseUrl();
   if (!bridge) return returnTo;
+
+  try {
+    const protocol = new URL(returnTo).protocol.replace(/:$/, "").toLowerCase();
+    if (protocol === "jam") return bridge;
+  } catch {
+    // Keep ?return= if the deep link cannot be parsed.
+  }
+
   return `${bridge}?return=${encodeURIComponent(returnTo)}`;
 }
 

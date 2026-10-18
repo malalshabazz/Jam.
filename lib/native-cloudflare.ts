@@ -35,6 +35,18 @@ export function logVideoUploadStep(step: string, details?: Record<string, unknow
 }
 
 export function getVideoUploadErrorDetails(error: unknown) {
+  if (error && typeof error === "object" && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.length > 0) {
+      return {
+        name: error instanceof Error ? error.name : undefined,
+        message,
+        code: "code" in error ? (error as { code?: unknown }).code : undefined,
+        stack: error instanceof Error ? error.stack : undefined,
+      };
+    }
+  }
+
   if (error instanceof Error) {
     return {
       name: error.name,
@@ -247,18 +259,34 @@ export function extractCloudflareStreamId(mediaUrl: string | null | undefined) {
 export function getCloudflareThumbnailUrl(
   streamId: string,
   thumbnailTimeMs?: number | null,
-  options?: { height?: number; width?: number },
+  options?: { height?: number; width?: number; fit?: "clip" | "crop" | "fill" },
 ) {
   // Cloudflare defaults width+height to 640 and fit=crop, which center-crops
   // landscape into a tall/square poster and makes the feed think it's portrait.
+  // fit=fill letterboxes with black; clip pads with grey.
   const edge = Math.max(320, options?.height ?? options?.width ?? 1280);
   const width = options?.width ?? edge;
   const height = options?.height ?? edge;
+  const fit = options?.fit ?? "fill";
   const rawMs =
     typeof thumbnailTimeMs === "number" && Number.isFinite(thumbnailTimeMs) ? thumbnailTimeMs : 1000;
-  // Prefer a non-zero timestamp — exact 0s is often a black camera-open frame.
-  const timeSeconds = Math.max(0.1, rawMs <= 0 ? 1 : rawMs / 1000);
-  return `https://videodelivery.net/${streamId}/thumbnails/thumbnail.jpg?time=${timeSeconds}s&width=${width}&height=${height}&fit=clip`;
+  const timeSeconds = Math.max(0, rawMs / 1000);
+  return `https://videodelivery.net/${streamId}/thumbnails/thumbnail.jpg?time=${timeSeconds}s&width=${width}&height=${height}&fit=${fit}`;
+}
+
+/**
+ * Thumbnail with a single dimension so Stream keeps the display aspect,
+ * including iOS screen recordings that are portrait-coded with a 90° flag.
+ * `getCloudflareThumbnailUrl` always sends both edges and can square/crop.
+ */
+export function getCloudflareDisplayAspectThumbnailUrl(
+  streamId: string,
+  thumbnailTimeMs?: number | null,
+) {
+  const rawMs =
+    typeof thumbnailTimeMs === "number" && Number.isFinite(thumbnailTimeMs) ? thumbnailTimeMs : 0;
+  const timeSeconds = Math.max(0, rawMs / 1000);
+  return `https://videodelivery.net/${streamId}/thumbnails/thumbnail.jpg?time=${timeSeconds}s&height=720&fit=scale`;
 }
 
 /** Largest RESOLUTION=WxH from an HLS master playlist (Cloudflare Stream). */
@@ -435,8 +463,15 @@ async function isPublicStreamManifestReady(cloudflareStreamId: string) {
 }
 
 /** Thumbnails can lag briefly behind the HLS manifest becoming available. */
-async function isPublicStreamThumbnailReady(cloudflareStreamId: string) {
-  const thumbnailUrl = getCloudflareThumbnailUrl(cloudflareStreamId, 1000, { height: 320 });
+async function isPublicStreamThumbnailReady(
+  cloudflareStreamId: string,
+  thumbnailTimeMs?: number | null,
+) {
+  const thumbnailUrl = getCloudflareThumbnailUrl(cloudflareStreamId, thumbnailTimeMs ?? 1000, {
+    width: 360,
+    height: 640,
+    fit: "fill",
+  });
   try {
     const response = await fetch(thumbnailUrl, { method: "GET" });
     if (!response.ok) return false;
@@ -449,7 +484,10 @@ async function isPublicStreamThumbnailReady(cloudflareStreamId: string) {
   }
 }
 
-export async function waitForCloudflareStreamReady(cloudflareStreamId: string) {
+export async function waitForCloudflareStreamReady(
+  cloudflareStreamId: string,
+  thumbnailTimeMs?: number | null,
+) {
   // Publish as soon as HLS can play — local posters cover thumb lag.
   const timeoutMs = 90_000;
   const intervalMs = 1_500;
@@ -466,7 +504,7 @@ export async function waitForCloudflareStreamReady(cloudflareStreamId: string) {
     const manifestReady = await isPublicStreamManifestReady(cloudflareStreamId);
     if (manifestReady) {
       // Best-effort thumb check; never block publish on it.
-      const thumbnailReady = await isPublicStreamThumbnailReady(cloudflareStreamId);
+      const thumbnailReady = await isPublicStreamThumbnailReady(cloudflareStreamId, thumbnailTimeMs);
       logVideoUploadStep("stream ready wait response", {
         ok: true,
         ready: true,

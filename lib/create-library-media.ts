@@ -1,5 +1,6 @@
 import * as FileSystem from "expo-file-system/legacy";
 import * as ImagePicker from "expo-image-picker";
+import { getThumbnailAsync } from "expo-video-thumbnails";
 import { getVideoUploadErrorDetails, logVideoUploadStep } from "@/lib/native-cloudflare";
 import { MAX_SLIDESHOW_IMAGES } from "@/lib/native-slideshow-storage";
 
@@ -90,13 +91,30 @@ export async function materializeLibraryAsset(
   const dest = `${cacheDir}jam-library-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${extension}`;
 
   async function acceptUri(uri: string, size: number | null): Promise<MaterializedLibraryAsset> {
+    let width = asset.width || null;
+    let height = asset.height || null;
+    // Photos reports coded size for iOS screen recordings (often portrait + 90°).
+    // Thumbnail generation applies preferredTransform — that's the feed aspect.
+    if (kind === "video") {
+      try {
+        const thumb = await getThumbnailAsync(uri, { time: 0, quality: 0.2 });
+        if (thumb.width > 0 && thumb.height > 0) {
+          width = thumb.width;
+          height = thumb.height;
+        }
+      } catch (error) {
+        logVideoUploadStep("library video display size probe failed", {
+          ...getVideoUploadErrorDetails(error),
+        });
+      }
+    }
     return {
       uri,
       fileName,
       mimeType,
       fileSize: size,
-      width: asset.width || null,
-      height: asset.height || null,
+      width,
+      height,
       durationMs: libraryVideoDurationMs(asset.duration),
     };
   }

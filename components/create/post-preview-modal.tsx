@@ -1,11 +1,16 @@
 import { useState } from "react";
-import { Modal, Pressable, Text, View } from "react-native";
+import { ActivityIndicator, Modal, Pressable, Text, View } from "react-native";
+import { VideoThumbnailFilmstrip } from "@/components/create/video-thumbnail-filmstrip";
+import { CreateEditSoundtrack } from "@/components/create/edit-soundtrack";
+import { CREATE_THUMBNAIL_FILMSTRIP_FRAME_HEIGHT } from "@/theme/tokens";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { JamVideoView } from "@/components/video/jam-video-view";
+import { JamSlideshowView } from "@/components/video/jam-slideshow-view";
+import { getNineSixteenCanvasRect } from "@/components/video/aspect-cache";
 import { getVideoFilterOverlayStyle, VideoTextOverlayGlyph } from "@/components/VideoPresentationOverlays";
 import { Avatar } from "@/components/ui/avatar";
 import { ProBadge } from "@/components/ui/badges";
-import { LookingForIcon } from "@/components/icons/looking-for-icon";
+import { FeedLookingForRow } from "@/components/discover/feed-looking-for-row";
 import { getCreateTextOverlayFontSize, getCreateTextOverlayLineHeight } from "@/components/create/layout";
 import { getUniqueStrings } from "@/lib/format";
 import { formatProfileLocationLabel } from "@/lib/location-filter";
@@ -14,7 +19,6 @@ import { getNavBarHeight } from "@/lib/nav-bar";
 import {
   clampTextOverlayFontScale,
   getVideoTextEffectChrome,
-  getVideoTextOutlineRadius,
   getVideoTextOverlayFontFamily,
   getVideoTextOverlayFontWeight,
 } from "@/lib/video-presentation";
@@ -29,30 +33,50 @@ export function CreatePostPreviewModal({
   videoUri,
   videoWidth = null,
   videoHeight = null,
+  slideshowImageUris = [],
+  audioUri = null,
+  audioTrimStartRatio = 0,
+  audioTrimEndRatio = 1,
   filter,
   textOverlays,
   caption,
   lookingFor = false,
+  lookingForRoles = [],
+  lookingForGenres = [],
   profile,
   roles,
   genres,
   trimStartRatio = 0,
   trimEndRatio = 1,
+  thumbnailFrames = [],
+  selectedThumbnailTimeMs = 0,
+  loadingThumbnailFrames = false,
+  onSelectThumbnail,
 }: {
   visible: boolean;
   onClose: () => void;
   videoUri: string | null;
   videoWidth?: number | null;
   videoHeight?: number | null;
+  slideshowImageUris?: string[];
+  audioUri?: string | null;
+  audioTrimStartRatio?: number;
+  audioTrimEndRatio?: number;
   filter: VideoFilter;
   textOverlays: CreateTextOverlayItem[];
   caption: string;
   lookingFor?: boolean;
+  lookingForRoles?: string[];
+  lookingForGenres?: string[];
   profile: Profile | null;
   roles: string[];
   genres: string[];
   trimStartRatio?: number;
   trimEndRatio?: number;
+  thumbnailFrames?: Array<{ timeMs: number; uri: string }>;
+  selectedThumbnailTimeMs?: number;
+  loadingThumbnailFrames?: boolean;
+  onSelectThumbnail?: (timeMs: number, uri: string) => void;
 }) {
   const insets = useSafeAreaInsets();
   const displayName = profile?.display_name?.trim() || "you";
@@ -72,34 +96,74 @@ export function CreatePostPreviewModal({
   const previewNavBarHeight = getNavBarHeight(insets.bottom);
   const [previewFrameSize, setPreviewFrameSize] = useState({ width: viewportWidth, height: viewportHeight });
   const [previewTextSizes, setPreviewTextSizes] = useState<Record<string, { width: number; height: number }>>({});
-  const previewVideoHeight = Math.max(0, previewFrameSize.height - previewNavBarHeight);
+  const slideshowImages = slideshowImageUris.map((uri) => uri.trim()).filter(Boolean);
+  const isSlideshowPreview = slideshowImages.length > 0;
+  // Slideshow photos use the below-status-bar box (same as JamSlideshowView);
+  // video preview keeps the full frame above the nav bar.
+  const previewMediaTop = isSlideshowPreview ? insets.top : 0;
+  const previewVideoHeight = Math.max(
+    0,
+    previewFrameSize.height - previewNavBarHeight - previewMediaTop,
+  );
+  const previewCanvas = getNineSixteenCanvasRect(previewFrameSize.width, previewVideoHeight);
+  const previewCanvasFontScale =
+    viewportWidth > 0 ? previewCanvas.width / viewportWidth : 1;
+  const previewFilmstripHeight = Math.min(
+    CREATE_THUMBNAIL_FILMSTRIP_FRAME_HEIGHT,
+    Math.max(48, previewNavBarHeight - Math.max(insets.bottom, 10) - 12),
+  );
 
-  if (!visible || !videoUri) return null;
+  if (!visible || (!videoUri && !isSlideshowPreview)) return null;
 
   return (
     <Modal animationType="fade" transparent visible={visible} onRequestClose={onClose}>
       <Pressable style={styles.createPostPreviewBackdrop} onPress={onClose}>
         <View
-          style={[styles.createPostPreviewFrame, { paddingTop: insets.top, paddingBottom: insets.bottom }]}
+          style={[
+            styles.createPostPreviewFrame,
+            {
+              // Slideshow applies its own status-bar inset inside JamSlideshowView.
+              paddingTop: isSlideshowPreview ? 0 : insets.top,
+              paddingBottom: insets.bottom,
+            },
+          ]}
           onLayout={(event) => {
             const { width, height } = event.nativeEvent.layout;
             setPreviewFrameSize({ width, height });
           }}
         >
           <View style={[styles.feedPreviewVideoClip, { bottom: previewNavBarHeight }]}>
-            <JamVideoView
-              source={videoUri}
-              style={styles.createPostPreviewVideo}
-              knownWidth={videoWidth}
-              knownHeight={videoHeight}
-              shouldPlay
-              isLooping
-              isMuted={false}
-              volume={1}
-              trimStartRatio={trimStartRatio}
-              trimEndRatio={trimEndRatio}
-            />
-            {filter !== "none" && (
+            {isSlideshowPreview ? (
+              <JamSlideshowView
+                imageUrls={slideshowImages}
+                audioUrl={null}
+                shouldPlay
+                isActive
+                style={styles.createPostPreviewVideo}
+              />
+            ) : videoUri ? (
+              <JamVideoView
+                source={videoUri}
+                style={styles.createPostPreviewVideo}
+                knownWidth={videoWidth}
+                knownHeight={videoHeight}
+                shouldPlay
+                isLooping
+                isMuted={Boolean(audioUri)}
+                volume={audioUri ? 0 : 1}
+                trimStartRatio={trimStartRatio}
+                trimEndRatio={trimEndRatio}
+              />
+            ) : null}
+            {audioUri ? (
+              <CreateEditSoundtrack
+                uri={audioUri}
+                playing
+                trimStartRatio={audioTrimStartRatio}
+                trimEndRatio={audioTrimEndRatio}
+              />
+            ) : null}
+            {filter !== "none" && !isSlideshowPreview && (
               <View
                 pointerEvents="none"
                 style={[styles.createPostPreviewFilter, getVideoFilterOverlayStyle(filter)]}
@@ -109,13 +173,20 @@ export function CreatePostPreviewModal({
           </View>
           {visibleTextOverlays.map((overlay) => {
             const previewTextSize = previewTextSizes[overlay.id] ?? { width: 0, height: 0 };
-            const previewTextLeft = previewFrameSize.width * overlay.centerRatio.x - previewTextSize.width / 2;
-            const previewTextTop = previewVideoHeight * overlay.centerRatio.y - previewTextSize.height / 2;
-            const previewFontSize = getCreateTextOverlayFontSize(
-              clampTextOverlayFontScale(overlay.fontScale),
-            );
+            const previewTextLeft =
+              previewCanvas.left +
+              previewCanvas.width * overlay.centerRatio.x -
+              previewTextSize.width / 2;
+            const previewTextTop =
+              previewMediaTop +
+              previewCanvas.top +
+              previewCanvas.height * overlay.centerRatio.y -
+              previewTextSize.height / 2;
+            const previewFontSize =
+              getCreateTextOverlayFontSize(clampTextOverlayFontScale(overlay.fontScale)) *
+              previewCanvasFontScale;
             const previewLineHeight = getCreateTextOverlayLineHeight(previewFontSize);
-            const previewMaxWidth = Math.max(120, previewFrameSize.width * TEXT_OVERLAY_MAX_WIDTH_RATIO);
+            const previewMaxWidth = Math.max(120, previewCanvas.width * TEXT_OVERLAY_MAX_WIDTH_RATIO);
             const previewFontFamily = getVideoTextOverlayFontFamily(overlay.fontId);
             const previewFontWeight = getVideoTextOverlayFontWeight(overlay.fontId);
             const previewChrome = getVideoTextEffectChrome(overlay.effectId, {
@@ -182,16 +253,14 @@ export function CreatePostPreviewModal({
                 </Text>
               </View>
             </View>
-            {lookingFor || trimmedCaption ? (
+            <FeedLookingForRow
+              lookingFor={lookingFor}
+              roles={lookingForRoles}
+              genres={lookingForGenres}
+            />
+            {trimmedCaption ? (
               <View style={styles.feedCaptionRow}>
-                {lookingFor ? (
-                  <View style={styles.feedLookingForIcon} accessibilityLabel="looking for collaborators">
-                    <LookingForIcon active size={19} shadow />
-                  </View>
-                ) : null}
-                {trimmedCaption ? (
-                  <Text style={[styles.caption, styles.feedCaptionText]}>{trimmedCaption}</Text>
-                ) : null}
+                <Text style={[styles.caption, styles.feedCaptionText]}>{trimmedCaption}</Text>
               </View>
             ) : null}
             {visibleTags.length > 0 ? (
@@ -204,10 +273,28 @@ export function CreatePostPreviewModal({
               </View>
             ) : null}
           </View>
-          <View
-            pointerEvents="none"
-            style={[styles.createPostPreviewNavBarPlaceholder, { height: previewNavBarHeight }]}
-          />
+          <Pressable
+            onPress={() => undefined}
+            style={[
+              styles.createPostPreviewNavBarPlaceholder,
+              styles.createPostPreviewFilmstripBar,
+              { height: previewNavBarHeight, paddingBottom: Math.max(insets.bottom, 8) },
+            ]}
+          >
+            {thumbnailFrames.length > 0 && onSelectThumbnail ? (
+              <VideoThumbnailFilmstrip
+                frames={thumbnailFrames}
+                filter={filter}
+                textOverlays={textOverlays}
+                initialTimeMs={selectedThumbnailTimeMs}
+                embedded
+                frameHeight={previewFilmstripHeight}
+                onSelect={onSelectThumbnail}
+              />
+            ) : loadingThumbnailFrames ? (
+              <ActivityIndicator color="#fff" />
+            ) : null}
+          </Pressable>
           <Pressable
             style={[styles.createPostPreviewClose, { top: insets.top + 8 }]}
             onPress={onClose}

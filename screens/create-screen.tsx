@@ -40,17 +40,9 @@ import {
   getVideoFilterOverlayStyle,
 } from "@/components/VideoPresentationOverlays";
 import type { JamVideoPlaybackStatus } from "@/components/video/jam-video-view";
-import {
-  contentFitForVideoSize,
-  ensureVideoAspectCached,
-  getRememberedVideoAspectSize,
-  getVideoAspectCacheKeyFromSource,
-  imageResizeModeForVideoSize,
-  rememberVideoAspectSize,
-} from "@/components/video/aspect-cache";
+import { contentFitForVideoSize } from "@/components/video/aspect-cache";
 import { ConfirmModal } from "@/components/ui/confirm-modal";
 import { PrimaryButton } from "@/components/ui/primary-button";
-import { SectionLabel } from "@/components/ui/section-label";
 import { LookingForIcon } from "@/components/icons/looking-for-icon";
 import {
   CreateCameraFilterIcon,
@@ -77,6 +69,7 @@ import {
   getCreateCameraControlsBottom,
   getCreateCameraFilterRestBottom,
   getCreateCameraFilterSlideDistance,
+  getCreateMediaCardRect,
   getFeedVideoViewport,
   snapTextOverlayCenterRatio,
 } from "@/components/create/layout";
@@ -84,13 +77,17 @@ import { CreatePostPreviewModal } from "@/components/create/post-preview-modal";
 import { CreateCaptureShutter } from "@/components/create/capture-shutter";
 import { CreateEditAlbumPager } from "@/components/create/edit-album-pager";
 import { CreateAudioTrimPanel } from "@/components/create/edit-audio-trim";
-import { CreateEditSoundtrack } from "@/components/create/edit-soundtrack";
+import {
+  CreateEditSoundtrack,
+  type CreateEditSoundtrackHandle,
+} from "@/components/create/edit-soundtrack";
 import { RecordingElapsedTimer } from "@/components/create/record-controls";
-import { TagPicker } from "@/components/create/tag-picker";
+import { LinedTagField } from "@/components/create/lined-tag-field";
+import { LookingForTagFields } from "@/components/create/looking-for-tag-fields";
 import { CreateEditTextOverlayItem } from "@/components/create/text-overlay-editors";
 import { CreateTrimFilmstrip } from "@/components/create/trim-filmstrip";
-import { VideoThumbnailFilmstrip } from "@/components/create/video-thumbnail-filmstrip";
 import { waitMs } from "@/lib/animation";
+import { getAudioPeaks } from "@/lib/audio-waveform";
 import {
   bakeVideoPresentation,
   isVideoBakeAvailable,
@@ -143,6 +140,7 @@ import {
   CREATE_RECORDING_TIMER_OPTIONS,
   CREATE_THUMBNAIL_FRAME_COUNT,
   CREATE_TRIM_FILMSTRIP_FRAME_COUNT,
+  FEED_VIDEO_BOTTOM_CORNER_RADIUS,
   MAX_VIDEO_GENRES,
   MAX_VIDEO_ROLES,
   TEXT_OVERLAY_CENTER_GUIDE_DWELL_MS,
@@ -159,6 +157,13 @@ import type {
   RecordingTimerSeconds,
   VideoFilter,
 } from "@/types/app";
+
+/** Soundtrack is required unless the album is exactly one video and no photos. */
+function albumRequiresSoundtrack(items: CreateEditItem[]) {
+  const videos = items.filter((item) => item.kind === "video").length;
+  const images = items.filter((item) => item.kind === "image").length;
+  return !(videos === 1 && images === 0);
+}
 
 export function CreateScreen({
   userId,
@@ -179,6 +184,12 @@ export function CreateScreen({
   const [slideshowAudio, setSlideshowAudio] = useState<SlideshowAudioAsset | null>(null);
   const [slideshowAudioDurationMs, setSlideshowAudioDurationMs] = useState<number | null>(null);
   const [slideshowAudioLabel, setSlideshowAudioLabel] = useState<string | null>(null);
+  const [slideshowAudioAttaching, setSlideshowAudioAttaching] = useState(false);
+  const [slideshowAudioReady, setSlideshowAudioReady] = useState(false);
+  const [slideshowAudioError, setSlideshowAudioError] = useState(false);
+  const [audioAttachTimingStartedAt, setAudioAttachTimingStartedAt] = useState<number | null>(null);
+  const [audioLoadingToastVisible, setAudioLoadingToastVisible] = useState(false);
+  const [audioToastMessage, setAudioToastMessage] = useState("audio still loading");
   const [caption, setCaption] = useState("");
   const [selectedRoles, setSelectedRoles] = useState<string[]>([]);
   const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
@@ -198,20 +209,27 @@ export function CreateScreen({
   const [activeEditTool, setActiveEditTool] = useState<"trim" | "filters" | "text" | "audio" | null>(null);
   const [audioTrimStartRatio, setAudioTrimStartRatio] = useState(0);
   const [audioTrimEndRatio, setAudioTrimEndRatio] = useState(1);
+  const [audioPeaks, setAudioPeaks] = useState<number[] | null>(null);
+  const [audioPeaksLoading, setAudioPeaksLoading] = useState(false);
   const [audioScrubRatio, setAudioScrubRatio] = useState<number | null>(null);
   const [audioPlaybackRatio, setAudioPlaybackRatio] = useState(0);
   const [audioTimelineWidth, setAudioTimelineWidth] = useState(0);
+  const [audioTrimResumeSignal, setAudioTrimResumeSignal] = useState(0);
+  const [audioPlaybackLoading, setAudioPlaybackLoading] = useState(false);
   const [selectedFilter, setSelectedFilter] = useState<VideoFilter>("none");
   const [lookingForCollaborators, setLookingForCollaborators] = useState(false);
+  const [selectedLookingForRoles, setSelectedLookingForRoles] = useState<string[]>([]);
+  const [selectedLookingForGenres, setSelectedLookingForGenres] = useState<string[]>([]);
   const [editingTextOverlayId, setEditingTextOverlayId] = useState<string | null>(null);
   const [editPagerScrolling, setEditPagerScrolling] = useState(false);
+  const [editUserPaused, setEditUserPaused] = useState(false);
   const [textOverlayActionId, setTextOverlayActionId] = useState<string | null>(null);
   const [textOverlayActionRenderId, setTextOverlayActionRenderId] = useState<string | null>(null);
   const [textFontPickerOverlayId, setTextFontPickerOverlayId] = useState<string | null>(null);
   const [textOverlaySizes, setTextOverlaySizes] = useState<Record<string, { width: number; height: number }>>({});
   const [editViewportSize, setEditViewportSize] = useState({
     width: viewportWidth,
-    height: viewportHeight - getNavBarHeight(0),
+    height: viewportHeight,
   });
   const [postPreviewOpen, setPostPreviewOpen] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
@@ -276,6 +294,7 @@ export function CreateScreen({
   const pinchBaseZoomRef = useRef(0);
   const cameraFocusGenerationRef = useRef(0);
   const createStageRef = useRef<CreateStage>("camera");
+  const soundtrackRef = useRef<CreateEditSoundtrackHandle | null>(null);
   const textInputRef = useRef<TextInput>(null);
   const editingTextDraftRef = useRef("");
   const editingTextOverlayIdRef = useRef<string | null>(null);
@@ -289,19 +308,42 @@ export function CreateScreen({
   const textOverlayVerticalGuideOpacity = useRef(new Animated.Value(0)).current;
   const textOverlayHorizontalGuideOpacity = useRef(new Animated.Value(0)).current;
   const editNextButtonOpacity = useRef(new Animated.Value(1)).current;
+  const audioLoadingToastOpacity = useRef(new Animated.Value(0)).current;
+  const audioLoadingToastHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioAttachTimingStartedAtRef = useRef<number | null>(null);
   const textOverlayVerticalGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textOverlayHorizontalGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textOverlayVerticalGuideVisibleRef = useRef(false);
   const textOverlayHorizontalGuideVisibleRef = useRef(false);
   const pinchZoomFrameRef = useRef<number | null>(null);
   const trimDragStartRef = useRef({ start: 0, end: 1 });
+  const trimDragActiveRef = useRef(false);
+  const trimDisplayedRef = useRef({ start: 0, end: 1 });
+  const trimLastHandleRef = useRef<"start" | "end">("start");
+  const trimLastTranslationXRef = useRef(0);
+  const trimFailsafeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const trimFailsafeRearmedRef = useRef(false);
+  const trimScrubRatioRef = useRef<number | null>(null);
   const audioTrimDragStartRef = useRef({ start: 0, end: 1 });
+  const audioTrimDragActiveRef = useRef(false);
+  const audioTrimDisplayedRef = useRef({ start: 0, end: 1 });
+  const audioTrimLastHandleRef = useRef<"start" | "end">("start");
+  const audioTrimLastTranslationXRef = useRef(0);
+  const audioTrimFailsafeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioTrimFailsafeRearmedRef = useRef(false);
+  const audioScrubRatioRef = useRef<number | null>(null);
+  const editPagerScrollFailsafeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const uploadSessionRef = useRef(0);
   const thumbnailLoadSessionRef = useRef(0);
+  const thumbnailFramesSourceRef = useRef<string | null>(null);
   const trimFilmstripLoadSessionRef = useRef(0);
   const selectedVideoDurationMsRef = useRef(0);
   const textOverlaysRef = useRef<CreateTextOverlayItem[]>([]);
   const currentEditItemIdRef = useRef<string | null>(null);
+  const detailsScrollRef = useRef<ScrollView>(null);
+  const detailsScrollYRef = useRef(0);
+  const detailsPostBarHeightRef = useRef(64);
+  const focusedTagFieldRef = useRef<View | null>(null);
   const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
 
@@ -314,6 +356,41 @@ export function CreateScreen({
   useEffect(() => {
     void fetchProfile(userId).then(setProfile);
   }, [userId]);
+
+  function revealFocusedTagField(keyboardHeight: number) {
+    const field = focusedTagFieldRef.current;
+    if (!field || keyboardHeight <= 0) return;
+    field.measureInWindow((_x, y, _w, height) => {
+      const reserved = keyboardHeight + detailsPostBarHeightRef.current + 16;
+      const overflow = y + height - (viewportHeight - reserved);
+      if (overflow <= 8) return;
+      detailsScrollRef.current?.scrollTo({
+        y: Math.max(0, detailsScrollYRef.current + overflow),
+        animated: true,
+      });
+    });
+  }
+
+  function handleTagFieldFocus(fieldRef: RefObject<View | null>) {
+    focusedTagFieldRef.current = fieldRef.current;
+    const keyboardHeight = Keyboard.metrics?.()?.height ?? 0;
+    if (keyboardHeight > 0) {
+      requestAnimationFrame(() => revealFocusedTagField(keyboardHeight));
+    }
+  }
+
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", (event) => {
+      revealFocusedTagField(event.endCoordinates.height);
+    });
+    const hide = Keyboard.addListener("keyboardDidHide", () => {
+      focusedTagFieldRef.current = null;
+    });
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   useEffect(() => {
     Animated.timing(editNextButtonOpacity, {
@@ -386,9 +463,34 @@ export function CreateScreen({
   }, [createStage]);
 
   useEffect(() => {
+    setEditUserPaused(false);
+  }, [createStage]);
+
+  useEffect(() => {
+    audioScrubRatioRef.current = audioScrubRatio;
+  }, [audioScrubRatio]);
+
+  useEffect(() => {
+    trimScrubRatioRef.current = trimScrubRatio;
+  }, [trimScrubRatio]);
+
+  useEffect(() => {
     if (!isFocused) return;
     setCameraPreviewActive(createStage === "camera");
   }, [createStage, isFocused]);
+
+  useEffect(() => {
+    if (!__DEV__) return;
+    if (createStage !== "camera" && createStage !== "edit") return;
+    const card = getCreateMediaCardRect(insets.top);
+    console.log("[create-card]", {
+      stage: createStage,
+      top: card.top,
+      height: card.height,
+      insetsTop: insets.top,
+      screenH: viewportHeight,
+    });
+  }, [createStage, insets.top]);
 
   useEffect(() => {
     return () => {
@@ -671,11 +773,29 @@ export function CreateScreen({
     setSlideshowAudio(null);
     setSlideshowAudioDurationMs(null);
     setSlideshowAudioLabel(null);
+    setSlideshowAudioAttaching(false);
+    setSlideshowAudioReady(false);
+    setSlideshowAudioError(false);
+    setAudioAttachTimingStartedAt(null);
+    audioAttachTimingStartedAtRef.current = null;
+    setAudioPeaks(null);
+    setAudioPeaksLoading(false);
+    setAudioLoadingToastVisible(false);
+    audioLoadingToastOpacity.setValue(0);
     setAudioTrimStartRatio(0);
     setAudioTrimEndRatio(1);
+    audioTrimDragActiveRef.current = false;
+    audioTrimFailsafeRearmedRef.current = false;
+    if (audioTrimFailsafeTimerRef.current) {
+      clearTimeout(audioTrimFailsafeTimerRef.current);
+      audioTrimFailsafeTimerRef.current = null;
+    }
+    audioScrubRatioRef.current = null;
     setAudioScrubRatio(null);
     setAudioPlaybackRatio(0);
     setAudioTimelineWidth(0);
+    setAudioTrimResumeSignal(0);
+    setAudioPlaybackLoading(false);
     setCaption("");
     setSelectedRoles([]);
     setSelectedGenres([]);
@@ -685,8 +805,16 @@ export function CreateScreen({
     setThumbnailFrameOptions([]);
     setLoadingThumbnailFrames(false);
     thumbnailLoadSessionRef.current += 1;
+    thumbnailFramesSourceRef.current = null;
     setTrimStartRatio(0);
     setTrimEndRatio(1);
+    trimDragActiveRef.current = false;
+    trimFailsafeRearmedRef.current = false;
+    if (trimFailsafeTimerRef.current) {
+      clearTimeout(trimFailsafeTimerRef.current);
+      trimFailsafeTimerRef.current = null;
+    }
+    trimScrubRatioRef.current = null;
     setTrimScrubRatio(null);
     setTrimPlaybackResumeSignal(0);
     setEditPlaybackRatio(0);
@@ -697,7 +825,13 @@ export function CreateScreen({
     setActiveEditTool(null);
     setSelectedFilter("none");
     setLookingForCollaborators(false);
+    setSelectedLookingForRoles([]);
+    setSelectedLookingForGenres([]);
     currentEditItemIdRef.current = null;
+    if (editPagerScrollFailsafeTimerRef.current) {
+      clearTimeout(editPagerScrollFailsafeTimerRef.current);
+      editPagerScrollFailsafeTimerRef.current = null;
+    }
     setEditPagerScrolling(false);
     setEditingTextOverlayId(null);
     setTextOverlayActionId(null);
@@ -864,6 +998,17 @@ export function CreateScreen({
         logVideoUploadStep("in-app camera recording missing uri", {});
         return;
       }
+      if (__DEV__) {
+        const recordedSize = recorded as { uri: string; width?: unknown; height?: unknown };
+        const width = typeof recordedSize.width === "number" ? recordedSize.width : null;
+        const height = typeof recordedSize.height === "number" ? recordedSize.height : null;
+        console.log("[camera] output", {
+          kind: "video",
+          width,
+          height,
+          ratio: width && height ? width / height : null,
+        });
+      }
 
       setRecording(false);
 
@@ -997,6 +1142,16 @@ export function CreateScreen({
       if (!photo?.uri) {
         logVideoUploadStep("in-app camera photo missing uri", {});
         return;
+      }
+      if (__DEV__) {
+        const width = typeof photo.width === "number" ? photo.width : null;
+        const height = typeof photo.height === "number" ? photo.height : null;
+        console.log("[camera] output", {
+          kind: "photo",
+          width,
+          height,
+          ratio: width && height ? width / height : null,
+        });
       }
 
       startEditAlbum([
@@ -1221,10 +1376,13 @@ export function CreateScreen({
   }
 
   async function loadThumbnailFrameOptions(videoUri: string, durationMs: number) {
+    if (thumbnailFramesSourceRef.current === videoUri && thumbnailFrameOptions.length > 0) {
+      return;
+    }
+
     const session = thumbnailLoadSessionRef.current + 1;
     thumbnailLoadSessionRef.current = session;
     setLoadingThumbnailFrames(true);
-    setThumbnailFrameOptions([]);
 
     const frames = await extractVideoThumbnailFrames(
       videoUri,
@@ -1235,11 +1393,12 @@ export function CreateScreen({
 
     if (thumbnailLoadSessionRef.current !== session) return;
 
+    thumbnailFramesSourceRef.current = videoUri;
     setThumbnailFrameOptions(frames);
     if (frames.length > 0) {
-      setSelectedThumbnailTimeMs(frames[0].timeMs);
-      setSelectedVideoThumbnailUri(frames[0].uri);
-    } else {
+      setSelectedVideoThumbnailUri((current) => current ?? frames[0].uri);
+      setSelectedThumbnailTimeMs((current) => (current > 0 ? current : frames[0].timeMs));
+    } else if (!selectedVideoThumbnailUri) {
       await prepareVideoThumbnail(videoUri, 0);
     }
     setLoadingThumbnailFrames(false);
@@ -1296,15 +1455,32 @@ export function CreateScreen({
     setEditItems(album);
     setEditItemIndex(0);
     setEditPagerScrolling(false);
+    setEditUserPaused(false);
     setSlideshowImages(images);
     setSlideshowAudio(null);
     setSlideshowAudioDurationMs(null);
     setSlideshowAudioLabel(null);
+    setSlideshowAudioAttaching(false);
+    setSlideshowAudioReady(false);
+    setSlideshowAudioError(false);
+    setAudioAttachTimingStartedAt(null);
+    audioAttachTimingStartedAtRef.current = null;
+    setAudioPeaks(null);
+    setAudioPeaksLoading(false);
     setAudioTrimStartRatio(0);
     setAudioTrimEndRatio(1);
+    audioTrimDragActiveRef.current = false;
+    audioTrimFailsafeRearmedRef.current = false;
+    if (audioTrimFailsafeTimerRef.current) {
+      clearTimeout(audioTrimFailsafeTimerRef.current);
+      audioTrimFailsafeTimerRef.current = null;
+    }
+    audioScrubRatioRef.current = null;
     setAudioScrubRatio(null);
     setAudioPlaybackRatio(0);
     setAudioTimelineWidth(0);
+    setAudioTrimResumeSignal(0);
+    setAudioPlaybackLoading(false);
     setAsset(
       video
         ? {
@@ -1321,6 +1497,15 @@ export function CreateScreen({
     setNeedsSelfieMirror(Boolean(options?.selfieMirrorPending));
     setTrimStartRatio(0);
     setTrimEndRatio(1);
+    trimDragActiveRef.current = false;
+    trimFailsafeRearmedRef.current = false;
+    if (trimFailsafeTimerRef.current) {
+      clearTimeout(trimFailsafeTimerRef.current);
+      trimFailsafeTimerRef.current = null;
+    }
+    trimScrubRatioRef.current = null;
+    setTrimScrubRatio(null);
+    setTrimPlaybackResumeSignal(0);
     setActiveEditTool(null);
     setSelectedFilter("none");
     setEditingTextOverlayId(null);
@@ -1362,12 +1547,27 @@ export function CreateScreen({
     );
   }
 
+  function endEditPagerScroll() {
+    if (editPagerScrollFailsafeTimerRef.current) {
+      clearTimeout(editPagerScrollFailsafeTimerRef.current);
+      editPagerScrollFailsafeTimerRef.current = null;
+    }
+    setEditPagerScrolling(false);
+  }
+
   function beginEditPagerScroll() {
     dismissEditTextKeyboard();
     closeTextOverlayActions(false);
     setTextFontPickerOverlayId(null);
     hideTextOverlaySnapGuides(true);
     setEditPagerScrolling(true);
+    if (editPagerScrollFailsafeTimerRef.current) {
+      clearTimeout(editPagerScrollFailsafeTimerRef.current);
+    }
+    editPagerScrollFailsafeTimerRef.current = setTimeout(() => {
+      editPagerScrollFailsafeTimerRef.current = null;
+      setEditPagerScrolling(false);
+    }, 600);
   }
 
   function handleEditItemIndexChange(nextIndex: number) {
@@ -1403,6 +1603,9 @@ export function CreateScreen({
     label: string;
     durationMs: number | null;
   }) {
+    setSlideshowAudioReady(false);
+    setSlideshowAudioError(false);
+    setEditUserPaused(false);
     setSlideshowAudio({
       uri: next.uri,
       fileName: next.fileName,
@@ -1413,8 +1616,64 @@ export function CreateScreen({
     setSlideshowAudioLabel(next.label);
     setAudioTrimStartRatio(0);
     setAudioTrimEndRatio(1);
+    audioTrimDragActiveRef.current = false;
+    audioTrimFailsafeRearmedRef.current = false;
+    if (audioTrimFailsafeTimerRef.current) {
+      clearTimeout(audioTrimFailsafeTimerRef.current);
+      audioTrimFailsafeTimerRef.current = null;
+    }
+    audioScrubRatioRef.current = null;
     setAudioScrubRatio(null);
     setAudioPlaybackRatio(0);
+    setAudioTrimResumeSignal(0);
+    setAudioPlaybackLoading(false);
+    setActiveEditTool("audio");
+    if (__DEV__) {
+      const startedAt = audioAttachTimingStartedAtRef.current;
+      const uri = next.uri;
+      console.log("[audio-attach] attached", {
+        uri: uri.length > 48 ? uri.slice(-48) : uri,
+        name: next.fileName,
+        ms: startedAt != null ? Date.now() - startedAt : undefined,
+      });
+    }
+  }
+
+  function handleEditMediaPress() {
+    if (editingTextOverlayId) {
+      if (__DEV__) console.log("[edit-preview] tap", { blockedBy: "editingText", paused: editUserPaused });
+      return;
+    }
+    if (textOverlayActionId || textOverlayActionRenderId || textFontPickerOverlayId) {
+      if (__DEV__) {
+        console.log("[edit-preview] tap", { blockedBy: "textOverlayChrome", paused: editUserPaused });
+      }
+      return;
+    }
+    if (editPagerScrolling) {
+      if (__DEV__) {
+        console.log("[edit-preview] tap", { blockedBy: "pagerScrolling", paused: editUserPaused });
+      }
+      return;
+    }
+    if (audioTrimDragActiveRef.current || trimDragActiveRef.current) {
+      if (__DEV__) console.log("[edit-preview] tap", { blockedBy: "trimDrag", paused: editUserPaused });
+      return;
+    }
+
+    const nextPaused = !editUserPaused;
+    setEditUserPaused(nextPaused);
+    if (slideshowAudio?.uri) {
+      soundtrackRef.current?.userToggle(nextPaused);
+    }
+    if (__DEV__) {
+      console.log("[edit-preview] tap", { paused: nextPaused });
+    }
+  }
+
+  function beginSlideshowAudioAttach() {
+    setAudioPickerOpen(false);
+    setSlideshowAudioAttaching(true);
     setActiveEditTool("audio");
   }
 
@@ -1426,6 +1685,9 @@ export function CreateScreen({
 
   async function pickSlideshowAudioFromFiles() {
     await dismissAudioSheet();
+    const startedAt = Date.now();
+    audioAttachTimingStartedAtRef.current = startedAt;
+    setAudioAttachTimingStartedAt(startedAt);
     try {
       const DocumentPicker = await import("expo-document-picker");
       const result = await DocumentPicker.getDocumentAsync({
@@ -1433,7 +1695,11 @@ export function CreateScreen({
         copyToCacheDirectory: true,
         multiple: false,
       });
+      if (__DEV__) {
+        console.log("[audio-attach] picker returned", { ms: Date.now() - startedAt, source: "files" });
+      }
       if (result.canceled || !result.assets?.[0]?.uri) return;
+      beginSlideshowAudioAttach();
       const picked = result.assets[0];
       attachSlideshowAudio({
         uri: picked.uri,
@@ -1443,7 +1709,9 @@ export function CreateScreen({
         label: picked.name ?? "MP3 from Files",
         durationMs: null,
       });
+      setSlideshowAudioAttaching(false);
     } catch (error) {
+      setSlideshowAudioAttaching(false);
       Alert.alert(
         "could not open files",
         error instanceof Error ? error.message : "try again or pick audio from a video.",
@@ -1453,6 +1721,9 @@ export function CreateScreen({
 
   async function pickSlideshowAudioFromVideo() {
     await dismissAudioSheet();
+    const startedAt = Date.now();
+    audioAttachTimingStartedAtRef.current = startedAt;
+    setAudioAttachTimingStartedAt(startedAt);
     try {
       logVideoUploadStep("audio from video picker start", {});
       const result = await launchCreateLibraryPicker({
@@ -1461,10 +1732,14 @@ export function CreateScreen({
         selectionLimit: 1,
         preferCompatibleVideo: true,
       });
+      if (__DEV__) {
+        console.log("[audio-attach] picker returned", { ms: Date.now() - startedAt, source: "video" });
+      }
       if (result.canceled || !result.assets[0]?.uri) {
         logVideoUploadStep("audio from video picker canceled", {});
         return;
       }
+      beginSlideshowAudioAttach();
       const picked = await materializeLibraryAsset(result.assets[0], "video");
       attachSlideshowAudio({
         uri: picked.uri,
@@ -1474,12 +1749,14 @@ export function CreateScreen({
         label: picked.fileName,
         durationMs: picked.durationMs > 0 ? picked.durationMs : null,
       });
+      setSlideshowAudioAttaching(false);
       logVideoUploadStep("audio from video attached", {
         fileName: picked.fileName,
         durationMs: picked.durationMs,
         mimeType: picked.mimeType,
       });
     } catch (error) {
+      setSlideshowAudioAttaching(false);
       logVideoUploadStep("audio from video failed", getVideoUploadErrorDetails(error));
       Alert.alert("couldn’t use that video", libraryPickerErrorMessage(error));
     }
@@ -1668,10 +1945,37 @@ export function CreateScreen({
   }
 
   function getAudioDurationLabel() {
+    if (slideshowAudioError) return "couldn't load";
     if (!slideshowAudioDurationMs) return "--:--";
     return formatClipDuration(
       Math.max(0, Math.round((audioTrimEndRatio - audioTrimStartRatio) * slideshowAudioDurationMs)),
     );
+  }
+
+  function clearAudioTrimFailsafe() {
+    if (audioTrimFailsafeTimerRef.current) {
+      clearTimeout(audioTrimFailsafeTimerRef.current);
+      audioTrimFailsafeTimerRef.current = null;
+    }
+  }
+
+  function restartAudioTrimFailsafe() {
+    clearAudioTrimFailsafe();
+    audioTrimFailsafeTimerRef.current = setTimeout(() => {
+      audioTrimFailsafeTimerRef.current = null;
+      if (audioScrubRatioRef.current == null) return;
+      // Finger may still be down (held still) — re-arm once instead of finishing.
+      if (audioTrimDragActiveRef.current && !audioTrimFailsafeRearmedRef.current) {
+        audioTrimFailsafeRearmedRef.current = true;
+        restartAudioTrimFailsafe();
+        return;
+      }
+      finishAudioTrimHandleDrag(
+        audioTrimLastHandleRef.current,
+        audioTrimLastTranslationXRef.current,
+        "failsafe",
+      );
+    }, 1000);
   }
 
   function beginAudioTrimDrag() {
@@ -1679,56 +1983,131 @@ export function CreateScreen({
       start: audioTrimStartRatio,
       end: audioTrimEndRatio,
     };
+    audioTrimDisplayedRef.current = {
+      start: audioTrimStartRatio,
+      end: audioTrimEndRatio,
+    };
   }
 
   function applyAudioTrimHandleDrag(handle: "start" | "end", translationX: number) {
+    if (!audioTrimDragActiveRef.current) {
+      if (__DEV__) console.log("[edit-trim] ignored late drag event");
+      return;
+    }
+    audioTrimLastHandleRef.current = handle;
+    audioTrimLastTranslationXRef.current = translationX;
+    audioTrimFailsafeRearmedRef.current = false;
+    restartAudioTrimFailsafe();
     if (!audioTimelineWidth) return;
     const delta = translationX / audioTimelineWidth;
     const minGap = 0.08;
     const dragStart = audioTrimDragStartRef.current;
     if (handle === "start") {
       const ratio = clamp(dragStart.start + delta, 0, Math.max(0, dragStart.end - minGap));
+      audioTrimDisplayedRef.current = { start: ratio, end: dragStart.end };
       setAudioTrimStartRatio(ratio);
+      audioScrubRatioRef.current = ratio;
       setAudioScrubRatio(ratio);
       return;
     }
     const ratio = clamp(dragStart.end + delta, Math.min(1, dragStart.start + minGap), 1);
+    audioTrimDisplayedRef.current = { start: dragStart.start, end: ratio };
     setAudioTrimEndRatio(ratio);
+    audioScrubRatioRef.current = ratio;
     setAudioScrubRatio(ratio);
   }
 
-  function finishAudioTrimHandleDrag(handle: "start" | "end", translationX: number) {
+  function finishAudioTrimHandleDrag(
+    handle: "start" | "end",
+    translationX: number,
+    reason: "end" | "cancel" | "fail" | "failsafe" | "unmount" = "end",
+  ) {
+    clearAudioTrimFailsafe();
+    audioTrimFailsafeRearmedRef.current = false;
+    if (!audioTrimDragActiveRef.current && audioScrubRatioRef.current == null) return;
+    audioTrimDragActiveRef.current = false;
+    void reason;
+    const displayed = audioTrimDisplayedRef.current;
+    const nextStart = displayed.start;
+    const nextEnd = displayed.end;
     const delta = audioTimelineWidth ? translationX / audioTimelineWidth : 0;
     const minGap = 0.08;
     const dragStart = audioTrimDragStartRef.current;
-    const nextStart =
+    const endEventRatio =
       handle === "start"
         ? clamp(dragStart.start + delta, 0, Math.max(0, dragStart.end - minGap))
-        : dragStart.start;
-    const nextEnd =
-      handle === "end"
-        ? clamp(dragStart.end + delta, Math.min(1, dragStart.start + minGap), 1)
-        : dragStart.end;
+        : clamp(dragStart.end + delta, Math.min(1, dragStart.start + minGap), 1);
     audioTrimDragStartRef.current = { start: nextStart, end: nextEnd };
+    audioTrimDisplayedRef.current = { start: nextStart, end: nextEnd };
     setAudioTrimStartRatio(nextStart);
     setAudioTrimEndRatio(nextEnd);
+    audioScrubRatioRef.current = null;
     setAudioScrubRatio(null);
     setAudioPlaybackRatio(nextStart);
+    setAudioTrimResumeSignal((token) => token + 1);
+    if (__DEV__) {
+      const durationSec = (slideshowAudioDurationMs ?? 0) / 1000;
+      const committedRatio = handle === "start" ? nextStart : nextEnd;
+      const displayedSec = committedRatio * durationSec;
+      const committedSec = displayedSec;
+      const endEventSec = endEventRatio * durationSec;
+      console.log("[edit-trim] commit", {
+        kind: "audio",
+        handle,
+        displayedSec,
+        committedSec,
+        endEventSec,
+      });
+    }
+  }
+
+  function clearAudioTrimInteraction(reason: "unmount" | "failsafe" = "unmount") {
+    if (audioTrimDragActiveRef.current) {
+      finishAudioTrimHandleDrag(
+        audioTrimLastHandleRef.current,
+        audioTrimLastTranslationXRef.current,
+        reason,
+      );
+      return;
+    }
+    clearAudioTrimFailsafe();
+    audioTrimFailsafeRearmedRef.current = false;
+    if (audioScrubRatioRef.current == null) return;
+    audioScrubRatioRef.current = null;
+    setAudioScrubRatio(null);
+    setAudioPlaybackRatio(audioTrimDisplayedRef.current.start);
+    setAudioTrimResumeSignal((token) => token + 1);
   }
 
   function handleAudioTrimHandleStateChange(handle: "start" | "end", event: PanGestureHandlerStateChangeEvent) {
     const { state, translationX } = event.nativeEvent;
-    if (state === State.BEGAN) {
-      beginAudioTrimDrag();
-      setAudioScrubRatio(handle === "start" ? audioTrimStartRatio : audioTrimEndRatio);
+    if (state === State.BEGAN || state === State.ACTIVE) {
+      if (!audioTrimDragActiveRef.current) {
+        audioTrimDragActiveRef.current = true;
+        audioTrimLastHandleRef.current = handle;
+        beginAudioTrimDrag();
+        const ratio = handle === "start" ? audioTrimStartRatio : audioTrimEndRatio;
+        audioScrubRatioRef.current = ratio;
+        setAudioScrubRatio(ratio);
+        if (__DEV__) console.log("[edit-trim] scrub start", { handle, kind: "audio" });
+      }
+      audioTrimLastTranslationXRef.current = translationX;
+      audioTrimFailsafeRearmedRef.current = false;
+      restartAudioTrimFailsafe();
       return;
     }
     if (state === State.END || state === State.CANCELLED || state === State.FAILED) {
-      finishAudioTrimHandleDrag(handle, translationX);
+      if (!audioTrimDragActiveRef.current && audioScrubRatioRef.current == null) {
+        if (__DEV__) console.log("[edit-trim] ignored late end", { kind: "audio", handle });
+        return;
+      }
+      const reason = state === State.END ? "end" : state === State.CANCELLED ? "cancel" : "fail";
+      finishAudioTrimHandleDrag(handle, translationX, reason);
     }
   }
 
   function toggleEditTool(tool: "trim" | "filters" | "text") {
+    setAudioPickerOpen(false);
     if (tool === "text") {
       addNewTextOverlay();
       return;
@@ -1738,6 +2117,23 @@ export function CreateScreen({
     closeTextOverlayActions(false);
     setTextFontPickerOverlayId(null);
     setActiveEditTool((current) => (current === tool ? null : tool));
+  }
+
+  function toggleAudioEditor() {
+    dismissEditTextKeyboard();
+    closeTextOverlayActions(false);
+    setTextFontPickerOverlayId(null);
+
+    if (activeEditTool === "audio") {
+      setAudioPickerOpen(false);
+      setActiveEditTool(null);
+      return;
+    }
+
+    setActiveEditTool("audio");
+    if (!slideshowAudio?.uri && !slideshowAudioAttaching) {
+      setAudioPickerOpen(true);
+    }
   }
 
   function handleEditViewportLayout(event: LayoutChangeEvent) {
@@ -1817,12 +2213,13 @@ export function CreateScreen({
   }
 
   function applyTextOverlayDragRatio(id: string, translationX: number, translationY: number) {
-    if (!editViewportSize.width || !editViewportSize.height) return;
+    const canvas = getCreateMediaCardRect(insets.top);
+    if (!canvas.width || !canvas.height) return;
 
     const start = textOverlayDragStartRatioRef.current;
     const clampedRatio = clampTextOverlayCenterRatio({
-      x: start.x + translationX / editViewportSize.width,
-      y: start.y + translationY / editViewportSize.height,
+      x: start.x + translationX / canvas.width,
+      y: start.y + translationY / canvas.height,
     });
 
     updateTextOverlaySnapGuides(clampedRatio);
@@ -1878,6 +2275,10 @@ export function CreateScreen({
       }
       textOverlayHorizontalGuideOpacity.setValue(0);
       textOverlayVerticalGuideOpacity.setValue(0);
+      if (audioLoadingToastHideTimerRef.current) {
+        clearTimeout(audioLoadingToastHideTimerRef.current);
+        audioLoadingToastHideTimerRef.current = null;
+      }
     };
   }, [textOverlayHorizontalGuideOpacity, textOverlayVerticalGuideOpacity]);
 
@@ -1911,10 +2312,82 @@ export function CreateScreen({
     goBackToCameraStage();
   }
 
+  function hideAudioLoadingToast() {
+    if (audioLoadingToastHideTimerRef.current) {
+      clearTimeout(audioLoadingToastHideTimerRef.current);
+      audioLoadingToastHideTimerRef.current = null;
+    }
+    audioLoadingToastOpacity.stopAnimation();
+    Animated.timing(audioLoadingToastOpacity, {
+      toValue: 0,
+      duration: 320,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) setAudioLoadingToastVisible(false);
+    });
+  }
+
+  function showAudioLoadingToast(message = "audio still loading") {
+    if (audioLoadingToastHideTimerRef.current) {
+      clearTimeout(audioLoadingToastHideTimerRef.current);
+      audioLoadingToastHideTimerRef.current = null;
+    }
+    audioLoadingToastOpacity.stopAnimation();
+    audioLoadingToastOpacity.setValue(0);
+    setAudioToastMessage(message);
+    setAudioLoadingToastVisible(true);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        Animated.timing(audioLoadingToastOpacity, {
+          toValue: 1,
+          duration: 320,
+          easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
+        }).start();
+      });
+    });
+    audioLoadingToastHideTimerRef.current = setTimeout(() => {
+      hideAudioLoadingToast();
+    }, 2400);
+  }
+
+  function isCroppedSlideshowAudioTooLong() {
+    if (!slideshowAudio?.uri) return false;
+    if (slideshowAudioDurationMs == null || !(slideshowAudioDurationMs > 0)) {
+      if (__DEV__) {
+        console.log("[create] slideshow audio duration unknown; skipping length check", {
+          durationMs: slideshowAudioDurationMs,
+        });
+      }
+      return false;
+    }
+    const croppedMs =
+      (audioTrimEndRatio - audioTrimStartRatio) * slideshowAudioDurationMs;
+    return croppedMs > maxDuration * 1000 + 500;
+  }
+
   async function goToDetailsStage() {
-    if (!slideshowAudio?.uri) {
-      Alert.alert("add audio", "choose a track from files or a video before continuing.");
+    if (
+      slideshowAudioAttaching ||
+      Boolean(slideshowAudio?.uri && !slideshowAudioReady && !slideshowAudioError)
+    ) {
+      showAudioLoadingToast();
+      return;
+    }
+    if (albumRequiresSoundtrack(editItems) && (!slideshowAudio?.uri || slideshowAudioError)) {
+      Alert.alert(
+        slideshowAudioError ? "couldn't load audio" : "add audio",
+        slideshowAudioError
+          ? "change the track and try again before continuing."
+          : "choose a track from files or a video before continuing.",
+      );
       setAudioPickerOpen(true);
+      return;
+    }
+    if (isCroppedSlideshowAudioTooLong()) {
+      showAudioLoadingToast(`audio needs to be ${maxDuration}s or less`);
+      setActiveEditTool("audio");
       return;
     }
 
@@ -1971,6 +2444,7 @@ export function CreateScreen({
       setExportBakedAsset(null);
       setExportBakedDurationMs(0);
       setExportBakeStatus(needsSelfieMirror && !isVideoBakeAvailable() ? "failed" : "idle");
+      if (thumbnailFrameOptions.length === 0) setLoadingThumbnailFrames(true);
       setCreateStage("details");
       if (needsSelfieMirror && !isVideoBakeAvailable()) {
         Alert.alert(
@@ -1987,7 +2461,7 @@ export function CreateScreen({
     setExportBakedDurationMs(0);
     setExportBakeStatus("baking");
     setThumbnailFrameOptions([]);
-    setSelectedVideoThumbnailUri(null);
+    thumbnailFramesSourceRef.current = null;
     setCreateStage("details");
 
     try {
@@ -2047,14 +2521,48 @@ export function CreateScreen({
     }
   }
 
+  function clearTrimFailsafe() {
+    if (trimFailsafeTimerRef.current) {
+      clearTimeout(trimFailsafeTimerRef.current);
+      trimFailsafeTimerRef.current = null;
+    }
+  }
+
+  function restartTrimFailsafe() {
+    clearTrimFailsafe();
+    trimFailsafeTimerRef.current = setTimeout(() => {
+      trimFailsafeTimerRef.current = null;
+      if (trimScrubRatioRef.current == null) return;
+      // Finger may still be down (held still) — re-arm once instead of finishing.
+      if (trimDragActiveRef.current && !trimFailsafeRearmedRef.current) {
+        trimFailsafeRearmedRef.current = true;
+        restartTrimFailsafe();
+        return;
+      }
+      finishTrimHandleDrag(trimLastHandleRef.current, trimLastTranslationXRef.current, "failsafe");
+    }, 1000);
+  }
+
   function beginTrimDrag() {
     trimDragStartRef.current = {
+      start: trimStartRatio,
+      end: trimEndRatio,
+    };
+    trimDisplayedRef.current = {
       start: trimStartRatio,
       end: trimEndRatio,
     };
   }
 
   function applyTrimHandleDrag(handle: "start" | "end", translationX: number) {
+    if (!trimDragActiveRef.current) {
+      if (__DEV__) console.log("[edit-trim] ignored late drag event");
+      return;
+    }
+    trimLastHandleRef.current = handle;
+    trimLastTranslationXRef.current = translationX;
+    trimFailsafeRearmedRef.current = false;
+    restartTrimFailsafe();
     if (!timelineWidth) return;
 
     const delta = translationX / timelineWidth;
@@ -2063,57 +2571,184 @@ export function CreateScreen({
 
     if (handle === "start") {
       const ratio = clamp(dragStart.start + delta, 0, Math.max(0, dragStart.end - minGap));
+      trimDisplayedRef.current = { start: ratio, end: dragStart.end };
       setTrimStartRatio(ratio);
+      trimScrubRatioRef.current = ratio;
       setTrimScrubRatio(ratio);
       return;
     }
 
     const ratio = clamp(dragStart.end + delta, Math.min(1, dragStart.start + minGap), 1);
+    trimDisplayedRef.current = { start: dragStart.start, end: ratio };
     setTrimEndRatio(ratio);
+    trimScrubRatioRef.current = ratio;
     setTrimScrubRatio(ratio);
   }
 
-  function finishTrimHandleDrag(handle: "start" | "end", translationX: number) {
-    if (!timelineWidth) {
-      setTrimScrubRatio(null);
-      setEditPlaybackRatio(trimStartRatio);
-      setTrimPlaybackResumeSignal((token) => token + 1);
-      return;
-    }
+  function finishTrimHandleDrag(
+    handle: "start" | "end",
+    translationX: number,
+    reason: "end" | "cancel" | "fail" | "failsafe" | "unmount" = "end",
+  ) {
+    clearTrimFailsafe();
+    trimFailsafeRearmedRef.current = false;
+    if (!trimDragActiveRef.current && trimScrubRatioRef.current == null) return;
+    trimDragActiveRef.current = false;
+    void reason;
 
-    const delta = translationX / timelineWidth;
+    const displayed = trimDisplayedRef.current;
+    const nextStart = displayed.start;
+    const nextEnd = displayed.end;
+    const delta = timelineWidth ? translationX / timelineWidth : 0;
     const minGap = 0.08;
     const dragStart = trimDragStartRef.current;
-    const nextStart =
+    const endEventRatio =
       handle === "start"
         ? clamp(dragStart.start + delta, 0, Math.max(0, dragStart.end - minGap))
-        : dragStart.start;
-    const nextEnd =
-      handle === "end"
-        ? clamp(dragStart.end + delta, Math.min(1, dragStart.start + minGap), 1)
-        : dragStart.end;
+        : clamp(dragStart.end + delta, Math.min(1, dragStart.start + minGap), 1);
 
     trimDragStartRef.current = { start: nextStart, end: nextEnd };
+    trimDisplayedRef.current = { start: nextStart, end: nextEnd };
     setTrimStartRatio(nextStart);
     setTrimEndRatio(nextEnd);
+    trimScrubRatioRef.current = null;
     setTrimScrubRatio(null);
     setEditPlaybackRatio(nextStart);
+    setTrimPlaybackResumeSignal((token) => token + 1);
+    if (__DEV__) {
+      const durationSec = selectedVideoDurationMs / 1000;
+      const committedRatio = handle === "start" ? nextStart : nextEnd;
+      const displayedSec = committedRatio * durationSec;
+      const committedSec = displayedSec;
+      const endEventSec = endEventRatio * durationSec;
+      console.log("[edit-trim] commit", {
+        kind: "video",
+        handle,
+        displayedSec,
+        committedSec,
+        endEventSec,
+      });
+    }
+  }
+
+  function clearTrimInteraction(reason: "unmount" | "failsafe" = "unmount") {
+    if (trimDragActiveRef.current) {
+      finishTrimHandleDrag(trimLastHandleRef.current, trimLastTranslationXRef.current, reason);
+      return;
+    }
+    clearTrimFailsafe();
+    trimFailsafeRearmedRef.current = false;
+    if (trimScrubRatioRef.current == null) return;
+    trimScrubRatioRef.current = null;
+    setTrimScrubRatio(null);
+    setEditPlaybackRatio(trimDisplayedRef.current.start);
     setTrimPlaybackResumeSignal((token) => token + 1);
   }
 
   function handleTrimHandleStateChange(handle: "start" | "end", event: PanGestureHandlerStateChangeEvent) {
     const { state, translationX } = event.nativeEvent;
 
-    if (state === State.BEGAN) {
-      beginTrimDrag();
-      setTrimScrubRatio(handle === "start" ? trimStartRatio : trimEndRatio);
+    if (state === State.BEGAN || state === State.ACTIVE) {
+      if (!trimDragActiveRef.current) {
+        trimDragActiveRef.current = true;
+        trimLastHandleRef.current = handle;
+        beginTrimDrag();
+        const ratio = handle === "start" ? trimStartRatio : trimEndRatio;
+        trimScrubRatioRef.current = ratio;
+        setTrimScrubRatio(ratio);
+        if (__DEV__) console.log("[edit-trim] scrub start", { handle, kind: "video" });
+      }
+      trimLastTranslationXRef.current = translationX;
+      trimFailsafeRearmedRef.current = false;
+      restartTrimFailsafe();
       return;
     }
 
     if (state === State.END || state === State.CANCELLED || state === State.FAILED) {
-      finishTrimHandleDrag(handle, translationX);
+      if (!trimDragActiveRef.current && trimScrubRatioRef.current == null) {
+        if (__DEV__) console.log("[edit-trim] ignored late end", { kind: "video", handle });
+        return;
+      }
+      const reason = state === State.END ? "end" : state === State.CANCELLED ? "cancel" : "fail";
+      finishTrimHandleDrag(handle, translationX, reason);
     }
   }
+
+  // clear* helpers use refs; omitting them from deps avoids rebinding every render.
+  useEffect(() => {
+    if (activeEditTool === "audio") return;
+    const timer = setTimeout(() => clearAudioTrimInteraction("unmount"), 0);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+  }, [activeEditTool]);
+
+  useEffect(() => {
+    if (activeEditTool === "trim") return;
+    const timer = setTimeout(() => clearTrimInteraction("unmount"), 0);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+  }, [activeEditTool]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => clearAudioTrimInteraction("unmount"), 0);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+  }, [slideshowAudio?.uri]);
+
+  useEffect(() => {
+    const uri = slideshowAudio?.uri ?? null;
+    const timingStartedAt = audioAttachTimingStartedAtRef.current;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      if (!uri) {
+        setAudioPeaks(null);
+        setAudioPeaksLoading(false);
+        return;
+      }
+      setAudioPeaks(null);
+      setAudioPeaksLoading(true);
+      void getAudioPeaks(uri, 80, { timingStartedAt }).then((peaks) => {
+        if (cancelled) return;
+        setAudioPeaks(peaks);
+        setAudioPeaksLoading(false);
+      });
+    }, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [slideshowAudio?.uri]);
+
+  useEffect(() => {
+    if (createStage === "edit") return;
+    const timer = setTimeout(() => {
+      clearAudioTrimInteraction("unmount");
+      clearTrimInteraction("unmount");
+      endEditPagerScroll();
+    }, 0);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+  }, [createStage]);
+
+  useEffect(() => {
+    return () => {
+      if (audioTrimFailsafeTimerRef.current) {
+        clearTimeout(audioTrimFailsafeTimerRef.current);
+        audioTrimFailsafeTimerRef.current = null;
+      }
+      if (trimFailsafeTimerRef.current) {
+        clearTimeout(trimFailsafeTimerRef.current);
+        trimFailsafeTimerRef.current = null;
+      }
+      if (editPagerScrollFailsafeTimerRef.current) {
+        clearTimeout(editPagerScrollFailsafeTimerRef.current);
+        editPagerScrollFailsafeTimerRef.current = null;
+      }
+      audioTrimDragActiveRef.current = false;
+      trimDragActiveRef.current = false;
+    };
+  }, []);
 
   function toggleLimitedTag(tag: string, selected: string[], setSelected: Dispatch<SetStateAction<string[]>>, label: string, maxItems: number) {
     if (selected.includes(tag)) {
@@ -2129,34 +2764,75 @@ export function CreateScreen({
     setSelected((current) => [...current, tag]);
   }
 
+  function toggleLookingForCollaborators() {
+    setLookingForCollaborators((current) => {
+      if (current) {
+        setSelectedLookingForRoles([]);
+        setSelectedLookingForGenres([]);
+      }
+      return !current;
+    });
+  }
+
   async function post() {
     const postRoles = getUniqueStrings(selectedRoles).slice(0, MAX_VIDEO_ROLES);
     const postGenres = getUniqueStrings(selectedGenres).slice(0, MAX_VIDEO_GENRES);
+    const postLookingForRoles = lookingForCollaborators
+      ? getUniqueStrings(selectedLookingForRoles).slice(0, MAX_VIDEO_ROLES)
+      : [];
+    const postLookingForGenres = lookingForCollaborators
+      ? getUniqueStrings(selectedLookingForGenres).slice(0, MAX_VIDEO_GENRES)
+      : [];
 
     const imageOnlyAlbum = editItems.length > 0 && editItems.every((item) => item.kind === "image");
+    if (albumRequiresSoundtrack(editItems) && (!slideshowAudio?.uri || slideshowAudioError)) {
+      Alert.alert(
+        slideshowAudioError ? "couldn't load audio" : "add audio",
+        slideshowAudioError
+          ? "change the track and try again before posting."
+          : "choose a track from files or a video before posting.",
+      );
+      return;
+    }
     if (imageOnlyAlbum) {
-      if (!slideshowAudio?.uri) {
-        Alert.alert("add audio", "choose a track from files or a video before posting.");
-        return;
-      }
       if (postRoles.length === 0 && postGenres.length === 0) {
         Alert.alert("choose tags", "select at least one role or genre for this post.");
         return;
       }
+      if (isCroppedSlideshowAudioTooLong()) {
+        const message = `audio needs to be ${maxDuration}s or less`;
+        if (createStage === "edit") {
+          showAudioLoadingToast(message);
+          setActiveEditTool("audio");
+        } else {
+          Alert.alert("audio too long", message);
+        }
+        return;
+      }
+      const fullAudioMs = slideshowAudioDurationMs;
+      const audioCropped =
+        Boolean(fullAudioMs) &&
+        (audioTrimStartRatio > 0.001 || audioTrimEndRatio < 0.999);
       enqueuePendingSlideshowUpload({
         userId,
         images: slideshowImages,
         audio: slideshowAudio,
-        audioDurationMs: slideshowAudioDurationMs
+        audioStartMs:
+          audioCropped && fullAudioMs
+            ? Math.max(0, Math.round(audioTrimStartRatio * fullAudioMs))
+            : null,
+        audioDurationMs: fullAudioMs
           ? Math.max(
               100,
-              Math.round((audioTrimEndRatio - audioTrimStartRatio) * slideshowAudioDurationMs),
+              Math.round((audioTrimEndRatio - audioTrimStartRatio) * fullAudioMs),
             )
           : null,
         caption: caption.trim(),
         roles: postRoles,
         genres: postGenres,
         lookingFor: lookingForCollaborators,
+        lookingForRoles: postLookingForRoles,
+        lookingForGenres: postLookingForGenres,
       });
       resetUploadState();
       onPosted();
@@ -2257,6 +2933,8 @@ export function CreateScreen({
       videoFilter: publishFilter,
       textOverlays: postedTextOverlays,
       lookingFor: lookingForCollaborators,
+      lookingForRoles: postLookingForRoles,
+      lookingForGenres: postLookingForGenres,
       presentationBaked: useBakedExport,
       bakedAsset: useBakedExport ? uploadAsset : null,
     };
@@ -2292,11 +2970,19 @@ export function CreateScreen({
     const feedViewport = getFeedVideoViewport(insets.bottom);
     const controlsBottom = getCreateCameraControlsBottom(feedViewport.navBarHeight);
     const filterRestBottom = getCreateCameraFilterRestBottom(feedViewport.navBarHeight);
+    const mediaCard = getCreateMediaCardRect(insets.top);
 
     return (
       <View style={styles.createCameraRoot}>
         <View
-          style={[styles.createCameraViewport, { bottom: feedViewport.navBarHeight }]}
+          style={[
+            styles.createNineSixteenMediaCard,
+            {
+              marginTop: mediaCard.top,
+              height: mediaCard.height,
+              borderRadius: FEED_VIDEO_BOTTOM_CORNER_RADIUS,
+            },
+          ]}
           onLayout={(event) => {
             const { width, height } = event.nativeEvent.layout;
             cameraViewportSizeRef.current = { width, height };
@@ -2568,30 +3254,35 @@ export function CreateScreen({
     );
   }
 
+  const slideshowAudioBusy =
+    slideshowAudioAttaching ||
+    Boolean(slideshowAudio?.uri && !slideshowAudioReady && !slideshowAudioError);
+
   if (editItems.length > 0 && createStage === "edit") {
     const currentIsVideo = currentEditItem?.kind === "video";
     const feedViewport = getFeedVideoViewport(insets.bottom);
+    const editCanvas = getCreateMediaCardRect(insets.top);
     const actionMenuOverlayId = textOverlayActionRenderId ?? textOverlayActionId;
     const actionOverlay = actionMenuOverlayId
       ? textOverlays.find((overlay) => overlay.id === actionMenuOverlayId)
       : null;
     const actionOverlaySize = actionOverlay ? textOverlaySizes[actionOverlay.id] ?? { width: 0, height: 0 } : { width: 0, height: 0 };
     const actionOverlayCenterX = actionOverlay
-      ? editViewportSize.width * actionOverlay.centerRatio.x
+      ? editCanvas.width * actionOverlay.centerRatio.x
       : 0;
     const actionOverlayBottom = actionOverlay
-      ? editViewportSize.height * actionOverlay.centerRatio.y + actionOverlaySize.height / 2
+      ? editCanvas.height * actionOverlay.centerRatio.y + actionOverlaySize.height / 2
       : 0;
     const actionBubbleWidth = 210;
     const actionBubbleLeft = clamp(
       actionOverlayCenterX - actionBubbleWidth / 2,
       12,
-      Math.max(12, editViewportSize.width - actionBubbleWidth - 12),
+      Math.max(12, editCanvas.width - actionBubbleWidth - 12),
     );
     const actionBubbleTop = clamp(
       actionOverlayBottom + 8,
       12,
-      Math.max(12, editViewportSize.height - 56),
+      Math.max(12, editCanvas.height - 56),
     );
     const actionCaretLeft = clamp(
       actionOverlayCenterX - actionBubbleLeft - 8,
@@ -2604,26 +3295,51 @@ export function CreateScreen({
       <View style={styles.createCameraRoot}>
         <View style={styles.createCameraRoot}>
           <View
-            style={[styles.createCameraViewport, { bottom: feedViewport.navBarHeight }]}
+            style={[styles.createCameraViewport, { bottom: 0 }]}
             onLayout={handleEditViewportLayout}
           >
             <CreateEditSoundtrack
+              ref={soundtrackRef}
               uri={slideshowAudio?.uri ?? null}
-              playing={isFocused && Boolean(slideshowAudio?.uri) && audioScrubRatio == null}
+              playing={
+                isFocused &&
+                slideshowAudioReady &&
+                !slideshowAudioAttaching &&
+                Boolean(slideshowAudio?.uri) &&
+                audioScrubRatio == null &&
+                !editUserPaused
+              }
               trimStartRatio={audioTrimStartRatio}
               trimEndRatio={audioTrimEndRatio}
               scrubToRatio={audioScrubRatio}
+              resumeSignal={audioTrimResumeSignal}
+              loadTimingStartedAt={audioAttachTimingStartedAt}
               onDurationMs={(durationMs) => {
                 if (durationMs > 0) setSlideshowAudioDurationMs(durationMs);
               }}
               onPlaybackRatio={setAudioPlaybackRatio}
+              onReady={(readyUri) => {
+                if (readyUri === slideshowAudio?.uri) {
+                  setSlideshowAudioReady(true);
+                  setSlideshowAudioError(false);
+                }
+              }}
+              onLoadError={(errorUri) => {
+                if (errorUri !== slideshowAudio?.uri) return;
+                setSlideshowAudioReady(false);
+                setSlideshowAudioError(true);
+                setAudioPeaksLoading(false);
+              }}
+              onLoadingChange={setAudioPlaybackLoading}
             />
             <CreateEditAlbumPager
               items={editItems}
               index={editItemIndex}
               width={editViewportSize.width}
               height={editViewportSize.height}
+              cardRect={editCanvas}
               shouldPlay={isFocused}
+              paused={editUserPaused}
               muteVideos={
                 Boolean(slideshowAudio?.uri) ||
                 editItems.filter((item) => item.kind === "video").length > 1
@@ -2637,14 +3353,27 @@ export function CreateScreen({
               timeUpdateIntervalSec={activeEditTool === "trim" ? 0.05 : 0.25}
               onIndexChange={handleEditItemIndexChange}
               onPageScrollStart={beginEditPagerScroll}
-              onPageScrollEnd={() => setEditPagerScrolling(false)}
+              onPageScrollEnd={endEditPagerScroll}
               onDurationResolved={handleEditVideoDurationResolved}
               onPlaybackStatusUpdate={activeEditTool === "trim" ? handleEditPlaybackStatusUpdate : undefined}
+              onMediaPress={handleEditMediaPress}
             />
             {selectedFilter !== "none" && (
               <View
                 pointerEvents="none"
-                style={[StyleSheet.absoluteFill, styles.createCameraFilterPreview, getVideoFilterOverlayStyle(selectedFilter)]}
+                style={[
+                  styles.createCameraFilterPreview,
+                  getVideoFilterOverlayStyle(selectedFilter),
+                  {
+                    position: "absolute",
+                    left: editCanvas.left,
+                    top: editCanvas.top,
+                    width: editCanvas.width,
+                    height: editCanvas.height,
+                    borderRadius: FEED_VIDEO_BOTTOM_CORNER_RADIUS,
+                    overflow: "hidden",
+                  },
+                ]}
               />
             )}
             {editingTextOverlayId ? (
@@ -2664,100 +3393,124 @@ export function CreateScreen({
                 accessibilityLabel="dismiss text actions"
               />
             ) : null}
-            <Animated.View
-              pointerEvents="none"
-              style={[
-                styles.createTextOverlaySnapGuideVertical,
-                { opacity: textOverlayVerticalGuideOpacity },
-              ]}
-            />
-            <Animated.View
-              pointerEvents="none"
-              style={[
-                styles.createTextOverlaySnapGuideHorizontal,
-                { opacity: textOverlayHorizontalGuideOpacity },
-              ]}
-            />
-            {!editPagerScrolling
-              ? textOverlays.map((overlay) => (
-              <CreateEditTextOverlayItem
-                key={overlay.id}
-                overlay={overlay}
-                isEditing={editingTextOverlayId === overlay.id}
-                viewportWidth={editViewportSize.width}
-                viewportHeight={editViewportSize.height}
-                committedSize={textOverlaySizes[overlay.id] ?? { width: 0, height: 0 }}
-                inputRef={textInputRef}
-                onDraftChange={syncEditingTextDraft}
-                onOpenActions={() => openTextOverlayActions(overlay.id)}
-                onEditText={() => startEditingTextOverlay(overlay.id)}
-                onSizeChange={(size) => updateTextOverlaySize(overlay.id, size)}
-                onFontScaleChange={(fontScale) => updateTextOverlayFontScale(overlay.id, fontScale)}
-                onPinchActiveChange={(active) => {
-                  textOverlayPinchActiveRef.current = active;
-                  if (active) {
-                    closeTextOverlayActions(false);
-                    setTextFontPickerOverlayId(null);
-                    dismissEditTextKeyboard();
-                  }
-                }}
-                onPanGesture={(event) => handleTextOverlayPanGesture(overlay.id, event)}
-                onPanStateChange={(event) => handleTextOverlayPanStateChange(overlay.id, event)}
-              />
-            ))
-              : null}
-            {actionOverlay && !editPagerScrolling ? (
+            <View
+              pointerEvents="box-none"
+              style={{
+                position: "absolute",
+                left: editCanvas.left,
+                top: editCanvas.top,
+                width: editCanvas.width,
+                height: editCanvas.height,
+              }}
+            >
               <Animated.View
-                pointerEvents={textOverlayActionId ? "box-none" : "none"}
+                pointerEvents="none"
                 style={[
-                  styles.createTextOverlayActionMenu,
-                  {
-                    left: actionBubbleLeft,
-                    top: actionBubbleTop,
-                    width: actionBubbleWidth,
-                    opacity: textOverlayActionOpacity,
-                    transform: [
-                      { translateY: textOverlayActionTranslateY },
-                      { scale: textOverlayActionScale },
-                    ],
-                  },
+                  styles.createTextOverlaySnapGuideVertical,
+                  { opacity: textOverlayVerticalGuideOpacity },
                 ]}
-              >
-                <View
-                  pointerEvents="none"
-                  style={[styles.createTextOverlayActionCaret, { left: actionCaretLeft }]}
+              />
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.createTextOverlaySnapGuideHorizontal,
+                  { opacity: textOverlayHorizontalGuideOpacity },
+                ]}
+              />
+              {!editPagerScrolling
+                ? textOverlays.map((overlay) => (
+                <CreateEditTextOverlayItem
+                  key={overlay.id}
+                  overlay={overlay}
+                  isEditing={editingTextOverlayId === overlay.id}
+                  viewportWidth={editCanvas.width}
+                  viewportHeight={editCanvas.height}
+                  committedSize={textOverlaySizes[overlay.id] ?? { width: 0, height: 0 }}
+                  inputRef={textInputRef}
+                  onDraftChange={syncEditingTextDraft}
+                  onOpenActions={() => openTextOverlayActions(overlay.id)}
+                  onEditText={() => startEditingTextOverlay(overlay.id)}
+                  onSizeChange={(size) => updateTextOverlaySize(overlay.id, size)}
+                  onFontScaleChange={(fontScale) => updateTextOverlayFontScale(overlay.id, fontScale)}
+                  onPinchActiveChange={(active) => {
+                    textOverlayPinchActiveRef.current = active;
+                    if (active) {
+                      closeTextOverlayActions(false);
+                      setTextFontPickerOverlayId(null);
+                      dismissEditTextKeyboard();
+                    }
+                  }}
+                  onPanGesture={(event) => handleTextOverlayPanGesture(overlay.id, event)}
+                  onPanStateChange={(event) => handleTextOverlayPanStateChange(overlay.id, event)}
                 />
-                <View style={styles.createTextOverlayActionBubble}>
-                  <Pressable
-                    style={styles.createTextOverlayActionButton}
-                    onPress={() => openTextFontPicker(actionOverlay.id)}
-                    accessibilityLabel="change text font"
-                  >
-                    <Text style={styles.createTextOverlayActionButtonText}>font</Text>
-                  </Pressable>
-                  <Pressable
-                    style={styles.createTextOverlayActionEffectButton}
-                    onPress={() => cycleTextOverlayEffect(actionOverlay.id)}
-                    accessibilityLabel="cycle text style"
-                  >
-                    <VideoTextOverlayGlyph
-                      text="A"
-                      effectId={actionOverlay.effectId}
-                      density="menu"
-                      textStyle={styles.createTextOverlayActionEffectGlyph}
-                    />
-                  </Pressable>
-                  <Pressable
-                    style={styles.createTextOverlayActionButton}
-                    onPress={() => deleteTextOverlay(actionOverlay.id)}
-                    accessibilityLabel="delete text overlay"
-                  >
-                    <Text style={styles.createTextOverlayActionDeleteText}>delete</Text>
-                  </Pressable>
-                </View>
-              </Animated.View>
-            ) : null}
+              ))
+                : null}
+              {actionOverlay && !editPagerScrolling ? (
+                <Animated.View
+                  pointerEvents={textOverlayActionId ? "box-none" : "none"}
+                  style={[
+                    styles.createTextOverlayActionMenu,
+                    {
+                      left: actionBubbleLeft,
+                      top: actionBubbleTop,
+                      width: actionBubbleWidth,
+                      opacity: textOverlayActionOpacity,
+                      transform: [
+                        { translateY: textOverlayActionTranslateY },
+                        { scale: textOverlayActionScale },
+                      ],
+                    },
+                  ]}
+                >
+                  <View
+                    pointerEvents="none"
+                    style={[styles.createTextOverlayActionCaret, { left: actionCaretLeft }]}
+                  />
+                  <View style={styles.createTextOverlayActionBubble}>
+                    <Pressable
+                      style={styles.createTextOverlayActionButton}
+                      onPress={() => openTextFontPicker(actionOverlay.id)}
+                      accessibilityLabel="change text font"
+                    >
+                      <Text style={styles.createTextOverlayActionButtonText}>font</Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.createTextOverlayActionEffectButton}
+                      onPress={() => cycleTextOverlayEffect(actionOverlay.id)}
+                      accessibilityLabel="cycle text style"
+                    >
+                      <VideoTextOverlayGlyph
+                        text="A"
+                        effectId={actionOverlay.effectId}
+                        density="menu"
+                        textStyle={styles.createTextOverlayActionEffectGlyph}
+                      />
+                    </Pressable>
+                    <Pressable
+                      style={styles.createTextOverlayActionButton}
+                      onPress={() => deleteTextOverlay(actionOverlay.id)}
+                      accessibilityLabel="delete text overlay"
+                    >
+                      <Text style={styles.createTextOverlayActionDeleteText}>delete</Text>
+                    </Pressable>
+                  </View>
+                </Animated.View>
+              ) : null}
+            </View>
           </View>
+
+          {audioPickerOpen ? (
+            <Pressable
+              style={styles.createAudioPickerDismiss}
+              onPress={() => {
+                setAudioPickerOpen(false);
+                if (!slideshowAudio?.uri && !slideshowAudioAttaching) {
+                  setActiveEditTool(null);
+                }
+              }}
+              accessibilityLabel="dismiss audio options"
+            />
+          ) : null}
 
           <View style={[styles.createCameraTopBar, { top: insets.top + CREATE_CAMERA_TOP_CONTROLS_OFFSET }]}>
             <Pressable
@@ -2779,35 +3532,56 @@ export function CreateScreen({
               alignItems: "center",
             }}
           >
-            <Pressable
-              onPress={() => {
-                if (slideshowAudio?.uri) {
-                  dismissEditTextKeyboard();
-                  closeTextOverlayActions(false);
-                  setTextFontPickerOverlayId(null);
-                  setActiveEditTool((current) => (current === "audio" ? null : "audio"));
-                  return;
+            <View style={{ alignItems: "center" }}>
+              <Pressable
+                onPress={toggleAudioEditor}
+                hitSlop={8}
+                style={[
+                  styles.createEditAudioButton,
+                  slideshowAudio?.uri ||
+                  slideshowAudioAttaching ||
+                  audioPickerOpen ||
+                  activeEditTool === "audio"
+                    ? styles.createEditAudioButtonActive
+                    : null,
+                ]}
+                accessibilityLabel={
+                  slideshowAudioAttaching
+                    ? "audio still loading"
+                    : activeEditTool === "audio"
+                      ? slideshowAudio?.uri
+                        ? "close audio editor"
+                        : "close audio options"
+                      : slideshowAudio?.uri
+                        ? "edit audio"
+                        : "add audio"
                 }
-                setAudioPickerOpen(true);
-              }}
-              style={[
-                styles.createEditAudioButton,
-                slideshowAudio?.uri ? styles.createEditAudioButtonActive : null,
-              ]}
-              accessibilityLabel={
-                slideshowAudio?.uri
-                  ? activeEditTool === "audio"
-                    ? "close audio editor"
-                    : "edit audio"
-                  : "add audio"
-              }
-            >
-              {slideshowAudio?.uri ? (
-                <CreateEditAudioWaveformIcon active={activeEditTool === "audio"} />
-              ) : (
-                <CreateEditAudioIcon />
-              )}
-            </Pressable>
+              >
+                {slideshowAudio?.uri ? (
+                  <CreateEditAudioWaveformIcon active={activeEditTool === "audio"} />
+                ) : (
+                  <CreateEditAudioIcon active={activeEditTool === "audio"} />
+                )}
+              </Pressable>
+              {audioPickerOpen ? (
+                <View style={styles.createAudioDropdown}>
+                  <Pressable
+                    style={styles.createAudioDropdownItem}
+                    onPress={() => void pickSlideshowAudioFromFiles()}
+                    accessibilityLabel="choose audio from files"
+                  >
+                    <Text style={styles.createAudioDropdownItemText}>from files</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.createAudioDropdownItem}
+                    onPress={() => void pickSlideshowAudioFromVideo()}
+                    accessibilityLabel="choose audio from camera roll"
+                  >
+                    <Text style={styles.createAudioDropdownItemText}>from camera roll</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
           </View>
 
           <View style={[styles.createCameraSideRail, { top: insets.top + CREATE_CAMERA_TOP_CONTROLS_OFFSET }]}>
@@ -2844,6 +3618,11 @@ export function CreateScreen({
                 height: feedViewport.navBarHeight,
                 opacity: editNextButtonOpacity,
                 transform: [{ translateY: editNextButtonSlideY }],
+                zIndex:
+                  activeEditTool === "audio" &&
+                  (slideshowAudio?.uri || slideshowAudioAttaching)
+                    ? 6
+                    : 5,
               },
             ]}
           >
@@ -2854,24 +3633,17 @@ export function CreateScreen({
                 accessibilityLabel="dismiss keyboard"
               />
             ) : null}
-            <Pressable
-              onPress={() => {
-                void goToDetailsStage();
-              }}
-              style={styles.createEditNextPill}
-              accessibilityLabel="continue to post details"
-            >
-              <Text style={styles.createEditNextText}>next</Text>
-            </Pressable>
-          </Animated.View>
-
-          {activeEditTool === "audio" && slideshowAudio?.uri ? (
-            <View
-              style={[styles.createTrimToolPanel, { bottom: feedViewport.navBarHeight }]}
-              pointerEvents="box-none"
-            >
+            {activeEditTool === "audio" &&
+            (slideshowAudio?.uri || slideshowAudioAttaching) ? (
               <CreateAudioTrimPanel
-                seed={slideshowAudio.uri}
+                seed={slideshowAudio?.uri ?? "loading"}
+                empty={!slideshowAudio?.uri && !slideshowAudioAttaching}
+                loading={slideshowAudioBusy}
+                peaksLoading={
+                  audioPeaksLoading && slideshowAudioReady && !slideshowAudioError
+                }
+                peaks={audioPeaks}
+                playbackLoading={audioPlaybackLoading}
                 durationLabel={getAudioDurationLabel()}
                 trimStartRatio={audioTrimStartRatio}
                 trimEndRatio={audioTrimEndRatio}
@@ -2882,7 +3654,36 @@ export function CreateScreen({
                 onTrimHandleStateChange={handleAudioTrimHandleStateChange}
                 onChangeAudio={() => setAudioPickerOpen(true)}
               />
-            </View>
+            ) : (
+              <Pressable
+                onPress={() => {
+                  void goToDetailsStage();
+                }}
+                style={styles.createEditNextPill}
+                accessibilityLabel="continue to post details"
+              >
+                <Text style={styles.createEditNextText}>next</Text>
+              </Pressable>
+            )}
+          </Animated.View>
+
+          {audioLoadingToastVisible ? (
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.createAudioLoadingToast,
+                {
+                  top:
+                    insets.top +
+                    CREATE_CAMERA_TOP_CONTROLS_OFFSET +
+                    CREATE_CAMERA_CONTROL_BUTTON_SIZE +
+                    16,
+                  opacity: audioLoadingToastOpacity,
+                },
+              ]}
+            >
+              <Text style={styles.createAudioLoadingToastText}>{audioToastMessage}</Text>
+            </Animated.View>
           ) : null}
 
           {activeEditTool === "trim" && currentIsVideo ? (
@@ -2962,66 +3763,109 @@ export function CreateScreen({
           onCancel={dismissDiscardCreateDraft}
           onConfirm={discardCreateDraft}
         />
-        {audioPickerOpen ? (
-          <View style={[StyleSheet.absoluteFill, styles.confirmModalOverlay, { zIndex: 40 }]}>
-            <Pressable style={styles.jamPromptShade} onPress={() => setAudioPickerOpen(false)} />
-            <View style={styles.createAudioSheetCard}>
-              <Text style={styles.confirmModalTitle}>add audio</Text>
-              <Text style={styles.confirmModalMessage}>
-                choose a track from files or extract audio from a video
-              </Text>
-              <Pressable
-                style={styles.createChooseOption}
-                onPress={() => void pickSlideshowAudioFromFiles()}
-                accessibilityLabel="choose audio from files"
-              >
-                <Text style={styles.createChooseOptionTitle}>from files</Text>
-                <Text style={styles.createChooseOptionHelper}>mp3 or other audio files</Text>
-              </Pressable>
-              <Pressable
-                style={styles.createChooseOption}
-                onPress={() => void pickSlideshowAudioFromVideo()}
-                accessibilityLabel="choose audio from camera roll video"
-              >
-                <Text style={styles.createChooseOptionTitle}>from camera roll</Text>
-                <Text style={styles.createChooseOptionHelper}>use the soundtrack from a video</Text>
-              </Pressable>
-              {slideshowAudioLabel ? (
-                <View style={styles.createAudioSheetAttached}>
-                  <Text style={styles.createChooseOptionTitle}>attached</Text>
-                  <Text style={styles.createChooseOptionHelper} numberOfLines={2}>
-                    {slideshowAudioLabel}
-                  </Text>
-                </View>
-              ) : null}
-            </View>
-          </View>
-        ) : null}
       </View>
     );
   }
 
   const imageOnlyAlbum = editItems.length > 0 && editItems.every((item) => item.kind === "image");
+  const soundtrackRequired = albumRequiresSoundtrack(editItems);
   const postedVideoItem =
     (asset
       ? editItems.find((item) => item.kind === "video" && item.uri === asset.uri)
       : null) ?? editItems.find((item) => item.kind === "video");
   const postedPreviewOverlays = postedVideoItem?.textOverlays ?? textOverlays;
+  const lookingForTagFields = lookingForCollaborators ? (
+    <LookingForTagFields
+      onInputFocus={handleTagFieldFocus}
+      selectedRoles={selectedLookingForRoles}
+      selectedGenres={selectedLookingForGenres}
+      onToggleRole={(role) =>
+        toggleLimitedTag(
+          role,
+          selectedLookingForRoles,
+          setSelectedLookingForRoles,
+          "role",
+          MAX_VIDEO_ROLES,
+        )
+      }
+      onToggleGenre={(genre) =>
+        toggleLimitedTag(
+          genre,
+          selectedLookingForGenres,
+          setSelectedLookingForGenres,
+          "genre",
+          MAX_VIDEO_GENRES,
+        )
+      }
+    />
+  ) : null;
+
+  const captionField = (
+    <View style={styles.createDetailsCaptionColumn}>
+      <TextInput
+        value={caption}
+        onChangeText={setCaption}
+        placeholder="write a caption"
+        placeholderTextColor="#71717a"
+        style={styles.createDetailsCaptionInput}
+        multiline
+        maxLength={200}
+        underlineColorAndroid="transparent"
+      />
+    </View>
+  );
 
   return (
     <SafeAreaView style={styles.safe}>
-      <ScrollView contentContainerStyle={styles.screenContent} keyboardShouldPersistTaps="handled">
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <ScrollView
+        ref={detailsScrollRef}
+        contentContainerStyle={[styles.screenContent, styles.createDetailsScrollContent]}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
+        onScroll={(event) => {
+          detailsScrollYRef.current = event.nativeEvent.contentOffset.y;
+        }}
+        scrollEventThrottle={16}
+      >
         <View style={styles.headerRow}>
           <Text style={styles.logoSmall}>jam.</Text>
-          <Pressable onPress={goBackToEditStage} style={styles.iconCircle} accessibilityLabel="back">
+          <Pressable onPress={goBackToEditStage} hitSlop={12} accessibilityLabel="back">
             <Text style={styles.closeIconText}>×</Text>
           </Pressable>
         </View>
-        <Text style={styles.h1}>create</Text>
         {imageOnlyAlbum ? (
           <>
+            <CreateEditSoundtrack
+              uri={slideshowAudio?.uri ?? null}
+              playing={
+                isFocused &&
+                !postPreviewOpen &&
+                slideshowAudioReady &&
+                !slideshowAudioAttaching &&
+                Boolean(slideshowAudio?.uri)
+              }
+              trimStartRatio={audioTrimStartRatio}
+              trimEndRatio={audioTrimEndRatio}
+              loadTimingStartedAt={audioAttachTimingStartedAt}
+              onDurationMs={(durationMs) => {
+                if (durationMs > 0) setSlideshowAudioDurationMs(durationMs);
+              }}
+              onReady={(readyUri) => {
+                if (readyUri === slideshowAudio?.uri) {
+                  setSlideshowAudioReady(true);
+                  setSlideshowAudioError(false);
+                }
+              }}
+              onLoadError={(errorUri) => {
+                if (errorUri !== slideshowAudio?.uri) return;
+                setSlideshowAudioReady(false);
+                setSlideshowAudioError(true);
+                setAudioPeaksLoading(false);
+              }}
+            />
             <Pressable
-              onPress={() => setLookingForCollaborators((current) => !current)}
+              onPress={toggleLookingForCollaborators}
               style={styles.createLookingForToggle}
               accessibilityRole="switch"
               accessibilityState={{ checked: lookingForCollaborators }}
@@ -3035,18 +3879,16 @@ export function CreateScreen({
                 </Text>
               </View>
             </Pressable>
-            <View style={styles.createDetailsComposerRow}>
-              <TextInput
-                value={caption}
-                onChangeText={setCaption}
-                placeholder="write a caption..."
-                placeholderTextColor="#71717a"
-                style={styles.createDetailsCaptionInput}
-                multiline
-                maxLength={200}
-                textAlignVertical="top"
-              />
-              <View style={styles.createDetailsVideoTap}>
+            {lookingForTagFields}
+            <View style={styles.createDetailsComposer}>
+              <View style={styles.createCaptionHairline} />
+              <View style={styles.createDetailsComposerRow}>
+              {captionField}
+              <Pressable
+                onPress={() => setPostPreviewOpen(true)}
+                style={styles.createDetailsVideoTap}
+                accessibilityLabel="preview post"
+              >
                 <Image
                   source={{ uri: slideshowImages[0]?.uri }}
                   style={styles.createDetailsVideoTapImage as ImageStyle}
@@ -3057,6 +3899,7 @@ export function CreateScreen({
                     {slideshowImages.length} photo{slideshowImages.length === 1 ? "" : "s"}
                   </Text>
                 </View>
+              </Pressable>
               </View>
             </View>
             {slideshowAudioLabel ? (
@@ -3066,7 +3909,7 @@ export function CreateScreen({
         ) : asset ? (
           <>
             <Pressable
-              onPress={() => setLookingForCollaborators((current) => !current)}
+              onPress={toggleLookingForCollaborators}
               style={styles.createLookingForToggle}
               accessibilityRole="switch"
               accessibilityState={{ checked: lookingForCollaborators }}
@@ -3080,17 +3923,11 @@ export function CreateScreen({
                 </Text>
               </View>
             </Pressable>
-            <View style={styles.createDetailsComposerRow}>
-              <TextInput
-                value={caption}
-                onChangeText={setCaption}
-                placeholder="write a caption..."
-                placeholderTextColor="#71717a"
-                style={styles.createDetailsCaptionInput}
-                multiline
-                maxLength={200}
-                textAlignVertical="top"
-              />
+            {lookingForTagFields}
+            <View style={styles.createDetailsComposer}>
+              <View style={styles.createCaptionHairline} />
+              <View style={styles.createDetailsComposerRow}>
+              {captionField}
               <Pressable
                 onPress={() => {
                   if (exportBakeStatus === "baking") return;
@@ -3131,45 +3968,39 @@ export function CreateScreen({
                   </Text>
                 </View>
               </Pressable>
+              </View>
             </View>
             {exportBakeStatus === "baking" ? (
               <View style={styles.createThumbnailLoader}>
                 <ActivityIndicator color={getActivityIndicatorColor()} />
                 <Text style={styles.helper}>rendering your edits…</Text>
               </View>
-            ) : loadingThumbnailFrames ? (
-              <ActivityIndicator color={getActivityIndicatorColor()} style={styles.createThumbnailLoader} />
-            ) : thumbnailFrameOptions.length > 0 ? (
-              <VideoThumbnailFilmstrip
-                frames={thumbnailFrameOptions}
-                filter={exportBakeStatus === "ready" ? "none" : selectedFilter}
-                textOverlays={exportBakeStatus === "ready" ? [] : postedPreviewOverlays}
-                onSelect={(timeMs, uri) => selectThumbnailTime(timeMs, uri)}
-              />
-            ) : (
-              <Text style={styles.helper}>could not load thumbnail frames.</Text>
-            )}
+            ) : null}
           </>
         ) : null}
-        <SectionLabel label={`role (${selectedRoles.length}/${MAX_VIDEO_ROLES})`} />
-        <Text style={styles.helper}>
-          choose one role for this {imageOnlyAlbum ? "post" : "video"}.
-        </Text>
-        <TagPicker
+        <LinedTagField
+          placeholder="role"
           options={creatorRoles}
           selected={selectedRoles}
+          onInputFocus={handleTagFieldFocus}
           onToggle={(role) => toggleLimitedTag(role, selectedRoles, setSelectedRoles, "role", MAX_VIDEO_ROLES)}
         />
-        <SectionLabel label={`genres (${selectedGenres.length}/${MAX_VIDEO_GENRES})`} />
-        <Text style={styles.helper}>
-          choose up to {MAX_VIDEO_GENRES} genres for this {imageOnlyAlbum ? "post" : "video"}.
-        </Text>
-        <TagPicker
+        <LinedTagField
+          placeholder="genre"
           options={musicGenres}
           selected={selectedGenres}
+          onInputFocus={handleTagFieldFocus}
           onToggle={(genre) => toggleLimitedTag(genre, selectedGenres, setSelectedGenres, "genre", MAX_VIDEO_GENRES)}
         />
+      </ScrollView>
+      <View
+        style={styles.createDetailsPostBar}
+        onLayout={(event) => {
+          detailsPostBarHeightRef.current = event.nativeEvent.layout.height;
+        }}
+      >
         <PrimaryButton
+          style={styles.createDetailsPostButton}
           label={
             imageOnlyAlbum
               ? "post"
@@ -3178,37 +4009,46 @@ export function CreateScreen({
                 : "post"
           }
           disabled={
-            imageOnlyAlbum
-              ? !slideshowAudio?.uri || (selectedRoles.length === 0 && selectedGenres.length === 0)
-              : !asset ||
-                exportBakeStatus === "baking" ||
-                (selectedRoles.length === 0 && selectedGenres.length === 0)
+            (soundtrackRequired && !slideshowAudio?.uri) ||
+            (selectedRoles.length === 0 && selectedGenres.length === 0) ||
+            (!imageOnlyAlbum && (!asset || exportBakeStatus === "baking"))
           }
           onPress={() => {
             void post();
           }}
         />
-      </ScrollView>
-      {!imageOnlyAlbum ? (
-        <CreatePostPreviewModal
-          visible={postPreviewOpen}
-          onClose={() => setPostPreviewOpen(false)}
-          videoUri={exportBakedAsset?.uri ?? asset?.uri ?? null}
-          videoWidth={exportBakedAsset?.width ?? asset?.width ?? null}
-          videoHeight={exportBakedAsset?.height ?? asset?.height ?? null}
-          filter={exportBakeStatus === "ready" ? "none" : selectedFilter}
-          textOverlays={
-            exportBakeStatus === "ready" ? [] : postedPreviewOverlays.filter((overlay) => overlay.text.trim())
-          }
-          caption={caption}
-          lookingFor={lookingForCollaborators}
-          profile={profile}
-          roles={selectedRoles}
-          genres={selectedGenres}
-          trimStartRatio={exportBakeStatus === "ready" ? 0 : trimStartRatio}
-          trimEndRatio={exportBakeStatus === "ready" ? 1 : trimEndRatio}
-        />
-      ) : null}
+      </View>
+      <CreatePostPreviewModal
+        visible={postPreviewOpen}
+        onClose={() => setPostPreviewOpen(false)}
+        videoUri={imageOnlyAlbum ? null : exportBakedAsset?.uri ?? asset?.uri ?? null}
+        videoWidth={imageOnlyAlbum ? null : exportBakedAsset?.width ?? asset?.width ?? null}
+        videoHeight={imageOnlyAlbum ? null : exportBakedAsset?.height ?? asset?.height ?? null}
+        slideshowImageUris={imageOnlyAlbum ? slideshowImages.map((image) => image.uri) : []}
+        audioUri={imageOnlyAlbum ? slideshowAudio?.uri ?? null : null}
+        audioTrimStartRatio={audioTrimStartRatio}
+        audioTrimEndRatio={audioTrimEndRatio}
+        filter={imageOnlyAlbum || exportBakeStatus === "ready" ? "none" : selectedFilter}
+        textOverlays={
+          imageOnlyAlbum || exportBakeStatus === "ready"
+            ? []
+            : postedPreviewOverlays.filter((overlay) => overlay.text.trim())
+        }
+        caption={caption}
+        lookingFor={lookingForCollaborators}
+        lookingForRoles={lookingForCollaborators ? selectedLookingForRoles : []}
+        lookingForGenres={lookingForCollaborators ? selectedLookingForGenres : []}
+        profile={profile}
+        roles={selectedRoles}
+        genres={selectedGenres}
+        trimStartRatio={exportBakeStatus === "ready" ? 0 : trimStartRatio}
+        trimEndRatio={exportBakeStatus === "ready" ? 1 : trimEndRatio}
+        thumbnailFrames={imageOnlyAlbum ? [] : thumbnailFrameOptions}
+        selectedThumbnailTimeMs={selectedThumbnailTimeMs}
+        loadingThumbnailFrames={imageOnlyAlbum ? false : loadingThumbnailFrames}
+        onSelectThumbnail={imageOnlyAlbum ? undefined : (timeMs, uri) => selectThumbnailTime(timeMs, uri)}
+      />
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }

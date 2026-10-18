@@ -16,12 +16,16 @@ export function VideoThumbnailFilmstrip({
   filter = "none",
   textOverlays = [],
   initialTimeMs,
+  embedded = false,
+  frameHeight = CREATE_THUMBNAIL_FILMSTRIP_FRAME_HEIGHT,
 }: {
   frames: Array<{ timeMs: number; uri: string }>;
   onSelect: (timeMs: number, uri: string) => void;
   filter?: VideoFilter;
   textOverlays?: CreateTextOverlayItem[];
   initialTimeMs?: number;
+  embedded?: boolean;
+  frameHeight?: number;
 }) {
   const onSelectRef = useRef(onSelect);
   const lastIndexRef = useRef(0);
@@ -29,7 +33,6 @@ export function VideoThumbnailFilmstrip({
   const dragStartLeftRef = useRef(0);
   const [stripWidth, setStripWidth] = useState(0);
   const [selectorLeft, setSelectorLeft] = useState(0);
-  const frameHeight = CREATE_THUMBNAIL_FILMSTRIP_FRAME_HEIGHT;
   const frameWidth = stripWidth > 0 && frames.length > 0 ? stripWidth / frames.length : 0;
   const selectorWidth =
     frameWidth > 0 ? Math.min(frameWidth * CREATE_THUMBNAIL_SELECTOR_WIDTH_SCALE, stripWidth) : 0;
@@ -52,10 +55,6 @@ export function VideoThumbnailFilmstrip({
     const nextLeft = frameWidth > 0 ? initialIndex * frameWidth : 0;
     selectorLeftRef.current = nextLeft;
     setSelectorLeft(nextLeft);
-    const frame = frames[initialIndex];
-    if (frame) {
-      onSelectRef.current(frame.timeMs, frame.uri);
-    }
   }, [frames, frameWidth, initialIndex]);
 
   function setSelectorPosition(left: number) {
@@ -113,7 +112,11 @@ export function VideoThumbnailFilmstrip({
 
   return (
     <View
-      style={styles.createThumbnailFilmstripWrap}
+      style={[
+        styles.createThumbnailFilmstripWrap,
+        embedded && styles.createThumbnailFilmstripWrapEmbedded,
+        embedded && { height: frameHeight },
+      ]}
       onLayout={(event) => {
         const nextWidth = Math.round(event.nativeEvent.layout.width);
         if (nextWidth !== stripWidth) setStripWidth(nextWidth);

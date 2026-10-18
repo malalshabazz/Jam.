@@ -3,11 +3,14 @@ import { createVideo } from "@/lib/native-social-data";
 import type { ProfileVideo } from "@/lib/native-social-data";
 import {
   MAX_SLIDESHOW_IMAGES,
+  getSlideshowGridThumbUrl,
+  getSlideshowPreviewUrl,
   uploadSlideshowAudio,
   uploadSlideshowImages,
   type SlideshowAudioAsset,
   type SlideshowImageAsset,
 } from "@/lib/native-slideshow-storage";
+import { warmGridThumbnailUrls } from "@/lib/video-thumbnails";
 import { PENDING_VIDEO_ID_PREFIX, rememberLocalPosterForVideo, notifyPendingUploadPosted } from "@/lib/pending-video-uploads";
 
 export type PendingSlideshowUploadPhase = "uploading" | "saving" | "failed";
@@ -17,11 +20,14 @@ export type PendingSlideshowUpload = {
   userId: string;
   images: SlideshowImageAsset[];
   audio: SlideshowAudioAsset | null;
+  audioStartMs: number | null;
   audioDurationMs: number | null;
   caption: string;
   roles: string[];
   genres: string[];
   lookingFor: boolean;
+  lookingForRoles: string[];
+  lookingForGenres: string[];
   progress: number;
   phase: PendingSlideshowUploadPhase;
   errorMessage: string | null;
@@ -66,12 +72,18 @@ export function pendingSlideshowToProfileVideo(upload: PendingSlideshowUpload): 
     genres: upload.genres,
     lookingFor: upload.lookingFor,
     looking_for: upload.lookingFor,
+    lookingForRoles: upload.lookingForRoles,
+    looking_for_roles: upload.lookingForRoles,
+    lookingForGenres: upload.lookingForGenres,
+    looking_for_genres: upload.lookingForGenres,
     mediaType: "slideshow",
     media_type: "slideshow",
     imageUrls: upload.images.map((image) => image.uri),
     image_urls: upload.images.map((image) => image.uri),
     audioUrl: upload.audio?.uri ?? null,
     audio_url: upload.audio?.uri ?? null,
+    audioStartMs: upload.audioStartMs,
+    audio_start_ms: upload.audioStartMs,
     audioDurationMs: upload.audioDurationMs,
     audio_duration_ms: upload.audioDurationMs,
     created_at: new Date().toISOString(),
@@ -93,11 +105,14 @@ export function enqueuePendingSlideshowUpload(input: {
   userId: string;
   images: SlideshowImageAsset[];
   audio?: SlideshowAudioAsset | null;
+  audioStartMs?: number | null;
   audioDurationMs?: number | null;
   caption: string;
   roles: string[];
   genres: string[];
   lookingFor?: boolean;
+  lookingForRoles?: string[];
+  lookingForGenres?: string[];
 }) {
   if (input.images.length === 0 || input.images.length > MAX_SLIDESHOW_IMAGES) {
     throw new Error(`Select 1–${MAX_SLIDESHOW_IMAGES} photos.`);
@@ -108,6 +123,10 @@ export function enqueuePendingSlideshowUpload(input: {
     userId: input.userId,
     images: input.images,
     audio: input.audio ?? null,
+    audioStartMs:
+      typeof input.audioStartMs === "number" && Number.isFinite(input.audioStartMs)
+        ? Math.max(0, Math.round(input.audioStartMs))
+        : null,
     audioDurationMs:
       typeof input.audioDurationMs === "number" && Number.isFinite(input.audioDurationMs)
         ? Math.max(0, Math.round(input.audioDurationMs))
@@ -116,6 +135,8 @@ export function enqueuePendingSlideshowUpload(input: {
     roles: input.roles,
     genres: input.genres,
     lookingFor: Boolean(input.lookingFor),
+    lookingForRoles: input.lookingFor ? input.lookingForRoles ?? [] : [],
+    lookingForGenres: input.lookingFor ? input.lookingForGenres ?? [] : [],
     progress: 0,
     phase: "uploading",
     errorMessage: null,
@@ -147,9 +168,12 @@ async function runSlideshowUpload(id: string) {
       roles: upload.roles,
       genres: upload.genres,
       lookingFor: upload.lookingFor,
+      lookingForRoles: upload.lookingForRoles,
+      lookingForGenres: upload.lookingForGenres,
       mediaType: "slideshow",
       imageUrls,
       audioUrl,
+      audioStartMs: upload.audioStartMs,
       audioDurationMs: upload.audioDurationMs,
       mediaUrl: imageUrls[0] ?? null,
       cloudflareStreamId: null,
@@ -157,6 +181,13 @@ async function runSlideshowUpload(id: string) {
 
     if (upload.images[0]?.uri) {
       rememberLocalPosterForVideo(created.id, upload.images[0].uri);
+    }
+    const firstRemote = imageUrls[0];
+    if (firstRemote) {
+      await warmGridThumbnailUrls([
+        getSlideshowGridThumbUrl(firstRemote),
+        getSlideshowPreviewUrl(firstRemote),
+      ]);
     }
     notifyPendingUploadPosted({ userId: upload.userId, videoId: created.id });
 

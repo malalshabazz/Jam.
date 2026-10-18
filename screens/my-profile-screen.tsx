@@ -2,8 +2,6 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import {
   Alert,
-  Animated,
-  Easing,
   LayoutAnimation,
   Platform,
   Pressable,
@@ -64,7 +62,6 @@ import {
 } from "@/lib/profile-video-delete-cache";
 import { deleteOwnProfileVideo } from "@/lib/delete-own-profile-video";
 import type { SavedVideoController, ThemeMode } from "@/types/app";
-import { viewportWidth } from "@/theme/tokens";
 import { getActivityIndicatorColor, styles } from "@/theme/styles";
 import { FeedReportModal } from "@/components/discover/feed-report-modal";
 import { DmModal } from "@/components/chat/dm-modal";
@@ -117,20 +114,6 @@ function ProfileLibraryTabs({
           saved
         </Text>
       </Pressable>
-    </View>
-  );
-}
-
-function ProfileGridLoadingPlaceholder() {
-  // Frosted cell shells — same silhouette as the real grid, never a black block.
-  return (
-    <View style={styles.grid} accessibilityLabel="loading videos">
-      {Array.from({ length: 6 }, (_, index) => (
-        <View key={index} style={styles.gridItem}>
-          <View style={styles.gridThumbPlaceholder} />
-          <View style={styles.gridThumbLoadingBlur} />
-        </View>
-      ))}
     </View>
   );
 }
@@ -298,7 +281,6 @@ export function MyProfileScreen({
   const [videos, setVideos] = useState<ProfileVideo[]>([]);
   const [saved, setSaved] = useState<ProfileVideo[]>([]);
   const [activeTab, setActiveTab] = useState<"videos" | "saved">("videos");
-  const [tabSlide] = useState(() => new Animated.Value(0));
   const [fullscreenIndex, setFullscreenIndex] = useState<number | null>(null);
   const [ownFullscreenIndex, setOwnFullscreenIndex] = useState<number | null>(null);
   const [activeDm, setActiveDm] = useState<FeedVideo | null>(null);
@@ -456,16 +438,7 @@ export function MyProfileScreen({
 
   function changeProfileTab(nextTab: "videos" | "saved") {
     if (nextTab === activeTab) return;
-
-    const toValue = nextTab === "saved" ? -viewportWidth : 0;
-    tabSlide.stopAnimation();
     setActiveTab(nextTab);
-    Animated.timing(tabSlide, {
-      toValue,
-      duration: 260,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
   }
 
   function removeCreatorFromSaved(creatorUserId: string) {
@@ -567,6 +540,41 @@ export function MyProfileScreen({
               }
             : undefined
         }
+        renderList={(list) => (
+          <VideoGrid
+            {...list}
+            videos={activeTab === "videos" ? displayVideos : saved}
+            loading={activeTab === "videos" ? showVideosGridLoading : showSavedGridLoading}
+            showPendingUploadState={activeTab === "videos"}
+            prewarmVisibleVideos
+            allowPinning={activeTab === "videos"}
+            privateCopy={activeTab === "saved"}
+            onRetryPendingUpload={(uploadId) => {
+              if (uploadId.startsWith("ss-")) {
+                retryPendingSlideshowUpload(uploadId);
+                return;
+              }
+              retryPendingVideoUpload(uploadId);
+            }}
+            onPinPreviewChange={setPinPreviewActive}
+            ensurePinItemVisible={(rect) =>
+              profileScrollRef.current?.ensureWindowRectVisible(rect) ?? Promise.resolve()
+            }
+            onTogglePin={(video) => {
+              void toggleOwnProfileVideoPin(userId, video, setVideos, pendingPinRanksRef);
+            }}
+            onVideoPress={(video, index) => {
+              if (activeTab === "videos") {
+                if (isPendingProfileVideoId(video.id)) return;
+                const realIndex = sortedOwnVideos.findIndex((entry) => entry.id === video.id);
+                if (realIndex < 0) return;
+                openProfileVideoFullscreen(video, () => setOwnFullscreenIndex(realIndex));
+                return;
+              }
+              openProfileVideoFullscreen(video, () => setFullscreenIndex(index));
+            }}
+          />
+        )}
       >
         <TabLogoHeader
           center={
@@ -579,7 +587,7 @@ export function MyProfileScreen({
         {visibleProfile ? (
           <>
             <View style={styles.profileCentered}>
-              <ExpandableAvatar uri={visibleProfile.avatar_url} size={78} />
+              <ExpandableAvatar uri={visibleProfile.avatar_url} size={90} />
               <ProfileNameAnchor>
                 <View style={styles.centerRow}>
                   <Text style={styles.h2}>{visibleProfile.display_name ?? "your profile"}</Text>
@@ -604,64 +612,6 @@ export function MyProfileScreen({
           active={activeTab}
           onChange={(value) => changeProfileTab(value)}
         />
-        <View style={styles.profileTabSliderViewport}>
-          <Animated.View
-            style={[
-              styles.profileTabSliderTrack,
-              {
-                width: viewportWidth * 2,
-                transform: [{ translateX: tabSlide }],
-              },
-            ]}
-          >
-            <View style={styles.profileTabPane}>
-              {showVideosGridLoading ? (
-                <ProfileGridLoadingPlaceholder />
-              ) : (
-                <VideoGrid
-                  videos={displayVideos}
-                  showPendingUploadState
-                  prewarmVisibleVideos={activeTab === "videos"}
-                  allowPinning
-                  onRetryPendingUpload={(uploadId) => {
-                    if (uploadId.startsWith("ss-")) {
-                      retryPendingSlideshowUpload(uploadId);
-                      return;
-                    }
-                    retryPendingVideoUpload(uploadId);
-                  }}
-                  onPinPreviewChange={setPinPreviewActive}
-                  ensurePinItemVisible={(rect) =>
-                    profileScrollRef.current?.ensureWindowRectVisible(rect) ?? Promise.resolve()
-                  }
-                  onTogglePin={(video) => {
-                    void toggleOwnProfileVideoPin(userId, video, setVideos, pendingPinRanksRef);
-                  }}
-                  onVideoPress={(video, index) => {
-                    if (isPendingProfileVideoId(video.id)) return;
-                    const realIndex = sortedOwnVideos.findIndex((entry) => entry.id === video.id);
-                    if (realIndex < 0) return;
-                    openProfileVideoFullscreen(video, () => setOwnFullscreenIndex(realIndex));
-                  }}
-                />
-              )}
-            </View>
-            <View style={styles.profileTabPane}>
-              {showSavedGridLoading ? (
-                <ProfileGridLoadingPlaceholder />
-              ) : (
-                <VideoGrid
-                  videos={saved}
-                  privateCopy
-                  prewarmVisibleVideos={activeTab === "saved"}
-                  onVideoPress={(video, index) => {
-                    openProfileVideoFullscreen(video, () => setFullscreenIndex(index));
-                  }}
-                />
-              )}
-            </View>
-          </Animated.View>
-        </View>
       </ProfileTopScrollFade>
       {profile && (
         <ProfileVideoFullscreenModal

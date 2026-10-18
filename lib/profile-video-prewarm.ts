@@ -33,9 +33,11 @@ function configurePrewarmPlayer(player: VideoPlayer) {
   player.showNowPlayingNotification = false;
   player.audioMixingMode = "mixWithOthers";
   player.bufferOptions = {
-    waitsToMinimizeStalling: false,
+    // Match fullscreen playback. `false` here made adopted players start
+    // audio before the video decoder had frames (frozen picture, live sound).
+    waitsToMinimizeStalling: true,
     preferredForwardBufferDuration: Platform.OS === "android" ? 15 : 0,
-    minBufferForPlayback: 1,
+    minBufferForPlayback: 2,
     prioritizeTimeOverSizeThreshold: false,
   };
 }

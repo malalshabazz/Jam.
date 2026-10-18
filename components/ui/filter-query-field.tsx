@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import { Animated, Easing, Pressable, Text, TextInput, View } from "react-native";
-import { darkStyles, styles } from "@/theme/styles";
+import { styles } from "@/theme/styles";
 
 function FilterResetButton({ onReset }: { onReset: () => void }) {
   const spin = useRef(new Animated.Value(0)).current;
@@ -64,18 +64,22 @@ export function FilterQueryField({
   onFocus?: () => void;
 }) {
   return (
-    <View style={styles.filterQueryRow}>
-      <TextInput
-        value={value}
-        onChangeText={onChangeText}
-        onFocus={onFocus}
-        placeholder={placeholder}
-        placeholderTextColor="#71717a"
-        autoCorrect={false}
-        autoCapitalize="none"
-        style={[darkStyles.input, styles.filterQueryInput]}
-      />
-      <FilterResetButton onReset={onReset} />
+    <View style={styles.filterQueryField}>
+      <View style={styles.filterQueryRow}>
+        <TextInput
+          value={value}
+          onChangeText={onChangeText}
+          onFocus={onFocus}
+          placeholder={placeholder}
+          placeholderTextColor="#71717a"
+          autoCorrect={false}
+          autoCapitalize="none"
+          style={styles.filterQueryInput}
+          underlineColorAndroid="transparent"
+        />
+        <FilterResetButton onReset={onReset} />
+      </View>
+      <View style={styles.createCaptionHairline} />
     </View>
   );
 }

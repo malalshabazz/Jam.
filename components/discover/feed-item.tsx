@@ -12,9 +12,16 @@ import {
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { type VideoContentFit } from "expo-video";
-import { contentFitForVideoSize } from "@/components/video/aspect-cache";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import {
+  contentFitForVideoSize,
+  getVideoDisplaySize,
+} from "@/components/video/aspect-cache";
+import { CachedCoverImage } from "@/components/media/cached-grid-image";
+import { MEDIA_LETTERBOX_BLACK } from "@/components/media/letterbox-media-shell";
 import {
   JamVideoView,
+  PROFILE_VIDEO_OPEN_GREY,
   type JamVideoPlaybackStatus,
 } from "@/components/video/jam-video-view";
 import { JamSlideshowView } from "@/components/video/jam-slideshow-view";
@@ -49,7 +56,7 @@ import { ProBadge } from "@/components/ui/badges";
 import { BookmarkIcon } from "@/components/icons/bookmark-icon";
 import { FeedChromeLockIcon } from "@/components/icons/feed-chrome-lock-icon";
 import { JamJarIcon } from "@/components/icons/jam-jar-icon";
-import { LookingForIcon } from "@/components/icons/looking-for-icon";
+import { FeedLookingForRow } from "@/components/discover/feed-looking-for-row";
 import { FeedPausedPlayIcon } from "@/components/icons/feed-paused-play-icon";
 import { triggerHoldHaptic } from "@/lib/hold-haptic";
 
@@ -59,6 +66,7 @@ export function FeedItem({
   navBarHeight,
   isActive,
   paused = false,
+  holdPlayback = false,
   suspendVideo = false,
   resumePositionSec = null,
   onPausedChange,
@@ -82,6 +90,7 @@ export function FeedItem({
   onNotInterested,
   onBlock,
   onReport,
+  onJamButtonLayout,
 }: {
   item: FeedVideo;
   height: number;
@@ -89,6 +98,8 @@ export function FeedItem({
   isActive: boolean;
   /** Controlled pause — owned by Discover so it survives tab switches. */
   paused?: boolean;
+  /** Pause under a profile overlay or while another tab is focused, without the tap-pause icon. */
+  holdPlayback?: boolean;
   /** Filter/near-me reload bridge: poster only, no live player (avoids freeze-frames). */
   suspendVideo?: boolean;
   /** One-shot seek when restoring this clip from a filter session cache. */
@@ -117,7 +128,9 @@ export function FeedItem({
   onNotInterested: () => void;
   onBlock: () => void;
   onReport: () => void;
+  onJamButtonLayout?: (layout: { x: number; y: number; width: number; height: number }) => void;
 }) {
+  const insets = useSafeAreaInsets();
   const source = getVideoSource(item);
   const isSlideshow = item.mediaType === "slideshow" && item.imageUrls.length > 0;
   const posterUri = isSlideshow
@@ -137,6 +150,9 @@ export function FeedItem({
   const onPlaybackProgressRef = useRef(onPlaybackProgress);
   onPlaybackProgressRef.current = onPlaybackProgress;
   const watchedReportedRef = useRef(false);
+  const jamButtonMeasureRef = useRef<View>(null);
+  const onJamButtonLayoutRef = useRef(onJamButtonLayout);
+  onJamButtonLayoutRef.current = onJamButtonLayout;
   const chromeHoldingRef = useRef(false);
   const speedHoldingRef = useRef(false);
   const chromeSuppressPressRef = useRef(false);
@@ -159,11 +175,17 @@ export function FeedItem({
   const [saved, setSaved] = useState(item.savedByMe);
   const [bufferingState, setBufferingState] = useState(() => ({
     source,
-    waitingForFirstPlay: Boolean(source),
+    waitingForFirstPlay: isSlideshow ? false : Boolean(source),
   }));
   const [showWaitingSpinner, setShowWaitingSpinner] = useState(false);
+  const [playbackLive, setPlaybackLive] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
-  const [mediaContentFit, setMediaContentFit] = useState<VideoContentFit>("cover");
+  const displaySize = getVideoDisplaySize(item);
+  const [mediaContentFit, setMediaContentFit] = useState<VideoContentFit>(() =>
+    contentFitForVideoSize(displaySize?.width, displaySize?.height),
+  );
+  const mediaSurfaceColor =
+    mediaContentFit === "contain" ? MEDIA_LETTERBOX_BLACK : PROFILE_VIDEO_OPEN_GREY;
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [saveScale] = useState(() => new Animated.Value(1));
   const [jamShake] = useState(() => new Animated.Value(0));
@@ -209,35 +231,54 @@ export function FeedItem({
   }, [waitingCoverUri]);
 
   useEffect(() => {
+    if (posterUri) void Image.prefetch(posterUri);
+  }, [posterUri]);
+
+  useEffect(() => {
     const frame = requestAnimationFrame(() => setSaved(item.savedByMe));
     return () => cancelAnimationFrame(frame);
   }, [item.savedByMe]);
 
   useEffect(() => {
-    setBufferingState({ source, waitingForFirstPlay: Boolean(source) });
+    setBufferingState({
+      source,
+      waitingForFirstPlay: isSlideshow ? false : Boolean(source),
+    });
     setShowWaitingSpinner(false);
+    setPlaybackLive(false);
     setPosterFailed(false);
-    setMediaContentFit("cover");
-  }, [source]);
+  }, [isSlideshow, source]);
 
   useEffect(() => {
-    if (!isActive || paused || !source || watchedReportedRef.current) return;
+    if (isActive || !source || isSlideshow) return;
+    // Swiped off: show the start frame immediately so a half-swipe back isn't mid-clip.
+    setBufferingState({ source, waitingForFirstPlay: true });
+    setShowWaitingSpinner(false);
+    setPlaybackLive(false);
+  }, [isActive, isSlideshow, source]);
+
+  useEffect(() => {
+    if (!isActive || paused || holdPlayback || !source || watchedReportedRef.current) return;
     const timer = setTimeout(() => {
       if (watchedReportedRef.current) return;
       watchedReportedRef.current = true;
       onWatchedRef.current?.();
     }, FEED_SEEN_DWELL_MS);
     return () => clearTimeout(timer);
-  }, [isActive, paused, source]);
+  }, [holdPlayback, isActive, paused, source]);
 
   useEffect(() => {
     const shouldWait =
       Boolean(source) &&
+      !isSlideshow &&
       isActive &&
       !paused &&
+      !holdPlayback &&
       !suspendVideo &&
       bufferingState.source === source &&
-      bufferingState.waitingForFirstPlay;
+      bufferingState.waitingForFirstPlay &&
+      !playbackLive &&
+      !holdPlayback;
 
     if (!shouldWait) {
       setShowWaitingSpinner(false);
@@ -253,8 +294,10 @@ export function FeedItem({
   }, [
     bufferingState.source,
     bufferingState.waitingForFirstPlay,
+    holdPlayback,
     isActive,
     paused,
+    playbackLive,
     source,
     suspendVideo,
   ]);
@@ -568,8 +611,25 @@ export function FeedItem({
     action();
   }
 
-  const showStaticCover = !isActive || bufferingState.waitingForFirstPlay;
+  const showStaticCover =
+    !isActive || (bufferingState.waitingForFirstPlay && !playbackLive && !holdPlayback);
   const staticCoverUri = waitingCoverUri ?? posterUri;
+
+  const prevShowStaticCoverRef = useRef(showStaticCover);
+  useEffect(() => {
+    if (prevShowStaticCoverRef.current === showStaticCover) return;
+    prevShowStaticCoverRef.current = showStaticCover;
+    if (__DEV__) {
+      console.log("[feed-hold]", {
+        phase: "showStaticCover",
+        id: item.id,
+        showStaticCover,
+        holdPlayback,
+        isActive,
+        paused,
+      });
+    }
+  }, [holdPlayback, isActive, item.id, paused, showStaticCover]);
 
   // Match create/camera: cover the feed viewport above the tab bar, not the full screen.
   const feedVideoFrameStyle = [
@@ -595,29 +655,45 @@ export function FeedItem({
         <View style={feedVideoFrameStyle}>
           {suspendVideo ? (
             posterUri ? (
-              <Image
-                source={{ uri: posterUri }}
-                style={StyleSheet.absoluteFill}
-                resizeMode="cover"
-              />
+              <View
+                style={[
+                  StyleSheet.absoluteFill,
+                  { top: insets.top, backgroundColor: "#000", overflow: "hidden" },
+                ]}
+              >
+                <Image
+                  source={{ uri: posterUri }}
+                  style={StyleSheet.absoluteFill}
+                  resizeMode="cover"
+                />
+              </View>
             ) : (
-              <View style={styles.videoPlaceholder}>
-                <Avatar size={90} />
-                <Text style={styles.h2}>{item.creatorName}</Text>
+              <View style={[StyleSheet.absoluteFill, { top: insets.top }]}>
+                <View style={styles.videoPlaceholder}>
+                  <Avatar size={90} />
+                  <Text style={styles.h2}>{item.creatorName}</Text>
+                </View>
               </View>
             )
           ) : (
             <JamSlideshowView
               imageUrls={item.imageUrls}
               audioUrl={item.audioUrl}
-              shouldPlay={isActive && !paused}
+              audioStartMs={item.audioStartMs}
+              audioDurationMs={item.audioDurationMs}
+              shouldPlay={isActive && !paused && !holdPlayback}
               isActive={isActive}
               style={StyleSheet.absoluteFill}
               onFirstImageLoad={revealFirstFrame}
             />
           )}
+          <VideoPresentationOverlays
+            filter={item.videoFilter}
+            textOverlays={item.textOverlays}
+            contentTopInset={insets.top}
+          />
           {isActive && paused && !suspendVideo ? (
-            <View pointerEvents="none" style={styles.feedPausedPlayOverlay}>
+            <View pointerEvents="none" style={[styles.feedPausedPlayOverlay, { top: insets.top }]}>
               <FeedPausedPlayIcon />
             </View>
           ) : null}
@@ -626,11 +702,12 @@ export function FeedItem({
         <View style={feedVideoFrameStyle}>
           {suspendVideo ? (
             posterUri ? (
-              <Image
-                source={{ uri: posterUri }}
-                style={StyleSheet.absoluteFill}
-                resizeMode="cover"
-              />
+              <View style={[StyleSheet.absoluteFill, { backgroundColor: mediaSurfaceColor }]}>
+                <CachedCoverImage
+                  uri={posterUri}
+                  contentFit={mediaContentFit === "contain" ? "contain" : "cover"}
+                />
+              </View>
             ) : (
               <View style={styles.videoPlaceholder}>
                 <Avatar size={90} />
@@ -643,19 +720,23 @@ export function FeedItem({
                 key={item.id}
                 source={source}
                 style={StyleSheet.absoluteFill}
-                shouldPlay={isActive && !paused}
+                contentFit={mediaContentFit}
+                knownWidth={displaySize?.width ?? null}
+                knownHeight={displaySize?.height ?? null}
+                shouldPlay={isActive && !paused && !holdPlayback}
                 isLooping
-                // Keep inactive cells silent even if a dying player briefly resumes
-                // during filter-driven FlatList remounts.
-                isMuted={!isActive || paused}
-                volume={isActive && !paused ? 1 : 0}
+                isMuted={!isActive || paused || holdPlayback}
+                volume={isActive && !paused && !holdPlayback ? 1 : 0}
                 playbackRate={playbackRate}
-                // Only cover with a thumb when scrolling away — tap-pause keeps the live frame.
-                showFreezeFrameOnPause={!isActive}
+                whenPaused={holdPlayback ? "hold" : isActive ? "pause" : "restart"}
+                posterUri={waitingCoverUri ?? posterUri}
+                surfaceColor={mediaSurfaceColor}
                 resumePositionSec={isActive ? resumePositionSec : null}
                 onResumePositionApplied={onResumePositionApplied}
                 onPlaybackStatusUpdate={(status: JamVideoPlaybackStatus) => {
                   if (!isActive) return;
+                  const live = status.status === "readyToPlay" && status.isPlaying;
+                  setPlaybackLive((current) => (current === live ? current : live));
                   onPlaybackProgressRef.current?.(status.positionMillis / 1000);
                 }}
                 onFirstFrameRender={revealFirstFrame}
@@ -664,25 +745,28 @@ export function FeedItem({
               {showStaticCover ? (
                 <View
                   pointerEvents="none"
-                  style={[StyleSheet.absoluteFill, { backgroundColor: "#09090b" }]}
+                  style={[StyleSheet.absoluteFill, { backgroundColor: mediaSurfaceColor }]}
                 >
-                  {staticCoverUri && !posterFailed ? (
-                    <Image
-                      source={{ uri: staticCoverUri }}
-                      style={StyleSheet.absoluteFill}
-                      resizeMode={mediaContentFit === "contain" ? "contain" : "cover"}
-                      onLoad={(event) => {
-                        const { width, height } = event.nativeEvent.source;
-                        setMediaContentFit(contentFitForVideoSize(width, height));
-                      }}
+                  {posterUri && !posterFailed ? (
+                    <CachedCoverImage
+                      uri={posterUri}
+                      contentFit={mediaContentFit === "contain" ? "contain" : "cover"}
                       onError={() => setPosterFailed(true)}
                     />
-                  ) : (
+                  ) : null}
+                  {staticCoverUri && staticCoverUri !== posterUri && !posterFailed ? (
+                    <CachedCoverImage
+                      uri={staticCoverUri}
+                      contentFit={mediaContentFit === "contain" ? "contain" : "cover"}
+                      onError={() => setPosterFailed(true)}
+                    />
+                  ) : null}
+                  {(!posterUri && !staticCoverUri) || posterFailed ? (
                     <View style={styles.videoPlaceholder}>
                       <Avatar uri={item.avatarUrl} size={90} />
                       <Text style={styles.h2}>{item.creatorName}</Text>
                     </View>
-                  )}
+                  ) : null}
                 </View>
               ) : null}
             </>
@@ -702,7 +786,7 @@ export function FeedItem({
           </View>
         </View>
       )}
-      {source && !suspendVideo && showWaitingSpinner && (
+      {source && !isSlideshow && !suspendVideo && showWaitingSpinner && (
         <View pointerEvents="none" style={[styles.feedBufferingIndicator, { bottom: navBarHeight }]}>
           <ActivityIndicator color="#fff" />
         </View>
@@ -810,14 +894,15 @@ export function FeedItem({
               <Text style={styles.feedRole}>{item.role} - {item.location}</Text>
             </View>
           </View>
-          {item.lookingFor || caption ? (
+          <FeedLookingForRow
+            lookingFor={item.lookingFor}
+            roles={item.lookingForRoles}
+            genres={item.lookingForGenres}
+            activeFilterTags={activeFilterTags}
+          />
+          {caption ? (
             <View style={styles.feedCaptionRow}>
-              {item.lookingFor ? (
-                <View style={styles.feedLookingForIcon} accessibilityLabel="looking for collaborators">
-                  <LookingForIcon active size={19} shadow />
-                </View>
-              ) : null}
-              {caption ? <Text style={[styles.caption, styles.feedCaptionText]}>{caption}</Text> : null}
+              <Text style={[styles.caption, styles.feedCaptionText]}>{caption}</Text>
             </View>
           ) : null}
           {visibleTags.length > 0 ? (
@@ -837,6 +922,16 @@ export function FeedItem({
           ) : null}
         </View>
         <View style={[styles.actions, { bottom: actionsBottom }]}>
+        <View
+          ref={jamButtonMeasureRef}
+          collapsable={false}
+          onLayout={() => {
+            if (!isActive || !onJamButtonLayoutRef.current) return;
+            jamButtonMeasureRef.current?.measureInWindow((x, y, width, height) => {
+              if (width > 0 && height > 0) onJamButtonLayoutRef.current?.({ x, y, width, height });
+            });
+          }}
+        >
         <Pressable
           onPress={pressJam}
           style={styles.actionButton}
@@ -871,6 +966,7 @@ export function FeedItem({
             <JamJarIcon filled={jamAlreadySent} />
           </Animated.View>
         </Pressable>
+        </View>
         <Pressable
           onPress={() => void pressSave()}
           style={styles.actionButton}

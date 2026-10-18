@@ -28,6 +28,9 @@ import { OwnVideoShareModal } from "@/components/profile/own-video-share-modal";
 import { ensureVideoAspectCached } from "@/components/video/aspect-cache";
 import { getNavBarHeight } from "@/lib/nav-bar";
 import type { FeedVideo, ProfileVideo } from "@/lib/native-social-data";
+import { prewarmProfileVideoSource } from "@/lib/profile-video-prewarm";
+import { isSlideshowPost, prewarmSlideshowPost } from "@/lib/slideshow-prewarm";
+import { getGridVideoSource } from "@/lib/video-display";
 import type { ProBadgeKind } from "@/lib/pro-entitlements";
 import { isPendingSentJam, profileVideoToFeedVideo } from "@/lib/profile-mappers";
 import { styles } from "@/theme/styles";
@@ -164,7 +167,14 @@ export function ProfileVideoFullscreenModal({
     if (!visible) return;
     for (const offset of [-1, 0, 1, 2]) {
       const entry = activeVideos[index + offset] ?? activeVideos[safeInitialIndex + offset];
-      if (entry) void ensureVideoAspectCached(entry);
+      if (entry) {
+        void ensureVideoAspectCached(entry);
+        if (isSlideshowPost(entry)) {
+          prewarmSlideshowPost(entry);
+        } else {
+          prewarmProfileVideoSource(getGridVideoSource(entry));
+        }
+      }
     }
   }, [activeVideos, index, safeInitialIndex, visible]);
 

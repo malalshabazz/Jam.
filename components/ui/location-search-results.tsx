@@ -13,6 +13,7 @@ export function LocationSearchResults({
   listStyle,
   rowStyle,
   textStyle,
+  flush = false,
 }: {
   query: string;
   results: LocationPlace[];
@@ -21,6 +22,7 @@ export function LocationSearchResults({
   listStyle?: StyleProp<ViewStyle>;
   rowStyle?: StyleProp<ViewStyle>;
   textStyle?: StyleProp<TextStyle>;
+  flush?: boolean;
 }) {
   const trimmed = query.trim();
   if (trimmed.length < LOCATION_SEARCH_MIN_LENGTH && status === "idle" && results.length === 0) {
@@ -32,12 +34,16 @@ export function LocationSearchResults({
       <ScrollView
         nestedScrollEnabled
         keyboardShouldPersistTaps="handled"
-        style={[styles.locationFilterList, { maxHeight: LOCATION_PICKER_VISIBLE_HEIGHT }, listStyle]}
+        style={[
+          flush ? styles.locationFilterListFlush : styles.locationFilterList,
+          { maxHeight: LOCATION_PICKER_VISIBLE_HEIGHT },
+          listStyle,
+        ]}
       >
         {results.map((place) => (
           <Pressable
             key={`${place.granularity}:${place.country_code}:${place.region}:${place.city}:${place.label}`}
-            style={[styles.locationOptionRow, rowStyle]}
+            style={[flush ? styles.locationOptionRowFlush : styles.locationOptionRow, rowStyle]}
             onPress={() => onPick(place)}
           >
             <Text style={[styles.locationCountryText, textStyle]}>{place.label}</Text>

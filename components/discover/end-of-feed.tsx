@@ -1,5 +1,5 @@
 import { Pressable, Text, View } from "react-native";
-import { styles } from "@/theme/styles";
+import { darkStyles, styles } from "@/theme/styles";
 
 export function EndOfFeedState({
   filtersActive,
@@ -20,8 +20,8 @@ export function EndOfFeedState({
         {getEndOfFeedCopy({ filtersActive, nearMeActive, seenEveryone })}
       </Text>
       {nearMeActive ? null : (
-        <Pressable style={styles.createNav} onPress={onCreate} accessibilityLabel="upload">
-          <Text style={styles.createNavText}>+</Text>
+        <Pressable style={darkStyles.createNav} onPress={onCreate} accessibilityLabel="upload">
+          <Text style={darkStyles.createNavText}>+</Text>
         </Pressable>
       )}
     </View>
